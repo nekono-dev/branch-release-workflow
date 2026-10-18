@@ -23,7 +23,7 @@ brw self-update
 
 - スキルのディレクトリが git の作業ツリーの最上位なら `git pull --ff-only` で更新する。出力の 1 行を利用者に伝える
 - 「更新しました」と出たときは、`SKILL.md` を読み直してから作業する
-- 「更新できません」と出たとき（未コミットの変更・履歴の分岐・ネットワーク不通・単なるコピー）は、強制せず（`reset`・`stash`・`--force` を使わない）、理由を利用者に伝えて現在の版のまま作業を続ける。単なるコピーのときは、`git clone git@github.com.nekono:nekono-dev/branch-release-workflow.git .claude/skills/branch-release-workflow` での導入を勧める
+- 「更新できません」と出たとき（未コミットの変更・履歴の分岐・ネットワーク不通・git の作業ツリーでないコピー）は、強制せず（`reset`・`stash`・`--force` を使わない）、理由を利用者に伝えて現在の版のまま作業を続ける。プロジェクトにコミットして同梱したコピー（クラウドセッションなど）は更新できないのが通常なので、1 行伝えるだけでよい
 - 同じ会話の中では繰り返さない。利用者が更新しないよう指示したときは行わない
 - フックの判定（`hook`）は更新の対象外で、毎回その時点の版のスクリプトが動く
 
@@ -88,10 +88,10 @@ brw cleanup <ブランチ> [--execute] # provider 固有の後始末（既定は
 
 1. 宣言ファイルを作る（値はユーザーに確認する。推測で埋めない）
 2. **PreToolUse フック**を、リポジトリの `.claude/settings.json` に入れる。内容は `templates/settings.hook.json`。settings.json の変更なので、**設定内容をユーザーに示して承認を得てから**入れる
-3. スキルを `.claude/skills/branch-release-workflow` に置く（フックのパスがここを指す）
+3. スキルを `.claude/skills/branch-release-workflow` に置く（フックのパスがここを指す）。プロジェクトへコミットして同梱すると、クラウドセッションでも追加の準備なしに動く
 4. `node tests/selftest.mjs` で判定ロジックを確認できる
 
-導入は `git clone` で行い、更新は上の `self-update` に任せる。コピーで置くと更新できない。
+手元では `git clone` で置いて `self-update` で更新し、更新分をプロジェクトへコミットする運用ができる。同梱コピーだけの環境（クラウドセッション）では更新されず、コミットされた版で動く。`brw` はスキルのディレクトリ内のスクリプトで、PATH やグローバルには何も導入しない。
 
 フックは `git commit` / `git push` の前に判定する。保護ブランチ・宣言外ブランチは deny、宣言ファイルが無い・不正・ブランチを特定できない・`--all`/`--mirror` は ask。`git checkout -b` と `git worktree add` はフックの対象外（このスキルの手順で守る）。
 
