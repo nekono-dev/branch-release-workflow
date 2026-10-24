@@ -2,6 +2,8 @@
 // branch-release-workflow の CLI。サブコマンド:
 //   hook                       PreToolUse フック（標準入力の JSON を判定して deny/ask を返す）
 //   create <名前> [--base b] [--branch-only]   作業ブランチ（と worktree）を命名規則に従って作成
+//   finish [ブランチ]          push 済みの作業ブランチの worktree とローカルブランチを片付ける
+//   resume <ブランチ>          リモートの作業ブランチを取得し直し、worktree を作り直して作業を再開する
 //   url [ブランチ]             プレビューURLを表示
 //   check                      宣言・workflow・provider 設定の整合検査
 //   gen-workflow [--write]     provider の preview workflow 雛形を出力（--write で .github/workflows/preview.yaml へ）
@@ -12,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CONFIG_REL, checkName, currentBranch, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
-  scanWorkflows, shortRef, undeclaredCiBranches, aliasOf,
+  scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
 } from "./lib.mjs";
 import { getProvider, previewUrl } from "../providers/index.mjs";
 import { applyWorkersDev } from "../providers/cloudflare-previews.mjs";
@@ -175,6 +177,45 @@ function create(args) {
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
 }
 
+// push 済みの作業ブランチの worktree とローカルブランチを消す。未 commit・未 push の変更があれば何も消さない。
+// 自分の worktree の中からも実行できるよう、git の操作は本体の作業ツリーで行う
+function finish(args) {
+  const cwd = process.cwd();
+  repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
+  const [main, ...others] = worktrees(cwd);
+  const config = need(main.path);
+  const branch = args.find((a) => !a.startsWith("--")) ?? currentBranch(cwd) ?? fail("使い方: finish [ブランチ]", 2);
+  if (!matchesAny(config.workBranches, branch) || matchesAny(config.protectedBranches ?? [], branch)) fail(`'${branch}' は作業ブランチではないため片付けません。`);
+  const wt = others.find((w) => w.branch === branch);
+  if (wt && git(wt.path, "status", "--porcelain") !== "") fail(`worktree ${wt.path} に commit していない変更があります。commit して push してから実行してください。`);
+  if (git(main.path, "fetch", "origin", branch, "--quiet") === null) fail(`origin/${branch} を取得できません。push してから実行してください。`);
+  const unpushed = git(main.path, "rev-list", "--count", `origin/${branch}..refs/heads/${branch}`);
+  if (unpushed !== "0") fail(`${branch} に push していない commit があります（${unpushed ?? "不明"} 件）。push してから実行してください。`);
+  if (main.branch === branch) fail(`本体の作業ツリーが ${branch} を使っています。分岐元などへ切り替えてから実行してください。`);
+  if (wt) execFileSync("git", ["worktree", "remove", wt.path], { cwd: main.path, stdio: "inherit" });
+  execFileSync("git", ["branch", "-D", branch], { cwd: main.path, stdio: "inherit" });
+  console.log(`片付けました: ${branch}${wt ? `（worktree: ${wt.path}）` : ""}`);
+  console.log(`作業を続けるときは \`brw resume ${branch}\`、新しい作業は \`brw create <名前>\` で、リモートから取得し直して作り直してください。`);
+}
+
+// リモートの作業ブランチを取得し直し、追跡するローカルブランチと worktree を作る
+function resume(args) {
+  const cwd = process.cwd();
+  repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
+  const [main] = worktrees(cwd);
+  const config = need(main.path);
+  const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: resume <ブランチ>", 2);
+  if (!matchesAny(config.workBranches, branch) || matchesAny(config.protectedBranches ?? [], branch)) fail(`'${branch}' は作業ブランチではありません。`);
+  if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) !== null) fail(`ローカルに ${branch} が残っています。\`brw finish ${branch}\` で片付けてから実行してください。`);
+  if (git(main.path, "fetch", "origin", branch, "--quiet") === null) fail(`origin/${branch} を取得できません。`);
+  const wt = join(main.path, ".claude/worktrees", aliasOf(branch));
+  mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`], { cwd: main.path, stdio: "inherit" });
+  console.log(`リモートから取得し直して worktree を作りました: ${branch}\n  worktree: ${wt}`);
+  const url = previewUrl(config, branch);
+  if (url) console.log(`プレビューURL（push 後）: ${url}`);
+}
+
 function url(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
@@ -240,7 +281,7 @@ function wranglerConfig(args) {
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  const cmds = { hook, create, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };
+  const cmds = { hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);
 }

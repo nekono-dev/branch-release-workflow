@@ -2,7 +2,7 @@
 // 判定ロジックと各サブコマンドの自己テスト。一時 git リポジトリで実行する。 使い方: node tests/selftest.mjs
 // テスト名の「<spec名>/AC-n」は、仕様書の受け入れ条件との対応を表す。
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,6 +68,32 @@ eq("branch-guard/AC-5 命名規則違反は終了コード 1", bad.status, 1);
 eq("branch-guard/AC-5 命名規則違反はブランチを作らない", spawnSync("git", ["branch", "--list", "dev/*"], { cwd: created, encoding: "utf8" }).stdout.trim(), "");
 eq("branch-guard/AC-5 規則に合う名前は作成される", run(created, "create", "good-name", "--branch-only").status, 0);
 
+// push 後の片付けと再開。一時の bare リポジトリを origin にする
+const remote = mkdtempSync(join(tmpdir(), "brw-remote-"));
+g(remote, "init", "-q", "--bare");
+const fin = mkRepo("develop", cfg);
+g(fin, "remote", "add", "origin", remote);
+g(fin, "push", "-q", "origin", "develop");
+run(fin, "create", "fin-work");
+const finWt = join(fin, ".claude/worktrees/dev-fin-work");
+g(finWt, "commit", "-q", "--allow-empty", "-m", "w");
+const hasBranch = (b) => spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${b}`], { cwd: fin }).status === 0;
+eq("branch-guard/AC-8 push していない commit があれば片付けず終了コード 1", run(finWt, "finish").status, 1);
+eq("branch-guard/AC-8 片付けなかった worktree は残る", existsSync(finWt), true);
+g(finWt, "push", "-q", "origin", "dev/fin-work");
+writeFileSync(join(finWt, "dirty.txt"), "x");
+eq("branch-guard/AC-8 commit していない変更があれば片付けない", run(finWt, "finish").status, 1);
+rmSync(join(finWt, "dirty.txt"));
+eq("branch-guard/AC-8 push 済みなら worktree の中から片付けられる", run(finWt, "finish").status, 0);
+eq("branch-guard/AC-8 worktree とローカルブランチが消える", [existsSync(finWt), hasBranch("dev/fin-work")], [false, false]);
+eq("branch-guard/AC-8 作業ブランチでなければ片付けない", run(fin, "finish", "develop").status, 1);
+eq("branch-guard/AC-9 リモートのブランチから worktree を作り直せる", run(fin, "resume", "dev/fin-work").status, 0);
+eq("branch-guard/AC-9 作り直した worktree はリモートの commit を持ち、追跡先がリモートになる", [
+  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
+  spawnSync("git", ["rev-parse", "--abbrev-ref", "@{u}"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
+], ["w", "origin/dev/fin-work"]);
+eq("branch-guard/AC-9 ローカルに残っていれば作り直さない", run(fin, "resume", "dev/fin-work").status, 1);
+
 const t0 = Date.now();
 for (let i = 0; i < 16; i++) judgeCommand("git commit -m x", onDev);
 eq("branch-guard/AC-6 判定 16 件が 10 秒以内", Date.now() - t0 <= 10_000, true);
@@ -102,6 +128,10 @@ mkdirSync(join(withWf, ".github/workflows"), { recursive: true });
 writeFileSync(join(withWf, ".github/workflows/preview.yaml"), "name: keep\n");
 eq("preview/AC-5 既存の workflow は上書きせず終了コード 1", run(withWf, "gen-workflow", "--write").status, 1);
 eq("preview/AC-5 既存の workflow の内容は変わらない", readFileSync(join(withWf, ".github/workflows/preview.yaml"), "utf8"), "name: keep\n");
+const stripCfg = { ...cfg, preview: { ...cfg.preview, provider: "cloudflare-previews", aliasStripPrefix: "dev/" } };
+eq("preview/AC-9 接頭辞を除いた alias のURLを算出", previewUrl(stripCfg, "dev/foo-bar"), "https://foo-bar.example.com");
+eq("preview/AC-9 後始末の名前も接頭辞を除く", getProvider(stripCfg).cleanup(stripCfg, "dev/foo-bar").args.at(-1), "foo-bar");
+eq("preview/AC-9 接頭辞が文字列でなければ不正", validateConfig({ ...cfg, preview: { ...cfg.preview, aliasStripPrefix: 1 } }).length, 1);
 const cl = run(withWf, "cleanup", "dev/foo");
 eq("preview/AC-6 実行指定なしはコマンドを表示するだけ", cl.status === 0 && cl.stdout.includes("wrangler preview delete --name dev-foo") && cl.stdout.includes("表示のみ"), true);
 

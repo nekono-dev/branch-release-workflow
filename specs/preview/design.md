@@ -42,11 +42,12 @@ sequenceDiagram
 
 ## 3. 設計項目
 
-### D-1: プレビューURLの算出 (FR-1)
+### D-1: プレビューURLの算出 (FR-1, FR-9)
 
 | 入力                 | 出力                   |
 | -------------------- | ---------------------- |
 | ブランチ dev/foo-bar | alias は dev-foo-bar   |
+| 接頭辞 dev/ の指定あり | alias は foo-bar       |
 | URL 雛形の {alias}   | alias で置き換える     |
 | URL 雛形の {branch}  | ブランチ名で置き換える |
 
