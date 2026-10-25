@@ -1,0 +1,12 @@
+{
+  "name": "nekono-dev",
+  "owner": { "name": "nekono-dev" },
+  "description": "nekono-dev の Claude Code プラグイン",
+  "plugins": [
+    {
+      "name": "branch-release-workflow",
+      "source": "./",
+      "description": "作業ブランチ運用の強制（フック）と、プレビュー/本番の CI/CD の整備・案内"
+    }
+  ]
+}

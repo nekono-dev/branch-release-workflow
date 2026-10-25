@@ -6,8 +6,9 @@
 | ------------------------------- | ------------------------------------ |
 | `scripts/lib.mjs`               | 宣言の読み込み・検証とブランチの判定 |
 | `scripts/brw.mjs`               | フック・作成・片付け・再開のサブコマンド |
-| `templates/config.example.json` | 宣言ファイルの記入例                 |
-| `templates/settings.hook.json`  | フックを有効にする設定の案           |
+| `assets/config.example.json`    | 宣言ファイルの記入例                 |
+| `hooks/hooks.json`              | プラグインの PreToolUse フック定義   |
+| `.claude-plugin/plugin.json`    | プラグインの定義                     |
 
 ## 2. 関係図・ワークフロー
 
@@ -19,7 +20,7 @@ flowchart LR
   brw --> ext_git["git"]
   lib --> ext_git
   lib --> example["config.example"]
-  brw --> settings_hook["settings.hook"]
+  hooks_json["hooks.json"] --> brw
 ```
 
 フックが git コマンドを判定し、結果を返すまでの流れを示す。
@@ -31,7 +32,10 @@ sequenceDiagram
   participant lib
   ext_claude->>brw: Bash コマンド
   brw->>lib: 宣言の読み込み
-  alt 宣言が不正または無い
+  alt 宣言が無い
+    lib-->>brw: 宣言なし
+    brw-->>ext_claude: 判定しない
+  else 宣言が不正
     lib-->>brw: 読み込み失敗
     brw-->>ext_claude: ask
   else 宣言が有効
@@ -65,7 +69,7 @@ sequenceDiagram
   "protectedBranches に一致": "deny",
   "workBranches に一致": "allow",
   "どちらにも一致しない": "deny",
-  "宣言ファイルがない": "ask",
+  "宣言ファイルがない": "判定しない（allow）",
   "宣言が不正": "ask",
   "ブランチを特定できない": "ask"
 }

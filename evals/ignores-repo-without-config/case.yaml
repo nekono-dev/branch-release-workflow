@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: ignores-repo-without-config
+expected_outcome: |
+  宣言ファイルの無いリポジトリなので作業ブランチ運用の対象外。作業ブランチや宣言ファイルを作らず、利用者に運用の導入を問いただすこともなく、README.md の誤字（確認でます→確認できます）を直して、現在のブランチに commit する。
+context:
+  scaffold_script: place-files.sh

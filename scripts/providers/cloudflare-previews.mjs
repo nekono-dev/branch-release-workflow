@@ -2,7 +2,7 @@
 // 詳細は references/cloudflare-previews.md を参照。
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { previewAliasOf } from "../scripts/lib.mjs";
+import { previewAliasOf } from "../lib.mjs";
 
 const MIN_WRANGLER = [4, 135, 0];
 

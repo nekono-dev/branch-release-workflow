@@ -16,8 +16,8 @@ import {
   CONFIG_REL, checkName, currentBranch, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
 } from "./lib.mjs";
-import { getProvider, previewUrl } from "../providers/index.mjs";
-import { applyWorkersDev } from "../providers/cloudflare-previews.mjs";
+import { getProvider, previewUrl } from "./providers/index.mjs";
+import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
 
@@ -99,7 +99,7 @@ export function judgeCommand(command, cwd) {
     const { config, error } = loadConfig(root);
     let r;
     if (error) r = { decision: "ask", reason: error };
-    else if (!config) r = { decision: "ask", reason: `宣言ファイル ${CONFIG_REL} がありません。作業ブランチ運用を確認してから進めてください（スキル branch-release-workflow を参照）。` };
+    else if (!config) continue; // 宣言の無いリポジトリは運用の対象外。プラグインはどのリポジトリでも有効になりうるため、判定しない
     else if (op.kind === "commit") r = judgeBranch(config, currentBranch(op.cwd));
     else {
       const targets = pushTargets(op.args, op.cwd);
@@ -139,7 +139,7 @@ async function hook() {
 function need(root) {
   const { config, error } = loadConfig(root);
   if (error) fail(error);
-  if (!config) fail(`宣言ファイル ${CONFIG_REL} がありません。templates/config.example.json を元に作成してください。`);
+  if (!config) fail(`宣言ファイル ${CONFIG_REL} がありません。スキルの assets/config.example.json を元に作成してください。`);
   return config;
 }
 

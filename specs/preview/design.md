@@ -2,13 +2,13 @@
 
 ## 1. 構成
 
-| パス                                | 責務                                 |
-| ----------------------------------- | ------------------------------------ |
-| `providers/index.mjs`               | provider の選択とプレビューURLの算出 |
-| `providers/none.mjs`                | プレビューを行わない provider        |
-| `providers/url-template.mjs`        | URL の算出だけを行う provider        |
-| `providers/cloudflare-previews.mjs` | Cloudflare の検査・雛形・後始末      |
-| `references/cloudflare-previews.md` | Cloudflare Previews の前提と注意点   |
+| パス                                          | 責務                          |
+| ------------------------------------------- | --------------------------- |
+| `scripts/providers/index.mjs`               | provider の選択とプレビューURLの算出    |
+| `scripts/providers/none.mjs`                | プレビューを行わない provider         |
+| `scripts/providers/url-template.mjs`        | URL の算出だけを行う provider       |
+| `scripts/providers/cloudflare-previews.mjs` | Cloudflare の検査・雛形・後始末       |
+| `references/cloudflare-previews.md`         | Cloudflare Previews の前提と注意点 |
 
 ## 2. 関係図・ワークフロー
 
@@ -18,7 +18,7 @@ provider の選択と各 provider の依存方向を示す。
 flowchart LR
   index --> none
   index --> url_template["url-template"]
-  index --> providers_cf["providers/cloudflare-previews"]
+  index --> providers_cf["scripts/providers/cloudflare-previews"]
   providers_cf --> ext_wrangler["wrangler"]
   providers_cf --> references_cf["references/cloudflare-previews"]
 ```
@@ -29,7 +29,7 @@ flowchart LR
 sequenceDiagram
   participant ext_user as 利用者
   participant index
-  participant providers_cf as providers/cloudflare-previews
+  participant providers_cf as scripts/providers/cloudflare-previews
   ext_user->>index: cleanup
   index->>providers_cf: コマンドの要求
   providers_cf-->>index: コマンド

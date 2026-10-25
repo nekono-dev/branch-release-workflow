@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: resumes-pushed-branch-from-remote
+expected_outcome: |
+  brw resume dev/login-form でリモートから worktree を作り直し、その中で login.html の email 入力を type="email" required にして commit する。push はしない。
+context:
+  scaffold_script: place-files.sh

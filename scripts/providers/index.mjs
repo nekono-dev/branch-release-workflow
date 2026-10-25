@@ -4,7 +4,7 @@
 //   check(root, config)            -> { level: "error"|"warn", message }[]   宣言と設定の整合検査
 //   workflow(config)               -> string | null                           preview 用 workflow の雛形
 //   cleanup(config, branch)        -> { cmd, args } | null                    ブランチ削除時の後始末コマンド
-import { aliasOf, previewAliasOf } from "../scripts/lib.mjs";
+import { aliasOf, previewAliasOf } from "../lib.mjs";
 import * as none from "./none.mjs";
 import * as urlTemplate from "./url-template.mjs";
 import * as cloudflarePreviews from "./cloudflare-previews.mjs";

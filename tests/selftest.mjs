@@ -8,8 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { judgeCommand } from "../scripts/brw.mjs";
 import { globToRegExp, loadConfig, parsePushBranches, undeclaredCiBranches, validateConfig } from "../scripts/lib.mjs";
-import { getProvider, previewUrl } from "../providers/index.mjs";
-import * as cloudflare from "../providers/cloudflare-previews.mjs";
+import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
+import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const brw = join(root, "scripts/brw.mjs");
@@ -49,7 +49,7 @@ eq("branch-guard/AC-1 正常な宣言は検証を通る", validateConfig(cfg), [
 eq("branch-guard/AC-2 保護ブランチの commit は deny", d("git commit -m x", onMain), "deny");
 eq("branch-guard/AC-2 作業ブランチの commit は allow", d("git commit -m x", onDev), "allow");
 eq("branch-guard/AC-2 宣言外ブランチの commit は deny", d("git commit -m x", onOther), "deny");
-eq("branch-guard/AC-3 宣言ファイルが無ければ ask", d("git commit -m x", noCfg), "ask");
+eq("branch-guard/AC-3 宣言ファイルが無ければ判定しない", d("git commit -m x", noCfg), "allow");
 eq("branch-guard/AC-3 宣言が不正なら ask", d("git push", badCfg), "ask");
 eq("branch-guard/AC-3 --all は ask", d("git push --all origin", onDev), "ask");
 eq("branch-guard/AC-4 HEAD:main への push は deny", d("git push origin HEAD:main", onDev), "deny");
@@ -111,8 +111,8 @@ for (let i = 0; i < 16; i++) judgeCommand("git commit -m x", onDev);
 eq("branch-guard/AC-6 判定 16 件が 10 秒以内", Date.now() - t0 <= 10_000, true);
 
 const imports = [];
-for (const dir of ["scripts", "providers"])
-  for (const f of readdirSync(join(root, dir)))
+for (const dir of ["scripts", "scripts/providers"])
+  for (const f of readdirSync(join(root, dir)).filter((f) => f.endsWith(".mjs")))
     for (const m of readFileSync(join(root, dir, f), "utf8").matchAll(/from "([^"]+)"/g)) imports.push(m[1]);
 eq("branch-guard/AC-7 import は標準モジュールと相対パスのみ", imports.filter((m) => !m.startsWith("node:") && !m.startsWith(".")), []);
 

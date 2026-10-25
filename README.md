@@ -1,25 +1,39 @@
 # branch-release-workflow
 
-本番向けブランチでの直接作業を防ぎ、作業ブランチ（`dev/XXXX` など）で作業させる Claude Code スキル。作業ブランチの push でプレビュー、本番向けブランチの push で本番デプロイする運用の整備と案内も行う。使い方は [SKILL.md](SKILL.md) を参照する。
+本番向けブランチでの直接作業を防ぎ、作業ブランチ（`dev/XXXX` など）で作業させる Claude Code プラグイン。作業ブランチの push でプレビュー、本番向けブランチの push で本番デプロイする運用の整備と案内も行う。
 
-運用はリポジトリ内の宣言ファイル `.claude/branch-release-workflow.json`（記入例は `templates/config.example.json`）で決まり、スキルにはリポジトリ固有の値を持たない。
+- スキル: [SKILL.md](SKILL.md)（作業ブランチの作成、プレビュー案内、push 後の片付け、整合検査）
+- フック: [hooks/hooks.json](hooks/hooks.json)（保護ブランチ・宣言外ブランチへの `git commit` / `git push` を拒否）
+
+運用はリポジトリ内の宣言ファイル `.claude/branch-release-workflow.json`（記入例は [assets/config.example.json](assets/config.example.json)）で決まり、プラグインにはリポジトリ固有の値を持たない。宣言ファイルの無いリポジトリでは何もしない。
 
 ## 導入
 
-```sh
-git clone git@github.com.nekono:nekono-dev/branch-release-workflow.git <リポジトリ>/.claude/skills/branch-release-workflow
+```
+/plugin install branch-release-workflow --marketplace nekono-dev/branch-release-workflow
 ```
 
-リポジトリへコミットして同梱してもよい（クラウドセッションでも追加の準備なしに動く。更新は手元の clone で行い、更新分をコミットする）。要件: Node.js 22 以上と git。外部パッケージは使わず、PATH やグローバルへも何も導入しない。フックの有効化は [SKILL.md](SKILL.md) の「導入」を参照する。
+リポジトリ単位での有効化、CI（GitHub Actions・`claude -p --plugin-dir`）での利用、宣言ファイルの作り方は [references/setup.md](references/setup.md)。要件: Node.js 22 以上と git。外部パッケージは使わない。
 
-## 更新
+## 構成
 
-スキルは使い始めるときに `git pull --ff-only` で自身を更新する（[SKILL.md](SKILL.md) の「開始時のスキル更新」）。手動で行う場合は、スキルのディレクトリで `git pull --ff-only` を実行する。
+```
+.claude-plugin/   プラグインとマーケットプレイスの定義
+hooks/            PreToolUse フック
+SKILL.md          スキル本体
+scripts/          brw.mjs（CLI）、lib.mjs、providers/
+references/       宣言ファイル・導入・Cloudflare Previews の詳細
+assets/           宣言ファイルの記入例
+evals/            スキルの評価ケース（claude plugin eval）
+specs/, tests/    開発用（仕様と自己テスト）
+```
 
 ## 開発
 
 ```sh
-node tests/selftest.mjs
+node tests/selftest.mjs        # スクリプトの自己テスト
+claude plugin validate .       # プラグインの検証
+claude plugin eval .           # スキルの評価
 ```
 
 仕様は `specs/` にある（仕様駆動開発。検証は spec-driven-development スキルの `check-all.mjs --root specs`）。このリポジトリには、特定のアプリケーション固有の値や例を含めない。

@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: pushes-and-shares-preview-url
+expected_outcome: |
+  dev/contact-link を origin へ push し、brw url が返す https://contact-link.preview.example.com を案内する。push 後に brw finish で worktree とローカルブランチを片付け、片付けたことを伝える。
+context:
+  scaffold_script: place-files.sh

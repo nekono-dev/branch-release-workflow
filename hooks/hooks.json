@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/skills/branch-release-workflow/scripts/brw.mjs\" hook"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/brw.mjs\" hook"
           }
         ]
       }

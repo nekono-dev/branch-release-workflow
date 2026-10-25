@@ -12,7 +12,7 @@
 
 - 対応: D-3, D-4
 - [x] T-2.1: 宣言外の CI の警告と Cloudflare の検査を実装し、単体テストを追加する。
-- 検証: `node --check providers/cloudflare-previews.mjs && node tests/selftest.mjs`
+- 検証: `node --check scripts/providers/cloudflare-previews.mjs && node tests/selftest.mjs`
 
 ## Phase 3: workers.dev 関連キー
 

@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: creates-work-branch-for-feature
+expected_outcome: |
+  main をチェックアウトした状態から、brw create で dev/ の作業ブランチと worktree を作り、その worktree の中で index.html のフッターにリンクを追加する。main と develop には commit しない。push はしない（許可されていない）。
+context:
+  scaffold_script: place-files.sh
