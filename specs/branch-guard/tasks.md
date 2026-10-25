@@ -18,3 +18,9 @@
 - 対応: D-5
 - [x] T-3.1: push 済みの作業ブランチの片付けと、リモートからの再開を実装し、AC-8 と AC-9 の単体テストを加える。
 - 検証: `node tests/selftest.mjs` の branch-guard/AC-8・AC-9
+
+## Phase 4: 宣言の登録
+
+- 対応: D-2, D-6
+- [x] T-4.1: プラグインを有効にしたリポジトリで宣言が無いときの拒否と、未登録の宣言の検査・worktree への移動を実装し、AC-10 と AC-11 の単体テストを加える。
+- 検証: `node tests/selftest.mjs` の branch-guard/AC-10・AC-11

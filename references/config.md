@@ -1,6 +1,6 @@
 # 宣言ファイル `.claude/branch-release-workflow.json`
 
-リポジトリのルートに置く。記入例は `assets/config.example.json`。不正な宣言は `brw` の各サブコマンドがエラーとして報告し、フックは commit・push のたびに確認を求める。
+リポジトリのルートに置き、commit して登録する（CI やほかの clone も同じ宣言で判定するため。`brw check` は未登録を ERROR にする）。記入例は `assets/config.example.json`。不正な宣言は `brw` の各サブコマンドがエラーとして報告し、フックは commit・push のたびに確認を求める。
 
 | キー | 内容 |
 |---|---|
@@ -28,6 +28,7 @@
 | 状況 | 判定 |
 |---|---|
 | 宣言ファイルが無い | 判定しない（運用の対象外） |
+| 宣言ファイルが無いが、`.claude/settings.json` の `enabledPlugins` でこのプラグインを有効にしている | 拒否（導入の途中なので、宣言を作って登録するまで止める） |
 | 宣言が不正 | 確認を求める |
 | `protectedBranches` に一致 | 拒否 |
 | `workBranches` に一致 | 許可 |

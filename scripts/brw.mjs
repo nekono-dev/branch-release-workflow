@@ -10,10 +10,10 @@
 //   cleanup <ブランチ> [--execute]  provider 固有の後始末（既定は表示のみ）
 //   wrangler-config [ファイル] [--write]  独自ドメインの有効状況に応じて wrangler 設定の workers_dev / preview_urls を設定
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  CONFIG_REL, checkName, currentBranch, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
 } from "./lib.mjs";
 import { getProvider, previewUrl } from "./providers/index.mjs";
@@ -99,7 +99,12 @@ export function judgeCommand(command, cwd) {
     const { config, error } = loadConfig(root);
     let r;
     if (error) r = { decision: "ask", reason: error };
-    else if (!config) continue; // 宣言の無いリポジトリは運用の対象外。プラグインはどのリポジトリでも有効になりうるため、判定しない
+    else if (!config) {
+      // 宣言の無いリポジトリは運用の対象外（プラグインはどのリポジトリでも有効になりうる）。
+      // ただしリポジトリの設定でプラグインを有効にしているのに宣言が無いのは導入の途中なので、宣言を作るまで止める
+      if (!enabledInRepo(root)) continue;
+      r = { decision: "deny", reason: `このリポジトリはプラグインを有効にしていますが、宣言ファイル ${CONFIG_REL} がありません。宣言ファイルを作ってリポジトリに登録してください（スキル branch-release-workflow の references/setup.md）。` };
+    }
     else if (op.kind === "commit") r = judgeBranch(config, currentBranch(op.cwd));
     else {
       const targets = pushTargets(op.args, op.cwd);
@@ -175,14 +180,22 @@ function create(args) {
   if (git(root, "fetch", "origin", base, "--quiet") === null) console.error(`警告: origin/${base} を取得できませんでした。ローカルの ${base} を使います。`);
   const start = git(root, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`) !== null ? `origin/${base}`
     : git(root, "show-ref", "--verify", "--quiet", `refs/heads/${base}`) !== null ? base : fail(`分岐元ブランチ ${base} が見つかりません。`);
+  // 導入時は、宣言ファイルが分岐元にまだ無い。作業ブランチで登録するため、新しい worktree へ移す
+  const unregistered = git(root, "cat-file", "-e", `${start}:${CONFIG_REL}`) === null;
   if (branchOnly) {
     execFileSync("git", ["branch", "--no-track", branch, start], { cwd: root, stdio: "inherit" });
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
+    if (unregistered) console.log(`注意: ${CONFIG_REL} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
     const wt = join(root, ".claude/worktrees", aliasOf(branch));
     mkdirSync(join(root, ".claude/worktrees"), { recursive: true });
     execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
     console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
+    if (unregistered) {
+      mkdirSync(join(wt, ".claude"), { recursive: true });
+      renameSync(join(root, CONFIG_REL), join(wt, CONFIG_REL));
+      console.log(`${CONFIG_REL} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+    }
   }
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
@@ -241,6 +254,8 @@ function check() {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
   const findings = [];
+  if (!configCommitted(root))
+    findings.push({ level: "error", message: `${CONFIG_REL} が commit されていません。CI やほかの clone から宣言が見えないため、commit してリポジトリに登録してください。` });
   for (const f of undeclaredCiBranches(config, scanWorkflows(root)))
     findings.push({ level: "warn", message: `${f.file}: push 対象 '${f.glob}' が宣言の workBranches / protectedBranches に含まれません（意図しない CI/デプロイの可能性）。` });
   findings.push(...getProvider(config).check(root, config));

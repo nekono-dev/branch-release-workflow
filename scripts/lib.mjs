@@ -5,6 +5,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export const CONFIG_REL = ".claude/branch-release-workflow.json";
+export const SETTINGS_REL = ".claude/settings.json";
+export const PLUGIN_NAME = "branch-release-workflow";
 
 export function git(cwd, ...args) {
   try {
@@ -17,6 +19,21 @@ export function git(cwd, ...args) {
 export function repoRoot(cwd) {
   return git(cwd, "rev-parse", "--show-toplevel");
 }
+
+// リポジトリの .claude/settings.json がこのプラグインを有効にしているか。有効にしていれば導入済みのリポジトリとみなす
+export function enabledInRepo(root) {
+  const path = join(root, SETTINGS_REL);
+  if (!existsSync(path)) return false;
+  try {
+    const plugins = JSON.parse(readFileSync(path, "utf8")).enabledPlugins ?? {};
+    return Object.entries(plugins).some(([id, on]) => on && id.split("@")[0] === PLUGIN_NAME);
+  } catch {
+    return false;
+  }
+}
+
+// 宣言ファイルが現在の commit に含まれているか。含まれていなければ、CI やほかの clone からは宣言が見えない
+export const configCommitted = (root) => git(root, "cat-file", "-e", `HEAD:${CONFIG_REL}`) !== null;
 
 // glob（* は "/" を除く任意文字列、** は "/" を含む任意文字列）を正規表現へ変換する
 export function globToRegExp(glob) {

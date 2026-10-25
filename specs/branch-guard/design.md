@@ -62,7 +62,7 @@ sequenceDiagram
 
 スクリプトの import は Node 標準モジュールと相対パスに限る。
 
-### D-2: ブランチの判定 (FR-2, FR-3, NFR-1)
+### D-2: ブランチの判定 (FR-2, FR-3, FR-8, NFR-1)
 
 ```json
 {
@@ -70,6 +70,7 @@ sequenceDiagram
   "workBranches に一致": "allow",
   "どちらにも一致しない": "deny",
   "宣言ファイルがない": "判定しない（allow）",
+  "宣言ファイルがなく、.claude/settings.json の enabledPlugins でプラグインを有効にしている": "deny",
   "宣言が不正": "ask",
   "ブランチを特定できない": "ask"
 }
@@ -102,6 +103,16 @@ sequenceDiagram
 ```
 
 検証に失敗したときは何も作らず、終了コード 1 で終わる。
+
+### D-6: 宣言の登録 (FR-9)
+
+宣言はリポジトリに commit し、CI やほかの clone からも同じ宣言で判定されるようにする。
+
+| 場面 | 処理 |
+| ---- | ---- |
+| `check` で `HEAD` に宣言が無い | 誤り（ERROR）として報告し、終了コード 1 で終わる |
+| `create` の分岐元に宣言が無い（導入時） | 本体の作業ツリーの宣言を新しい worktree へ移し、その作業ブランチで commit するよう表示する |
+| `create --branch-only` の分岐元に宣言が無い | 移さずに、作ったブランチで commit するよう表示する |
 
 ### D-5: 片付けと再開 (FR-6, FR-7)
 

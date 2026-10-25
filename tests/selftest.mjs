@@ -21,15 +21,21 @@ const eq = (name, got, want) => {
 };
 
 const g = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, stdio: "ignore" });
-const mkRepo = (branch, config) => {
+// 宣言は commit して登録する。register: false なら作業ツリーに置くだけにする
+const mkRepo = (branch, config, { register = true, settings } = {}) => {
   const d = mkdtempSync(join(tmpdir(), "brw-"));
   g(d, "init", "-q", "-b", "main");
   g(d, "commit", "-q", "--allow-empty", "-m", "i");
-  if (branch !== "main") g(d, "checkout", "-q", "-b", branch);
+  if (config || settings) mkdirSync(join(d, ".claude"));
+  if (settings) writeFileSync(join(d, ".claude/settings.json"), JSON.stringify(settings));
   if (config) {
-    mkdirSync(join(d, ".claude"));
     writeFileSync(join(d, ".claude/branch-release-workflow.json"), JSON.stringify(config));
+    if (register) {
+      g(d, "add", ".claude/branch-release-workflow.json");
+      g(d, "commit", "-q", "-m", "宣言");
+    }
   }
+  if (branch !== "main") g(d, "checkout", "-q", "-b", branch);
   return d;
 };
 const run = (cwd, ...args) => spawnSync("node", [brw, ...args], { cwd, encoding: "utf8" });
@@ -50,6 +56,9 @@ eq("branch-guard/AC-2 保護ブランチの commit は deny", d("git commit -m x
 eq("branch-guard/AC-2 作業ブランチの commit は allow", d("git commit -m x", onDev), "allow");
 eq("branch-guard/AC-2 宣言外ブランチの commit は deny", d("git commit -m x", onOther), "deny");
 eq("branch-guard/AC-3 宣言ファイルが無ければ判定しない", d("git commit -m x", noCfg), "allow");
+const enabledNoCfg = mkRepo("main", null, { settings: { enabledPlugins: { "branch-release-workflow@nekono-dev": true } } });
+eq("branch-guard/AC-10 プラグインを有効にしたリポジトリで宣言が無ければ deny", d("git commit -m x", enabledNoCfg), "deny");
+eq("branch-guard/AC-10 無効にしていれば判定しない", d("git commit -m x", mkRepo("main", null, { settings: { enabledPlugins: { "branch-release-workflow@nekono-dev": false } } })), "allow");
 eq("branch-guard/AC-3 宣言が不正なら ask", d("git push", badCfg), "ask");
 eq("branch-guard/AC-3 --all は ask", d("git push --all origin", onDev), "ask");
 eq("branch-guard/AC-4 HEAD:main への push は deny", d("git push origin HEAD:main", onDev), "deny");
@@ -69,6 +78,15 @@ const bad = run(created, "create", "Bad_Name", "--branch-only");
 eq("branch-guard/AC-5 命名規則違反は終了コード 1", bad.status, 1);
 eq("branch-guard/AC-5 命名規則違反はブランチを作らない", spawnSync("git", ["branch", "--list", "dev/*"], { cwd: created, encoding: "utf8" }).stdout.trim(), "");
 eq("branch-guard/AC-5 規則に合う名前は作成される", run(created, "create", "good-name", "--branch-only").status, 0);
+
+// 導入: 未登録の宣言は新しい worktree へ移り、そこで commit すると登録される
+const setup = mkRepo("develop", cfg, { register: false });
+eq("branch-guard/AC-11 未登録の宣言は整合検査でエラー", run(setup, "check").status, 1);
+const setupWt = join(setup, ".claude/worktrees/dev-setup");
+eq("branch-guard/AC-11 作業ブランチを作ると未登録の宣言が worktree へ移る", [run(setup, "create", "setup").status, existsSync(join(setupWt, ".claude/branch-release-workflow.json")), existsSync(join(setup, ".claude/branch-release-workflow.json"))], [0, true, false]);
+g(setupWt, "add", ".claude/branch-release-workflow.json");
+g(setupWt, "commit", "-q", "-m", "宣言");
+eq("branch-guard/AC-11 commit した宣言は整合検査を通る", run(setupWt, "check").status, 0);
 
 // push 後の片付けと再開。一時の bare リポジトリを origin にする
 const remote = mkdtempSync(join(tmpdir(), "brw-remote-"));
