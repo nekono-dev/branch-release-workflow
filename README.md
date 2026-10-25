@@ -2,7 +2,7 @@
 
 本番向けブランチでの直接作業を防ぎ、作業ブランチ（`dev/XXXX` など）で作業させる Claude Code プラグイン。作業ブランチの push でプレビュー、本番向けブランチの push で本番デプロイする運用の整備と案内も行う。
 
-- スキル: [SKILL.md](SKILL.md)（作業ブランチの作成、プレビュー案内、push 後の片付け、整合検査）
+- スキル: [SKILL.md](SKILL.md)（作業ブランチの作成、プレビュー案内、取り込み後の片付け、整合検査）
 - フック: [hooks/hooks.json](hooks/hooks.json)（保護ブランチ・宣言外ブランチへの `git commit` / `git push` を拒否）
 
 運用はリポジトリ内の宣言ファイル `.claude/branch-release-workflow.json`（記入例は [assets/config.example.json](assets/config.example.json)）で決まり、プラグインにはリポジトリ固有の値を持たない。導入時は宣言ファイルを作ってリポジトリに commit する（CI も同じ宣言で判定するため）。宣言ファイルが無く、リポジトリの設定でプラグインを有効にしてもいないリポジトリでは何もしない。

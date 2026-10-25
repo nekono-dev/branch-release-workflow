@@ -3,7 +3,7 @@ name: registers-config-on-setup
 expected_outcome: |
   指定の値（workBranches: dev/*、baseBranch: develop、protectedBranches: main と develop、プレビューなし）で
   .claude/branch-release-workflow.json を作り、導入用の作業ブランチ（dev/...）で commit して登録する。
-  main と develop には commit せず、許可なく push しない。宣言は push して develop に取り込まれるまで
-  CI では効かないことを伝え、push の許可を求める。
+  main と develop には commit しない（作業ブランチは許可なしで push してよい）。宣言は develop に
+  取り込まれるまで CI では効かないことを伝える。
 context:
   scaffold_script: place-files.sh

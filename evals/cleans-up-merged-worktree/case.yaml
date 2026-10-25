@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: cleans-up-merged-worktree
+expected_outcome: |
+  develop にマージ済みの dev/contact-link の worktree とローカルブランチを brw finish で片付け、
+  まだマージされていない dev/wip-banner の worktree は残す。見出しの変更は brw create で作った
+  新しい作業ブランチの worktree で行い、main と develop には commit しない。
+context:
+  scaffold_script: place-files.sh

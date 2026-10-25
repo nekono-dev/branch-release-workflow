@@ -4,4 +4,4 @@ focus: trace
 weight: 1
 ---
 
-リモート（origin）へ push していない
+origin の main と develop に新しい commit が無い（作業ブランチの push はしてよい）

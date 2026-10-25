@@ -94,21 +94,51 @@ g(remote, "init", "-q", "--bare");
 const fin = mkRepo("develop", cfg);
 g(fin, "remote", "add", "origin", remote);
 g(fin, "push", "-q", "origin", "develop");
+const hasBranch = (b) => spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${b}`], { cwd: fin }).status === 0;
+// 切り出し元（origin/develop）へ取り込む。squash なら変更だけを 1 commit で入れる
+const land = (branch, { squash = false } = {}) => {
+  const tmp = mkdtempSync(join(tmpdir(), "brw-land-"));
+  g(tmp, "clone", "-q", "-b", "develop", remote, ".");
+  g(tmp, "fetch", "-q", "origin", branch);
+  if (squash) {
+    g(tmp, "merge", "-q", "--squash", `origin/${branch}`);
+    g(tmp, "commit", "-q", "-m", "squash");
+  } else g(tmp, "merge", "-q", "--no-ff", "-m", "merge", `origin/${branch}`);
+  g(tmp, "push", "-q", "origin", "develop");
+};
 run(fin, "create", "fin-work");
 const finWt = join(fin, ".claude/worktrees/dev-fin-work");
-g(finWt, "commit", "-q", "--allow-empty", "-m", "w");
-const hasBranch = (b) => spawnSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${b}`], { cwd: fin }).status === 0;
-eq("branch-guard/AC-8 push していない commit があれば片付けず終了コード 1", run(finWt, "finish").status, 1);
-eq("branch-guard/AC-8 片付けなかった worktree は残る", existsSync(finWt), true);
+writeFileSync(join(finWt, "a.txt"), "a");
+g(finWt, "add", "a.txt");
+g(finWt, "commit", "-q", "-m", "w");
 g(finWt, "push", "-q", "origin", "dev/fin-work");
+eq("branch-guard/AC-8 push しただけ（切り出し元へ未取り込み）なら片付けず終了コード 1", run(finWt, "finish").status, 1);
+eq("branch-guard/AC-8 片付けなかった worktree は残る", existsSync(finWt), true);
+land("dev/fin-work");
 writeFileSync(join(finWt, "dirty.txt"), "x");
 eq("branch-guard/AC-8 commit していない変更があれば片付けない", run(finWt, "finish").status, 1);
 rmSync(join(finWt, "dirty.txt"));
-eq("branch-guard/AC-8 push 済みなら worktree の中から片付けられる", run(finWt, "finish").status, 0);
+eq("branch-guard/AC-8 切り出し元へ取り込まれていれば worktree の中から片付けられる", run(finWt, "finish").status, 0);
 eq("branch-guard/AC-8 worktree とローカルブランチが消える", [existsSync(finWt), hasBranch("dev/fin-work")], [false, false]);
 eq("branch-guard/AC-8 作業ブランチでなければ片付けない", run(fin, "finish", "develop").status, 1);
+run(fin, "create", "fin-squash");
+const sqWt = join(fin, ".claude/worktrees/dev-fin-squash");
+writeFileSync(join(sqWt, "b.txt"), "b");
+g(sqWt, "add", "b.txt");
+g(sqWt, "commit", "-q", "-m", "b1");
+writeFileSync(join(sqWt, "b.txt"), "bb");
+g(sqWt, "commit", "-q", "-am", "b2");
+g(sqWt, "push", "-q", "origin", "dev/fin-squash");
+land("dev/fin-squash", { squash: true });
+run(fin, "create", "fin-open");
+const openWt = join(fin, ".claude/worktrees/dev-fin-open");
+g(openWt, "commit", "-q", "--allow-empty", "-m", "o");
+g(openWt, "push", "-q", "origin", "dev/fin-open");
+const swept = run(fin, "finish", "--merged");
+eq("branch-guard/AC-8 --merged は squash merge で取り込まれたブランチを片付け、未取り込みのブランチは残す", [swept.status, existsSync(sqWt), existsSync(openWt)], [0, false, true]);
 // submodule を含む worktree も片付けられる
 const sub = mkRepo("main", null);
+g(fin, "pull", "-q", "--no-rebase", "origin", "develop"); // land で進んだ origin/develop に追いつく
 g(fin, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub");
 g(fin, "commit", "-q", "-m", "sub");
 g(fin, "push", "-q", "origin", "develop");
@@ -116,13 +146,22 @@ run(fin, "create", "fin-sub");
 const subWt = join(fin, ".claude/worktrees/dev-fin-sub");
 g(subWt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init");
 g(subWt, "push", "-q", "origin", "dev/fin-sub");
+land("dev/fin-sub");
 eq("branch-guard/AC-8 submodule を含む worktree も片付けられる", [run(subWt, "finish").status, existsSync(subWt)], [0, false]);
 eq("branch-guard/AC-9 リモートのブランチから worktree を作り直せる", run(fin, "resume", "dev/fin-work").status, 0);
 eq("branch-guard/AC-9 作り直した worktree はリモートの commit を持ち、追跡先がリモートになる", [
   spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
   spawnSync("git", ["rev-parse", "--abbrev-ref", "@{u}"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
 ], ["w", "origin/dev/fin-work"]);
-eq("branch-guard/AC-9 ローカルに残っていれば作り直さない", run(fin, "resume", "dev/fin-work").status, 1);
+// 別の環境から push された更新は、残っている worktree へ取り込んでから使う
+const other = mkdtempSync(join(tmpdir(), "brw-other-"));
+g(other, "clone", "-q", "-b", "dev/fin-work", remote, ".");
+g(other, "commit", "-q", "--allow-empty", "-m", "from-other");
+g(other, "push", "-q", "origin", "dev/fin-work");
+eq("branch-guard/AC-9 worktree が残っていれば、リモートの更新を取り込んで使う", [
+  run(fin, "resume", "dev/fin-work").status,
+  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
+], [0, "from-other"]);
 
 const t0 = Date.now();
 for (let i = 0; i < 16; i++) judgeCommand("git commit -m x", onDev);

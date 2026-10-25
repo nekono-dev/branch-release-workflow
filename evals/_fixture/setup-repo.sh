@@ -5,6 +5,7 @@
 #   dirty-main      宣言あり。main に commit していない変更がある
 #   unpushed-work   宣言あり。dev/contact-link の worktree に push していない commit がある
 #   pushed-remote   宣言あり。origin にだけ dev/login-form がある（ローカルには無い）
+#   merged-work     宣言あり。dev/contact-link は push 済みで origin/develop にマージ済み、dev/wip-banner は push 済みで未マージ。どちらも worktree が残っている
 #   no-config       宣言ファイルが無い
 set -eu
 variant="${1:?variant}"
@@ -89,5 +90,22 @@ HTML
       git push -q origin dev/login-form )
     git worktree remove .claude/worktrees/dev-login-form
     git branch -q -D dev/login-form ;;
+  merged-work)
+    git worktree add -q --no-track -b dev/contact-link .claude/worktrees/dev-contact-link origin/develop
+    ( cd .claude/worktrees/dev-contact-link
+      sed -i 's#<footer><p>&copy; Sample Shop</p></footer>#<footer><p>\&copy; Sample Shop</p><p><a href="/contact">お問い合わせ</a></p></footer>#' index.html
+      git commit -q -am "フッターにお問い合わせへのリンクを追加"
+      git push -q origin dev/contact-link )
+    git worktree add -q --no-track -b dev/wip-banner .claude/worktrees/dev-wip-banner origin/develop
+    ( cd .claude/worktrees/dev-wip-banner
+      sed -i 's#<main>#<div class="banner">セール準備中</div>\n  <main>#' index.html
+      git commit -q -am "バナーを追加（作業中）"
+      git push -q origin dev/wip-banner )
+    # 別の場所で develop へマージされた状態を作る
+    tmp="$(mktemp -d)"
+    git clone -q -b develop "$here/origin.git" "$tmp"
+    ( cd "$tmp" && git -c user.name=dev -c user.email=dev@example.com merge -q --no-ff -m "Merge dev/contact-link" origin/dev/contact-link && git push -q origin develop )
+    rm -rf "$tmp"
+    git fetch -q origin ;;
   *) echo "unknown variant: $variant" >&2; exit 2 ;;
 esac
