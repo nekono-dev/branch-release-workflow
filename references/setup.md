@@ -50,6 +50,8 @@ GitHub Actions の `anthropics/claude-code-action` では入力で指定する�
   with:
     plugin_marketplaces: https://github.com/nekono-dev/branch-release-workflow.git
     plugins: branch-release-workflow@nekono-dev
+    branch_prefix: dev/      # 宣言の作業ブランチに合わせる（下記）
+    base_branch: develop     # 宣言の baseBranch
 ```
 
 それ以外の CI では、clone したディレクトリを `--plugin-dir` で読み込む。
@@ -59,7 +61,10 @@ git clone --depth 1 https://github.com/nekono-dev/branch-release-workflow.git "$
 claude -p "..." --plugin-dir "$RUNNER_TEMP/brw"
 ```
 
-CI は checkout したリポジトリの宣言で判定するので、宣言が登録済みであることが前提になる。CI が作るブランチ（claude-code-action の `claude/...` など）で commit させるなら、そのパターンを宣言の `workBranches` に加える。加えないとフックが commit を拒否する。
+CI は checkout したリポジトリの宣言で判定するので、宣言が登録済みであることが前提になる。CI が作るブランチも宣言に合わせる。合わないとフックが commit を拒否する。
+
+- claude-code-action では、`branch_prefix` を作業ブランチの接頭辞（例: `dev/`）に、`base_branch` を宣言の `baseBranch`（例: `develop`）にするのが簡単。既定の `claude/...` は `dev/*` に合わない。作られる名前（例: `dev/issue-12-20261025-0930`）が `namePattern` と `maxNameLength` に収まるかも確かめる。
+- 接頭辞を変えられない CI では、そのパターン（例: `claude/**`）を `workBranches` に加える。
 
 ### 開発中の版を試す
 
