@@ -50,7 +50,7 @@ sequenceDiagram
 
 ### D-1: 宣言ファイルの読み込みと検証 (FR-1, NFR-2)
 
-宣言は `.claude/branch-release-workflow.json` に置く。
+宣言は `.branch-release-workflow.json` に置く。旧 `.claude/branch-release-workflow.json` は後方互換で読み込み、両方ある場合はルートの宣言を優先する。登録確認と worktree への移動にも選択されたパスを使う。
 
 | キー              | 型           | 検証                         |
 | ----------------- | ------------ | ---------------------------- |
@@ -166,3 +166,9 @@ sequenceDiagram
 | 宣言が不正                 | 不正な箇所を示して ask を返す             |
 | 命名規則への違反           | 理由と規則を表示し、終了コード 1 で終わる |
 | 片付けの前の未取り込み・未 push の commit | 理由を表示し、何も消さずに終了コード 1 で終わる |
+
+### D-7: Codex への導入と判定 (FR-10, FR-11)
+
+`scripts/install-codex.mjs` は外部 clone のルートを `~/.agents/skills/branch-release-workflow` へリンクする。`--skills-dir` でプロジェクト単位の探索先も指定できる。同じリンクへの再実行は成功し、別の導入先は保持して終了コード1を返す。
+
+`brw guard <コマンド文字列>` は Claude フックと同じ judgeCommand を利用する。allow なら0、deny / ask なら1で終了し、コマンドそのものは実行しない。Codex の手順には、commit・push の直前に判定し0の場合だけ操作することを書く。これは Git 自体への強制フックではない。
