@@ -48,6 +48,35 @@ const onOther = mkRepo("feature/x", cfg);
 const noCfg = mkRepo("main", null);
 const badCfg = mkRepo("dev/foo", { workBranches: "x" });
 
+// 共通宣言・旧パス互換・Codex の CLI 判定と導入を実際の一時リポジトリで検証する。
+const shared = mkRepo("dev/foo", null);
+writeFileSync(join(shared, ".branch-release-workflow.json"), JSON.stringify(cfg));
+g(shared, "add", ".branch-release-workflow.json");
+g(shared, "commit", "-q", "-m", "shared");
+eq("共通宣言を読み込める", loadConfig(shared).config.workBranches, cfg.workBranches);
+eq("共通宣言を登録後に check が成功する", run(shared, "check").status, 0);
+mkdirSync(join(shared, ".claude"));
+writeFileSync(join(shared, ".claude/branch-release-workflow.json"), "invalid JSON");
+eq("ルート宣言を旧パスより優先する", loadConfig(shared).config.workBranches, cfg.workBranches);
+eq("旧パスの宣言を後方互換で読める", loadConfig(onDev).config.workBranches, cfg.workBranches);
+eq("Codex guard は作業ブランチを許可", run(shared, "guard", "git push origin dev/foo").status, 0);
+eq("Codex guard は保護ブランチへの送り先を拒否", run(shared, "guard", "git push origin HEAD:main").status, 1);
+eq("Codex guard は不明な操作を確認扱いで停止", run(shared, "guard", "git push --all").status, 1);
+const newSetup = mkRepo("develop", null);
+writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
+eq("未登録の共通宣言で worktree を作成できる", run(newSetup, "create", "shared-setup").status, 0);
+eq("共通宣言は新規 worktree へ移される", existsSync(join(newSetup, ".claude/worktrees/dev-shared-setup/.branch-release-workflow.json")), true);
+const skillsDir = mkdtempSync(join(tmpdir(), "brw-skills-"));
+const install = () => spawnSync("node", [join(root, "scripts/install-codex.mjs"), "--skills-dir", skillsDir], { encoding: "utf8" });
+eq("Codex skill をリンクできる", install().status, 0);
+eq("Codex skill の再導入は成功する", install().status, 0);
+eq("リンクから本体を読める", readFileSync(join(skillsDir, "branch-release-workflow/SKILL.md"), "utf8"), readFileSync(join(root, "SKILL.md"), "utf8"));
+rmSync(join(skillsDir, "branch-release-workflow"));
+mkdirSync(join(skillsDir, "branch-release-workflow"));
+writeFileSync(join(skillsDir, "branch-release-workflow/keep"), "keep");
+eq("Codex の既存の別の導入先を上書きしない", install().status, 1);
+eq("既存の内容を維持する", readFileSync(join(skillsDir, "branch-release-workflow/keep"), "utf8"), "keep");
+
 // ---- branch-guard ----
 eq("branch-guard/AC-1 作業ブランチが空の宣言は不正", validateConfig({ workBranches: [], protectedBranches: [] }).length, 1);
 eq("branch-guard/AC-1 不正な宣言ファイルは読み込みでエラー", typeof loadConfig(badCfg).error, "string");

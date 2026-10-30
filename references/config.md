@@ -1,4 +1,4 @@
-# 宣言ファイル `.claude/branch-release-workflow.json`
+# 宣言ファイル `.branch-release-workflow.json`
 
 リポジトリのルートに置き、commit して登録する（CI やほかの clone も同じ宣言で判定するため。`brw check` は未登録を ERROR にする）。記入例は `assets/config.example.json`。不正な宣言は `brw` の各サブコマンドがエラーとして報告し、フックは commit・push のたびに確認を求める。
 
@@ -14,6 +14,8 @@
 | `preview.aliasStripPrefix` | 省略可。alias を作る前にブランチ名から除く接頭辞（例: `"dev/"` で `dev/foo` の alias が `foo`）。プレビューURL・workflow 雛形・後始末の名前に効く |
 
 `brw create` が新しいブランチに付ける接頭辞は、`workBranches` のうち最初の `xxx/*` 形式のもの（例: `dev/*` → `dev/`）。
+
+旧 `.claude/branch-release-workflow.json` だけの構成も利用できる。両方が存在すればルートの正本を優先する。旧版と併用する場合は旧パスを正本へのシンボリックリンクにして値を共有する。
 
 ## provider
 

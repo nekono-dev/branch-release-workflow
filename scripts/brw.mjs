@@ -11,9 +11,9 @@
 //   wrangler-config [ファイル] [--write]  独自ドメインの有効状況に応じて wrangler 設定の workers_dev / preview_urls を設定
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
-  CONFIG_REL, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, configRel, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
 } from "./lib.mjs";
 import { getProvider, previewUrl } from "./providers/index.mjs";
@@ -181,20 +181,21 @@ function create(args) {
   const start = git(root, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`) !== null ? `origin/${base}`
     : git(root, "show-ref", "--verify", "--quiet", `refs/heads/${base}`) !== null ? base : fail(`分岐元ブランチ ${base} が見つかりません。`);
   // 導入時は、宣言ファイルが分岐元にまだ無い。作業ブランチで登録するため、新しい worktree へ移す
-  const unregistered = git(root, "cat-file", "-e", `${start}:${CONFIG_REL}`) === null;
+  const rel = configRel(root);
+  const unregistered = git(root, "cat-file", "-e", `${start}:${rel}`) === null;
   if (branchOnly) {
     execFileSync("git", ["branch", "--no-track", branch, start], { cwd: root, stdio: "inherit" });
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
-    if (unregistered) console.log(`注意: ${CONFIG_REL} は ${start} に登録されていません。このブランチで commit して登録してください。`);
+    if (unregistered) console.log(`注意: ${rel} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
     const wt = join(root, ".claude/worktrees", aliasOf(branch));
     mkdirSync(join(root, ".claude/worktrees"), { recursive: true });
     execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
     console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
     if (unregistered) {
-      mkdirSync(join(wt, ".claude"), { recursive: true });
-      renameSync(join(root, CONFIG_REL), join(wt, CONFIG_REL));
-      console.log(`${CONFIG_REL} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+      mkdirSync(dirname(join(wt, rel)), { recursive: true });
+      renameSync(join(root, rel), join(wt, rel));
+      console.log(`${rel} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
     }
   }
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
@@ -330,7 +331,7 @@ function check() {
   const config = need(root);
   const findings = [];
   if (!configCommitted(root))
-    findings.push({ level: "error", message: `${CONFIG_REL} が commit されていません。CI やほかの clone から宣言が見えないため、commit してリポジトリに登録してください。` });
+    findings.push({ level: "error", message: `${configRel(root)} が commit されていません。CI やほかの clone から宣言が見えないため、commit してリポジトリに登録してください。` });
   for (const f of undeclaredCiBranches(config, scanWorkflows(root)))
     findings.push({ level: "warn", message: `${f.file}: push 対象 '${f.glob}' が宣言の workBranches / protectedBranches に含まれません（意図しない CI/デプロイの可能性）。` });
   findings.push(...getProvider(config).check(root, config));
@@ -380,10 +381,18 @@ function wranglerConfig(args) {
   console.log(`${file}: 有効な独自ドメインが${r.active ? "あるため workers_dev / preview_urls を false にしました" : "ないため workers_dev / preview_urls を true にしました"}`);
 }
 
+// Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
+function guard(args) {
+  if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド"', 2);
+  const result = judgeCommand(args[0], process.cwd());
+  console.log(`[${result.decision}] ${result.reason ?? "ブランチ規則に適合しています。"}`);
+  if (result.decision !== "allow") process.exit(1);
+}
+
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  const cmds = { hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };
+  const cmds = { guard, hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);
 }

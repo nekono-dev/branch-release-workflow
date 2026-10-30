@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "branch-release-workflow",
   "version": "1.0.0",
-  "description": "本番向けブランチでの直接の commit・push をフックで止め、作業ブランチ（dev/XXXX など）での作業・プレビュー案内・push 後の片付けを案内するスキル。運用はリポジトリの .claude/branch-release-workflow.json で宣言する。",
+  "description": "本番向けブランチでの直接の commit・push をフックで止め、作業ブランチ（dev/XXXX など）での作業・プレビュー案内・push 後の片付けを案内するスキル。運用はリポジトリの .branch-release-workflow.json で宣言する。",
   "author": { "name": "nekono-dev" },
   "repository": "https://github.com/nekono-dev/branch-release-workflow",
   "license": "Unlicense",

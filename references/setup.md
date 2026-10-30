@@ -10,7 +10,7 @@
    - 作業ブランチの命名（例: `dev/*`）と、分岐元（例: `develop`。リポジトリに無ければ作るか別のブランチにするか確認する）
    - 保護ブランチ（本番デプロイが走るブランチ。例: `main`）
    - プレビューの有無と公開先の URL の形
-2. `assets/config.example.json` を元に、本体の作業ツリーへ `.claude/branch-release-workflow.json` を書く。
+2. `assets/config.example.json` を元に、本体の作業ツリーへ `.branch-release-workflow.json` を書く。
 3. `brw create <名前>`（例: `add-branch-release-workflow`）で導入用の作業ブランチを作る。宣言は分岐元にまだ無いので、新しい worktree へ移る。
 4. その worktree で `brw check` を実行し、workflow との整合を確かめる（未登録の宣言は ERROR になる。commit 後に消える）。プレビューの workflow が無ければ `brw gen-workflow` で雛形を示す。
 5. 宣言を commit する。リポジトリ単位でプラグインを有効にする場合（下の 2 章）は、`.claude/settings.json` も同じ commit に入れる。
@@ -79,3 +79,20 @@ claude --plugin-dir <このリポジトリの clone>
 - `brw check` が ERROR を出さないこと（宣言が登録されている）
 - 保護ブランチ上で `git commit` を試み、フックに拒否されること
 - `brw create <名前>` で作業ブランチと worktree ができること
+
+## Codex
+
+同じリポジトリを外部へ clone し、Codex の探索先からリンクする。Claude の hooks は Codex に自動導入されない。
+
+```sh
+git clone https://github.com/nekono-dev/branch-release-workflow.git ~/.local/share/branch-release-workflow
+node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs
+```
+
+更新は `git -C ~/.local/share/branch-release-workflow pull --ff-only`。検証済みの版に固定する運用では、そのコミットを fetch / checkout する。リンク先は同じ clone なので、コピーし直す必要はない。プロジェクト単位なら `--skills-dir /path/to/project/.agents/skills` を指定し、生成されたリンクを .gitignore に入れる。別の導入先が既にある場合は上書きしない。
+
+新規 clone / worktree / クラウド環境でもセットアップを実行する。AGENTS.md には共有宣言のパス、セットアップ手順、commit・push の前に `brw guard "実際のコマンド"` を実行することを書く。skill が見つからなければセットアップ後に再読み込みするか、外部 clone の SKILL.md を直接読む。
+
+宣言の正本は `.branch-release-workflow.json`。旧 `.claude/branch-release-workflow.json` だけのリポジトリも利用できる。旧版の Claude プラグインと併用するときは、旧パスを `../.branch-release-workflow.json` へのシンボリックリンクにし、値を二重管理しない。
+
+Codex の探索先とシンボリックリンク対応: https://learn.chatgpt.com/docs/build-skills

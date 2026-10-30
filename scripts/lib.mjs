@@ -4,7 +4,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const CONFIG_REL = ".claude/branch-release-workflow.json";
+export const CONFIG_REL = ".branch-release-workflow.json";
+export const LEGACY_CONFIG_REL = ".claude/branch-release-workflow.json";
+// 新規導入はエージェント非依存のパス。既存の Claude 導入も引き続き利用できる。
+export const configRel = (root) => existsSync(join(root, CONFIG_REL)) ? CONFIG_REL
+  : existsSync(join(root, LEGACY_CONFIG_REL)) ? LEGACY_CONFIG_REL : CONFIG_REL;
 export const SETTINGS_REL = ".claude/settings.json";
 export const PLUGIN_NAME = "branch-release-workflow";
 
@@ -33,7 +37,7 @@ export function enabledInRepo(root) {
 }
 
 // 宣言ファイルが現在の commit に含まれているか。含まれていなければ、CI やほかの clone からは宣言が見えない
-export const configCommitted = (root) => git(root, "cat-file", "-e", `HEAD:${CONFIG_REL}`) !== null;
+export const configCommitted = (root) => git(root, "cat-file", "-e", `HEAD:${configRel(root)}`) !== null;
 
 // glob（* は "/" を除く任意文字列、** は "/" を含む任意文字列）を正規表現へ変換する
 export function globToRegExp(glob) {
@@ -55,16 +59,17 @@ export const matchesAny = (globs, branch) => globs.some((g) => globToRegExp(g).t
 
 // 宣言ファイルを読み込む。無ければ { config: null }、不正なら { error } を返す
 export function loadConfig(root) {
-  const path = join(root, CONFIG_REL);
+  const rel = configRel(root);
+  const path = join(root, rel);
   if (!existsSync(path)) return { config: null, path };
   let raw;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (e) {
-    return { error: `${CONFIG_REL} の JSON が不正です: ${e.message}`, path };
+    return { error: `${rel} の JSON が不正です: ${e.message}`, path };
   }
   const errors = validateConfig(raw);
-  if (errors.length) return { error: `${CONFIG_REL} が不正です:\n- ${errors.join("\n- ")}`, path };
+  if (errors.length) return { error: `${rel} が不正です:\n- ${errors.join("\n- ")}`, path };
   return { config: normalizeConfig(raw), path };
 }
 
