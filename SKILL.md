@@ -76,7 +76,7 @@ brw resume <ブランチ>   # 作業ブランチの続きを始める
 導入時や、CI の設定を変えたときに使う。
 
 ```sh
-brw check                                # 宣言・workflow・provider 設定の整合検査
+brw check [--branches-only]              # 宣言・workflow・provider 設定の整合検査（オプションで provider を除外）
 brw gen-workflow [--write]               # provider の preview workflow 雛形（--write で .github/workflows/preview.yaml を作成。既存は上書きしない）
 brw cleanup <ブランチ> [--execute]        # provider 固有の後始末（既定は表示のみ）
 brw wrangler-config [ファイル] [--write]  # wrangler 設定の workers_dev / preview_urls を独自ドメインの有無に合わせる

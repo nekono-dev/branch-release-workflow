@@ -326,7 +326,8 @@ function url(args) {
   console.log(previewUrl(config, branch));
 }
 
-function check() {
+function check(args = []) {
+  if (args.some((arg) => arg !== "--branches-only")) fail("使い方: check [--branches-only]", 2);
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
   const findings = [];
@@ -334,7 +335,7 @@ function check() {
     findings.push({ level: "error", message: `${configRel(root)} が commit されていません。CI やほかの clone から宣言が見えないため、commit してリポジトリに登録してください。` });
   for (const f of undeclaredCiBranches(config, scanWorkflows(root)))
     findings.push({ level: "warn", message: `${f.file}: push 対象 '${f.glob}' が宣言の workBranches / protectedBranches に含まれません（意図しない CI/デプロイの可能性）。` });
-  findings.push(...getProvider(config).check(root, config));
+  if (!args.includes("--branches-only")) findings.push(...getProvider(config).check(root, config));
   for (const f of findings) console.log(`${f.level === "error" ? "ERROR" : "WARN "} ${f.message}`);
   console.log("\n注意: workflow が本番向けかどうか（wrangler deploy か preview か等）と、リポジトリ外の設定（Pages の本番ブランチ等）は機械判定できません。");
   if (findings.some((f) => f.level === "error")) process.exit(1);

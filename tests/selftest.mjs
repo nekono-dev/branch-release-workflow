@@ -226,6 +226,8 @@ mkdirSync(join(withWf, ".github/workflows"), { recursive: true });
 writeFileSync(join(withWf, ".github/workflows/preview.yaml"), "name: keep\n");
 eq("preview/AC-5 既存の workflow は上書きせず終了コード 1", run(withWf, "gen-workflow", "--write").status, 1);
 eq("preview/AC-5 既存の workflow の内容は変わらない", readFileSync(join(withWf, ".github/workflows/preview.yaml"), "utf8"), "name: keep\n");
+eq("preview/AC-3 ブランチのみの整合検査は生成前の provider 設定を検査しない", run(withWf, "check", "--branches-only").status, 0);
+eq("preview/AC-3 全体の整合検査は provider の誤りを検出する", run(withWf, "check").status, 1);
 const stripCfg = { ...cfg, preview: { ...cfg.preview, provider: "cloudflare-previews", aliasStripPrefix: "dev/" } };
 eq("preview/AC-9 接頭辞を除いた alias のURLを算出", previewUrl(stripCfg, "dev/foo-bar"), "https://foo-bar.example.com");
 eq("preview/AC-9 後始末の名前も接頭辞を除く", getProvider(stripCfg).cleanup(stripCfg, "dev/foo-bar").args.at(-1), "foo-bar");
