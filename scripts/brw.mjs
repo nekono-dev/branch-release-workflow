@@ -10,8 +10,9 @@
 //   cleanup <ブランチ> [--execute]  provider 固有の後始末（既定は表示のみ）
 //   wrangler-config [ファイル] [--write]  独自ドメインの有効状況に応じて wrangler 設定の workers_dev / preview_urls を設定
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CONFIG_REL, configRel, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
@@ -390,7 +391,8 @@ function guard(args) {
   if (result.decision !== "allow") process.exit(1);
 }
 
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// Node は import.meta.url を実体のパスに解決するが、argv は Codex 導入先のリンクのまま。
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
   const cmds = { guard, hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };

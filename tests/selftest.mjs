@@ -71,6 +71,10 @@ const install = () => spawnSync("node", [join(root, "scripts/install-codex.mjs")
 eq("branch-guard/AC-13 Codex skill をリンクできる", install().status, 0);
 eq("branch-guard/AC-13 Codex skill の再導入は成功する", install().status, 0);
 eq("branch-guard/AC-13 リンクから本体を読める", readFileSync(join(skillsDir, "branch-release-workflow/SKILL.md"), "utf8"), readFileSync(join(root, "SKILL.md"), "utf8"));
+const linkedCli = join(skillsDir, "branch-release-workflow/scripts/brw.mjs");
+const linkedGuard = spawnSync("node", [linkedCli, "guard", "git push origin HEAD:main"], { cwd: shared, encoding: "utf8" });
+eq("branch-guard/AC-13 リンク経由の CLI が保護ブランチへの push を拒否する", linkedGuard.status, 1);
+eq("branch-guard/AC-13 リンク経由の CLI が判定結果を表示する", linkedGuard.stdout.includes("[deny]"), true);
 rmSync(join(skillsDir, "branch-release-workflow"));
 mkdirSync(join(skillsDir, "branch-release-workflow"));
 writeFileSync(join(skillsDir, "branch-release-workflow/keep"), "keep");
