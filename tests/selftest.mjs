@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { judgeCommand } from "../scripts/brw.mjs";
+import { autoApprovable, judgeCommand } from "../scripts/brw.mjs";
 import { globToRegExp, loadConfig, parsePushBranches, undeclaredCiBranches, validateConfig } from "../scripts/lib.mjs";
 import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
@@ -195,6 +195,29 @@ eq("branch-guard/AC-9 worktree が残っていれば、リモートの更新を�
   run(fin, "resume", "dev/fin-work").status,
   spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
 ], [0, "from-other"]);
+
+// ---- 作業ブランチへの push の確認を省く（autoApprovePush） ----
+const autoCfg = { ...cfg, workBranches: ["develop", "dev/*"], protectedBranches: ["main"], autoApprovePush: true };
+const auto = mkRepo("develop", autoCfg);
+const aa = (cmd, repo = auto) => autoApprovable(cmd, repo);
+eq("branch-guard/AC-14 作業ブランチへの push は確認を省く", [aa("git push origin develop"), aa("git push -u origin develop"), aa("git push"), aa("git push origin develop 2>&1 | tail -3"), aa(`cd ${auto} && git push -q origin dev/x`)], [true, true, true, true, true]);
+eq("branch-guard/AC-14 保護ブランチ・宣言外への push は省かない", [aa("git push origin main"), aa("git push origin HEAD:main"), aa("git push origin feature/x")], [false, false, false]);
+eq("branch-guard/AC-14 強制・削除・タグ・全ブランチは省かない", [aa("git push -f origin develop"), aa("git push --force-with-lease origin develop"), aa("git push origin +develop"), aa("git push origin :develop"), aa("git push --delete origin develop"), aa("git push --tags origin"), aa("git push --all origin"), aa("git push --no-verify origin develop")], [false, false, false, false, false, false, false, false]);
+eq("branch-guard/AC-14 push 以外を含むコマンドは省かない", [aa("git push origin develop && rm -rf x"), aa("git push origin develop; echo x"), aa("git push origin develop || true"), aa("git push origin develop | sh"), aa("git push origin develop > out.txt"), aa("git push origin $(echo develop)"), aa("GIT_SSH_COMMAND=x git push origin develop"), aa("git -c core.sshCommand=x push origin develop"), aa("git push origin develop &")], [false, false, false, false, false, false, false, false, false]);
+eq("branch-guard/AC-14 宣言で有効にしていなければ省かない", aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprovePush: false })), false);
+const autoDirty = mkRepo("develop", { ...autoCfg, autoApprovePush: false });
+writeFileSync(join(autoDirty, ".claude/branch-release-workflow.json"), JSON.stringify(autoCfg));
+eq("branch-guard/AC-14 作業ツリーで書き換えた宣言では省かない", aa("git push origin develop", autoDirty), false);
+const autoMap = mkRepo("develop", autoCfg);
+g(autoMap, "config", "remote.origin.push", "refs/heads/develop:refs/heads/main");
+eq("branch-guard/AC-14 remote.<名前>.push で送り先を変えていれば省かない", aa("git push origin develop", autoMap), false);
+const autoUp = mkRepo("develop", autoCfg);
+g(autoUp, "config", "branch.develop.merge", "refs/heads/main");
+g(autoUp, "config", "push.default", "upstream");
+eq("branch-guard/AC-14 送り先を省き、追跡先が別名なら省かない", [aa("git push", autoUp), aa("git push origin develop", autoUp)], [false, true]);
+eq("branch-guard/AC-14 autoApprovePush が真偽値でなければ不正", validateConfig({ ...autoCfg, autoApprovePush: "yes" }).length, 1);
+const hookOut = (cmd, repo) => spawnSync("node", [brw, "hook"], { cwd: repo, input: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd }, cwd: repo }), encoding: "utf8" }).stdout;
+eq("branch-guard/AC-14 フックは省けるとき allow を返し、それ以外の許可では何も返さない", [JSON.parse(hookOut("git push origin develop", auto)).hookSpecificOutput.permissionDecision, hookOut("git commit -m x", auto), hookOut("git push origin develop && ls", auto)], ["allow", "", ""]);
 
 const t0 = Date.now();
 for (let i = 0; i < 16; i++) judgeCommand("git commit -m x", onDev);

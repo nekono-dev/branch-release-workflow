@@ -39,6 +39,10 @@ export function enabledInRepo(root) {
 // 宣言ファイルが現在の commit に含まれているか。含まれていなければ、CI やほかの clone からは宣言が見えない
 export const configCommitted = (root) => git(root, "cat-file", "-e", `HEAD:${configRel(root)}`) !== null;
 
+// 宣言ファイルが現在の commit と同じ内容か（登録済みで、作業ツリーで書き換えていない）。
+// 確認を省く判断は、登録された宣言だけに基づかせる（作業中に書き換えた宣言で自分に許可を与えないため）
+export const configMatchesHead = (root) => configCommitted(root) && git(root, "diff", "--quiet", "HEAD", "--", configRel(root)) !== null;
+
 // glob（* は "/" を除く任意文字列、** は "/" を含む任意文字列）を正規表現へ変換する
 export function globToRegExp(glob) {
   let re = "";
@@ -93,6 +97,7 @@ export function validateConfig(c) {
     }
   }
   if (c.maxNameLength !== undefined && !Number.isInteger(c.maxNameLength)) errs.push("maxNameLength は整数にしてください");
+  if (c.autoApprovePush !== undefined && typeof c.autoApprovePush !== "boolean") errs.push("autoApprovePush は true / false にしてください");
   if (c.preview !== undefined) {
     const p = c.preview;
     const provider = p.provider ?? (p.urlTemplate ? "url-template" : "none");

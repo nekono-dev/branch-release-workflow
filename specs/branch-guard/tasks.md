@@ -37,3 +37,9 @@
 - [x] T-6.1: ルートの共有宣言を優先し、旧パスの後方互換と未登録宣言の移動を検証する。
 - [x] T-6.2: Codex のリンク導入と guard を実装し、再実行・既存導入先の保護・判定を検証する。
 - 検証: `node tests/selftest.mjs` の branch-guard/AC-12・AC-13
+
+## Phase 7: push の確認の省略
+
+- 対応: D-1, D-8
+- [x] T-7.1: 宣言の `autoApprovePush` と、作業ブランチへの通常の push だけのコマンドにフックが許可を返す判定を実装し、AC-14 の単体テストを加える。
+- 検証: `node tests/selftest.mjs` の branch-guard/AC-14

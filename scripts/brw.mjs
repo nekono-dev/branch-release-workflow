@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_REL, configRel, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, configRel, checkName, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
 } from "./lib.mjs";
 import { getProvider, previewUrl } from "./providers/index.mjs";
@@ -123,6 +123,88 @@ export function judgeCommand(command, cwd) {
   return worst;
 }
 
+// ---- フック用: 作業ブランチへの push の確認を省けるか -------------------------------
+// 宣言の autoApprovePush が true のとき、フックは許可（allow）を返し、利用者への確認を省く。
+// allow は Bash コマンド全体に効くため、コマンド全体が「作業ブランチへの通常の push」だけのときに限る。
+// 少しでも外れるものは省かず、通常の確認に回す（拒否はしない）。
+
+// 確認を省ける push のオプション。強制・削除・タグ・pre-push の省略・任意のコマンド実行につながるものは含めない
+const SAFE_PUSH_OPTS = new Set(["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--porcelain", "-n", "--dry-run", "--progress", "--no-progress"]);
+// 許すリダイレクト（出力を捨てる・まとめるだけ）。ファイルへの書き出しは含めない
+const SAFE_REDIRECT = /^(\d?>&\d|\d?>\/dev\/null|&>\/dev\/null)$/;
+// パイプの後ろに許すのは、出力の末尾・先頭を切り出すだけのコマンド
+const SAFE_PIPE_TAIL = /^(tail|head)(\s+-n\s*\d+|\s+-\d+)?$/;
+
+// 1 つの push の部分（git から後ろ）が確認を省ける形か。省けるなら { cwd, args } を返す
+function safePushSegment(tokens, cur) {
+  if (tokens[0] !== "git") return null; // 環境変数の前置（GIT_SSH_COMMAND など）は許さない
+  let dir = cur;
+  let i = 1;
+  while (i < tokens.length && tokens[i].startsWith("-")) {
+    if (tokens[i] !== "-C" || !tokens[i + 1]) return null; // -c（設定の上書き）などは許さない
+    dir = tokens[i + 1].startsWith("/") ? tokens[i + 1] : join(dir, tokens[i + 1]);
+    i += 2;
+  }
+  if (tokens[i] !== "push") return null;
+  const args = [];
+  for (const a of tokens.slice(i + 1)) {
+    if (SAFE_REDIRECT.test(a)) continue;
+    if (/[<>]/.test(a)) return null;
+    if (a.startsWith("-")) {
+      if (!SAFE_PUSH_OPTS.has(a)) return null;
+    } else if (a.startsWith("+") || a.startsWith(":") || a.includes(":+") || a.includes("refs/tags/")) return null; // 強制・削除・タグ
+    args.push(a);
+  }
+  return { cwd: dir, args };
+}
+
+export function autoApprovable(command, cwd) {
+  if (/[`$\\]|<\(|>\(/.test(command)) return false; // コマンド置換・変数展開・エスケープは解釈しきれないので省かない
+  let cur = cwd;
+  const pushes = [];
+  for (const chain of command.split(/&&|\n/)) {
+    if (/;|\|\||&/.test(chain.replace(/\d?>&\d|&>/g, ""))) return false; // ; || と後回し（&）は許さない
+    const [head, ...pipes] = chain.split("|");
+    if (pipes.some((p) => !SAFE_PIPE_TAIL.test(p.trim()))) return false;
+    const t = tokenize(head.trim());
+    if (t.length === 0) continue;
+    if (t[0] === "cd" && t.length === 2) {
+      cur = t[1].startsWith("/") ? t[1] : join(cur, t[1]);
+      continue;
+    }
+    const p = safePushSegment(t, cur);
+    if (!p) return false;
+    pushes.push(p);
+  }
+  if (pushes.length === 0) return false;
+  for (const p of pushes) {
+    const root = repoRoot(p.cwd);
+    if (!root) return false;
+    const { config, error } = loadConfig(root);
+    if (error || !config || config.autoApprovePush !== true || !configMatchesHead(root)) return false;
+    if (!sameNamePush(p.args, p.cwd)) return false;
+    const targets = pushTargets(p.args, p.cwd);
+    if (!targets || targets.length === 0) return false;
+    if (targets.some((b) => judgeBranch(config, b).decision !== "allow")) return false;
+  }
+  return true;
+}
+
+// 送り先が、判定に使ったブランチ名そのものになるか。git の設定で別のブランチへ送られうるときは false
+function sameNamePush(args, cwd) {
+  // remote.<名前>.push は送り先の対応を書き換える（develop を main へ送る、など）
+  if (git(cwd, "config", "--get-regexp", "^remote\\..*\\.push$")) return false;
+  const refspecs = args.filter((a) => !a.startsWith("-")).slice(1);
+  if (refspecs.length > 0) return true;
+  // 送り先を省いた push は push.default と追跡先で決まる。同じ名前へ送る設定でなければ省かない
+  const mode = git(cwd, "config", "--get", "push.default") ?? "simple";
+  if (!["simple", "current"].includes(mode)) return false;
+  const branch = currentBranch(cwd);
+  if (!branch) return false;
+  const merge = git(cwd, "config", "--get", `branch.${branch}.merge`);
+  return merge === null || merge === `refs/heads/${branch}`;
+}
+
 async function hook() {
   let input = "";
   for await (const c of process.stdin) input += c;
@@ -134,7 +216,14 @@ async function hook() {
   }
   if (ev.tool_name !== "Bash" || !ev.tool_input?.command) return;
   const r = judgeCommand(ev.tool_input.command, ev.cwd ?? process.cwd());
-  if (r.decision === "allow") return;
+  if (r.decision === "allow") {
+    if (autoApprovable(ev.tool_input.command, ev.cwd ?? process.cwd())) {
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "[branch-release-workflow] 作業ブランチへの push です（宣言の autoApprovePush により確認を省きます）。" },
+      }));
+    }
+    return;
+  }
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: r.decision, permissionDecisionReason: `[branch-release-workflow] ${r.reason}` },
   }));
