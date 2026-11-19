@@ -6,11 +6,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { judgeCommand } from "../scripts/brw.mjs";
-import { globToRegExp, loadConfig, parsePushBranches, undeclaredCiBranches, validateConfig } from "../scripts/lib.mjs";
+import { autoApprovable, judgeCommand } from "../scripts/brw.mjs";
+import { deliveryOf, globToRegExp, loadConfig, normalizeConfig, parsePushBranches, resolveVars, undeclaredCiBranches, validateConfig } from "../scripts/lib.mjs";
+import * as deployCf from "../scripts/deploy/cloudflare-workers.mjs";
 import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
 
+// gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
+process.env.BRW_NO_GH = "1";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const brw = join(root, "scripts/brw.mjs");
 let failed = 0;
@@ -196,6 +199,51 @@ eq("branch-guard/AC-9 worktree が残っていれば、リモートの更新を�
   spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
 ], [0, "from-other"]);
 
+// ---- 作業ブランチ運用の操作の確認を省く（autoApprove） ----
+const autoCfg = { ...cfg, workBranches: ["develop", "dev/*"], protectedBranches: ["main"], baseBranch: "develop", autoApprove: { push: true, pullRequest: true } };
+const auto = mkRepo("develop", autoCfg);
+const aa = (cmd, repo = auto) => autoApprovable(cmd, repo);
+eq("branch-guard/AC-14 作業ブランチへの push は確認を省く", [aa("git push origin develop"), aa("git push -u origin develop"), aa("git push"), aa("git push origin develop 2>&1 | tail -3"), aa(`cd ${auto} && git push -q origin dev/x`)], [true, true, true, true, true]);
+eq("branch-guard/AC-14 保護ブランチ・宣言外への push は省かない", [aa("git push origin main"), aa("git push origin HEAD:main"), aa("git push origin feature/x")], [false, false, false]);
+eq("branch-guard/AC-14 強制・削除・タグ・全ブランチは省かない", [aa("git push -f origin develop"), aa("git push --force-with-lease origin develop"), aa("git push origin +develop"), aa("git push origin :develop"), aa("git push --delete origin develop"), aa("git push --tags origin"), aa("git push --all origin"), aa("git push --no-verify origin develop")], [false, false, false, false, false, false, false, false]);
+eq("branch-guard/AC-14 push 以外を含むコマンドは省かない", [aa("git push origin develop && rm -rf x"), aa("git push origin develop; echo x"), aa("git push origin develop || true"), aa("git push origin develop | sh"), aa("git push origin develop > out.txt"), aa("git push origin $(echo develop)"), aa("git push origin develop | tail -3 | sh"), aa("GIT_SSH_COMMAND=x git push origin develop"), aa("git -c core.sshCommand=x push origin develop"), aa("git push origin develop &")], [false, false, false, false, false, false, false, false, false, false]);
+eq("branch-guard/AC-14 宣言で有効にしていなければ省かない", aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } })), false);
+const autoDirty = mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } });
+writeFileSync(join(autoDirty, ".claude/branch-release-workflow.json"), JSON.stringify(autoCfg));
+eq("branch-guard/AC-14 作業ツリーで書き換えた宣言では省かない", aa("git push origin develop", autoDirty), false);
+const autoMap = mkRepo("develop", autoCfg);
+g(autoMap, "config", "remote.origin.push", "refs/heads/develop:refs/heads/main");
+eq("branch-guard/AC-14 remote.<名前>.push で送り先を変えていれば省かない", aa("git push origin develop", autoMap), false);
+const autoUp = mkRepo("develop", autoCfg);
+g(autoUp, "config", "branch.develop.merge", "refs/heads/main");
+g(autoUp, "config", "push.default", "upstream");
+eq("branch-guard/AC-14 送り先を省き、追跡先が別名なら省かない", [aa("git push", autoUp), aa("git push origin develop", autoUp)], [false, true]);
+eq("branch-guard/AC-14 autoApprove の値が真偽値でない・未知のキーなら不正", [validateConfig({ ...autoCfg, autoApprove: { push: "yes" } }).length, validateConfig({ ...autoCfg, autoApprove: { merge: true } }).length, validateConfig({ ...autoCfg, autoApprove: true }).length], [1, 1, 1]);
+const onDevAuto = mkRepo("dev/feat", autoCfg);
+const ap = (cmd, repo = onDevAuto) => autoApprovable(cmd, repo);
+eq("branch-guard/AC-15 作業ブランチから切り出し元への PR の作成は確認を省く", [
+  ap('gh pr create --base develop --title "t" --body "a; b | c && d"'),
+  ap("gh pr create -B develop -H dev/feat -t 'x' -b 'y' --draft"),
+  ap("gh pr create --base=develop --fill"),
+  ap('git push -u origin dev/feat && gh pr create --base develop --title "t" --body "b"'),
+], [true, true, true, true]);
+eq("branch-guard/AC-15 切り出し元以外・取り込み先の省略・保護ブランチからの PR は省かない", [
+  ap('gh pr create --base main --title "t" --body "b"'),
+  ap('gh pr create --title "t" --body "b"'),
+  ap('gh pr create --base develop --title "t" --body "b"', mkRepo("main", autoCfg)),
+  ap('gh pr create --base develop --head other:dev/feat --title "t"'),
+], [false, false, false, false]);
+eq("branch-guard/AC-15 他のリポジトリ・ブラウザ・展開・別のコマンドを伴う PR は省かない", [
+  ap('gh pr create -R x/y --base develop --title "t"'),
+  ap("gh pr create --base develop --web"),
+  ap('gh pr create --base develop --title "t" --body "$(cat f)"'),
+  ap('gh pr create --base develop --title "t"; rm -rf x'),
+  ap("gh pr merge 1"),
+], [false, false, false, false, false]);
+eq("branch-guard/AC-15 pullRequest を有効にしていなければ省かない", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true } })), false);
+const hookOut = (cmd, repo) => spawnSync("node", [brw, "hook"], { cwd: repo, input: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd }, cwd: repo }), encoding: "utf8" }).stdout;
+eq("branch-guard/AC-14 フックは省けるとき allow を返し、それ以外の許可では何も返さない", [JSON.parse(hookOut("git push origin develop", auto)).hookSpecificOutput.permissionDecision, hookOut("git commit -m x", auto), hookOut("git push origin develop && ls", auto)], ["allow", "", ""]);
+
 const t0 = Date.now();
 for (let i = 0; i < 16; i++) judgeCommand("git commit -m x", onDev);
 eq("branch-guard/AC-6 判定 16 件が 10 秒以内", Date.now() - t0 <= 10_000, true);
@@ -237,7 +285,7 @@ eq("preview/AC-9 接頭辞を除いた alias のURLを算出", previewUrl(stripC
 eq("preview/AC-9 後始末の名前も接頭辞を除く", getProvider(stripCfg).cleanup(stripCfg, "dev/foo-bar").args.at(-1), "foo-bar");
 eq("preview/AC-9 接頭辞が文字列でなければ不正", validateConfig({ ...cfg, preview: { ...cfg.preview, aliasStripPrefix: 1 } }).length, 1);
 const cl = run(withWf, "cleanup", "dev/foo");
-eq("preview/AC-6 実行指定なしはコマンドを表示するだけ", cl.status === 0 && cl.stdout.includes("wrangler preview delete --name dev-foo") && cl.stdout.includes("表示のみ"), true);
+eq("preview/AC-6 実行指定なしはコマンドを表示するだけ", cl.status === 0 && cl.stdout.includes("wrangler preview delete -y --name dev-foo") && cl.stdout.includes("表示のみ"), true);
 
 // ---- preview: workers.dev 関連キー ----
 const withDomain = `{
@@ -275,6 +323,129 @@ run(wcDir, "wrangler-config", "--write");
 const wcFalse = cloudflare.parseJsonc(readFileSync(wcFile, "utf8"));
 eq("preview/AC-7 有効な独自ドメインでキーがなければ false で追加される", [wcFalse.workers_dev, wcFalse.preview_urls], [false, false]);
 eq("preview/AC-8 有効な独自ドメインがありキーなしは警告しない", wcDirty('{ "routes": [{ "pattern": "a", "custom_domain": true }] }'), 0);
+
+
+// ---- preview: 配信方式とプレビュー先 ----
+eq("preview/AC-10 workers.dev のホスト名は workers.dev 配信", deliveryOf("https://{alias}-app.acct.workers.dev"), "workers-dev");
+eq("preview/AC-10 独自ドメインは独自ドメイン配信", deliveryOf("https://{alias}.example.com"), "custom-domain");
+eq("preview/AC-10 変数だけのホスト名は独自ドメイン配信", deliveryOf("https://{alias}.${SITE_HOST}"), "custom-domain");
+process.env.SITE_HOST = "example.com";
+eq("preview/AC-13 URL 雛形の変数を環境変数で解決", previewUrl({ preview: { provider: "url-template", urlTemplate: "https://{alias}.${SITE_HOST}" } }, "dev/foo"), "https://dev-foo.example.com");
+delete process.env.SITE_HOST;
+
+const tpl = `{
+  // テンプレート
+  "name": "app",
+  "main": "index.js",
+  "routes": [
+    { "pattern": "PLACEHOLDER", "custom_domain": true },
+    { "pattern": "ogp.example.com/*", "zone_name": "example.com" },
+  ],
+  "vars": { "A": "1" },
+}
+`;
+const dcfg = (over = {}, prevOver = {}) => ({
+  ...cfg,
+  protectedBranches: ["main", "develop", "release/**"],
+  aliasStripPrefix: undefined,
+  deploy: {
+    provider: "cloudflare-workers",
+    template: "config/wrangler.template.jsonc",
+    targets: {
+      production: { branches: ["release/**"], worker: "app", customDomain: "${SITE_HOST}" },
+      develop: { branches: ["develop"], worker: "app-develop", customDomain: "develop.${SITE_HOST}" },
+    },
+    ...over,
+  },
+  preview: { provider: "cloudflare-previews", target: "develop", urlTemplate: "https://{alias}.develop.${SITE_HOST}", aliasStripPrefix: "dev/", ...prevOver },
+});
+const mkDeployRepo = (config, files = {}) => {
+  const r = mkRepo("dev/foo", config);
+  mkdirSync(join(r, "config"), { recursive: true });
+  writeFileSync(join(r, "config/wrangler.template.jsonc"), tpl);
+  for (const [f, t] of Object.entries(files)) {
+    mkdirSync(dirname(join(r, f)), { recursive: true });
+    writeFileSync(join(r, f), t);
+  }
+  return r;
+};
+const errsOf = (c) => validateConfig(c).join("\n");
+const noTarget = dcfg(); delete noTarget.preview.target;
+eq("preview/AC-11 配備先があるのにプレビュー先が無いと誤り", /preview\.target/.test(errsOf(noTarget)), true);
+eq("preview/AC-11 宣言に無い配備先を指すと誤り", /preview\.target/.test(errsOf(dcfg({}, { target: "nope" }))), true);
+eq("preview/AC-11 正しい宣言は誤りなし", validateConfig(dcfg()), []);
+const clRepo = mkDeployRepo(dcfg());
+const clOut = run(clRepo, "cleanup", "dev/foo-bar");
+eq("preview/AC-11 後始末にプレビュー先の Worker 名が含まれる", clOut.stdout.includes("wrangler preview delete -y --worker-name app-develop --name foo-bar"), true);
+const clVar = mkDeployRepo(dcfg({ targets: { develop: { branches: ["develop"], worker: "${WORKER_X}" } } }));
+eq("preview/AC-11 Worker 名の変数が未解決なら後始末は終了コード 1", run(clVar, "cleanup", "dev/foo").status, 1);
+
+const chk = (config) => cloudflare.check(mkDeployRepo(config), normalizeConfig(config));
+const wdCfg = dcfg({ targets: { develop: { branches: ["develop"], worker: "app-develop" } } }, { urlTemplate: "https://{alias}-other.acct.workers.dev" });
+eq("preview/AC-12 workers.dev 配信で Worker 名が食い違うと警告", chk(wdCfg).some((f) => f.level === "warn" && f.message.includes("{alias}-app-develop.")), true);
+const cdNoDomain = dcfg({ targets: { develop: { branches: ["develop"], worker: "app-develop" } } });
+eq("preview/AC-12 独自ドメイン配信でプレビュー先に独自ドメインが無いと誤り", chk(cdNoDomain).some((f) => f.level === "error" && f.message.includes("customDomain")), true);
+const longCfg = { ...dcfg({ targets: { develop: { branches: ["develop"], worker: "a-very-long-worker-name-for-testing" } } }, { urlTemplate: "https://{alias}-a-very-long-worker-name-for-testing.acct.workers.dev" }), maxNameLength: 54 };
+eq("preview/AC-12 alias と Worker 名で 63 文字を超えうると警告", chk(longCfg).some((f) => f.level === "warn" && f.message.includes("63")), true);
+eq("preview/AC-12 整合する宣言では URL の警告が出ない", chk(dcfg()).filter((f) => /urlTemplate|63|customDomain/.test(f.message)), []);
+
+const wdRoot = mkdtempSync(join(tmpdir(), "brw-wd-"));
+writeFileSync(join(wdRoot, "wrangler.jsonc"), '{ "name": "x", "workers_dev": true, "preview_urls": false }');
+eq("preview/AC-4 workers.dev 配信で preview_urls が true でなければ誤り", cloudflare.check(wdRoot, { preview: { urlTemplate: "https://{alias}-x.a.workers.dev" } }).some((f) => f.level === "error" && f.message.includes("preview_urls")), true);
+const wdApplied = cloudflare.parseJsonc(cloudflare.applyWorkersDev('{ "routes": [{ "pattern": "a", "custom_domain": true }] }', "workers-dev").text);
+eq("preview/AC-7 workers.dev 配信では独自ドメインがあっても preview_urls は true", [wdApplied.workers_dev, wdApplied.preview_urls], [false, true]);
+
+// ---- deploy ----
+eq("deploy/AC-1 配備先が無いと誤り", /targets/.test(errsOf(dcfg({ targets: {} }))), true);
+eq("deploy/AC-1 ブランチが無い配備先は誤り", /branches/.test(errsOf(dcfg({ targets: { develop: { worker: "x" } } }))), true);
+eq("deploy/AC-1 不明な provider は誤り", /deploy\.provider/.test(errsOf(dcfg({ provider: "x" }))), true);
+eq("deploy/AC-1 不正な取得元は誤り", /brwSource/.test(errsOf(dcfg({ brwSource: { repository: "git@github.com:a/b.git" } }))), true);
+process.env.BRW_T_HOST = "h.example";
+eq("deploy/AC-2 環境変数があれば置き換わる", resolveVars("x.${BRW_T_HOST}", root), { value: "x.h.example", missing: [] });
+delete process.env.BRW_T_HOST;
+eq("deploy/AC-2 環境変数も GitHub Variables も無ければ未解決", resolveVars("x.${BRW_T_HOST}", root), { value: "x.${BRW_T_HOST}", missing: ["BRW_T_HOST"] });
+
+const rRepo = mkDeployRepo(dcfg());
+const renderOf = (repo, target, env = { SITE_HOST: "example.com" }) => {
+  const r = spawnSync("node", [brw, "render-wrangler", "--target", target], { cwd: repo, encoding: "utf8", env: { ...process.env, ...env } });
+  return r.status === 0 ? cloudflare.parseJsonc(r.stdout) : r;
+};
+const prod = renderOf(rRepo, "production");
+eq("deploy/AC-3 Worker 名が宣言の値になる", prod.name, "app");
+eq("deploy/AC-3 独自ドメインの route がある", prod.routes.find((x) => x.custom_domain), { pattern: "example.com", custom_domain: true });
+eq("deploy/AC-3 独自ドメインのある配備先は workers_dev / preview_urls が false", [prod.workers_dev, prod.preview_urls], [false, false]);
+const dev = renderOf(rRepo, "develop");
+eq("deploy/AC-4 独自ドメイン配信のプレビュー先は previews_enabled が付く", dev.routes.find((x) => x.custom_domain), { pattern: "develop.example.com", custom_domain: true, previews_enabled: true });
+eq("deploy/AC-4 プレビュー先には previews が置かれる", typeof dev.previews, "object");
+eq("deploy/AC-5 独自ドメインでない route は残る", dev.routes.some((x) => x.pattern === "ogp.example.com/*"), true);
+eq("deploy/AC-5 テンプレートの独自ドメインの route は置き換わる", dev.routes.some((x) => x.pattern === "PLACEHOLDER"), false);
+const wdRepo = mkDeployRepo(dcfg({ targets: { production: { branches: ["main"], worker: "app", customDomain: "example.com" }, develop: { branches: ["develop"], worker: "app-develop" } } }, { urlTemplate: "https://{alias}-app-develop.acct.workers.dev" }));
+const wdDev = renderOf(wdRepo, "develop");
+eq("deploy/AC-4 workers.dev 配信のプレビュー先は preview_urls が true、previews が置かれる", [wdDev.workers_dev, wdDev.preview_urls, typeof wdDev.previews, wdDev.routes?.some((x) => x.custom_domain) ?? false], [true, true, "object", false]);
+const missRun = spawnSync("node", [brw, "render-wrangler", "--target", "production", "--write"], { cwd: rRepo, encoding: "utf8", env: { ...process.env, SITE_HOST: "" } });
+eq("deploy/AC-6 未解決の変数があると終了コード 1 で生成先を書かない", [missRun.status, existsSync(join(rRepo, "wrangler.jsonc"))], [1, false]);
+const hookRepo = mkDeployRepo(dcfg({ renderHook: 'printf "%s %s" "$BRW_TARGET" "$BRW_OUTPUT" > hook.out; exit 3' }));
+const hookRun = spawnSync("node", [brw, "render-wrangler", "--target", "develop", "--write"], { cwd: hookRepo, encoding: "utf8", env: { ...process.env, SITE_HOST: "example.com" } });
+eq("deploy/AC-7 renderHook が失敗すると非ゼロで終わる", hookRun.status, 3);
+eq("deploy/AC-7 renderHook に配備先名と生成先が渡る", readFileSync(join(hookRepo, "hook.out"), "utf8"), `develop ${join(hookRepo, "wrangler.jsonc")}`);
+
+const wfText = run(rRepo, "gen-workflow", "deploy").stdout;
+eq("deploy/AC-8 全配備先のブランチが push の対象", wfText.includes("branches: ['release/**', 'develop']"), true);
+eq("deploy/AC-9 取得元の clone が含まれる", wfText.includes("fetch -q --depth 1 'https://github.com/nekono-dev/branch-release-workflow.git' 'main'"), true);
+eq("deploy/AC-9 宣言で参照する変数を渡す", wfText.includes("SITE_HOST: ${{ vars.SITE_HOST }}"), true);
+const pwText = run(rRepo, "gen-workflow", "preview").stdout;
+eq("preview/AC-11 プレビュー雛形にプレビュー先の生成手順が含まれる", pwText.includes('BRW_TARGET_NAME: develop') && pwText.includes("SITE_HOST: ${{ vars.SITE_HOST }}"), true);
+mkdirSync(join(rRepo, ".github/workflows"), { recursive: true });
+writeFileSync(join(rRepo, ".github/workflows/deploy.yaml"), "name: keep\n");
+eq("deploy/AC-8 既存の deploy.yaml は上書きしない", [run(rRepo, "gen-workflow", "deploy", "--write").status, readFileSync(join(rRepo, ".github/workflows/deploy.yaml"), "utf8")], [1, "name: keep\n"]);
+
+const ckCfg = dcfg({ targets: { develop: { branches: ["staging"], worker: "app-develop", customDomain: "develop.${SITE_HOST}" } } });
+const ckRepo = mkDeployRepo(ckCfg, { "wrangler.jsonc": "{}" });
+g(ckRepo, "add", "-f", "wrangler.jsonc");
+g(ckRepo, "commit", "-q", "-m", "生成物");
+const ck = deployCf.check(ckRepo, normalizeConfig(ckCfg));
+eq("deploy/AC-10 保護ブランチに無い配備先のブランチを警告", ck.some((f) => f.level === "warn" && f.message.includes("'staging'")), true);
+eq("deploy/AC-10 git に登録された生成先を警告", ck.some((f) => f.level === "warn" && f.message.includes("登録")), true);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

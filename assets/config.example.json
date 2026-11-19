@@ -4,6 +4,7 @@
   "baseBranch": "develop",
   "namePattern": "^dev/[a-z0-9]+(-[a-z0-9]+)*$",
   "maxNameLength": 54,
+  "autoApprove": { "push": true, "pullRequest": true },
   "preview": {
     "provider": "cloudflare-previews",
     "urlTemplate": "https://{alias}.example.com"

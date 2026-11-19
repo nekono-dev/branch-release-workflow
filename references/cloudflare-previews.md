@@ -1,6 +1,39 @@
 # Cloudflare Previews（provider: cloudflare-previews）
 
-`wrangler preview`（open beta）でブランチ別の Preview を独自ドメインで配信する方式。旧方式の `wrangler versions upload --preview-alias` は `workers.dev` 以外で配信できないため、Previews を使う。
+`wrangler preview`（open beta）でブランチ別の Preview を配信する方式。配信先は独自ドメインと workers.dev から選べ、宣言の `preview.urlTemplate` のホスト名で決まる（`.workers.dev` で終われば workers.dev 配信）。旧方式の `wrangler versions upload --preview-alias` は workers.dev 以外で配信できないため、Previews を使う。
+
+## 配信方式と URL
+
+実機（wrangler 4.165.0）で確認した URL の形。Preview の URL は同じ名前なら作り直しても変わらない。
+
+| 配信方式 | Preview の URL | 必要な設定（プレビュー先の Worker） |
+|---|---|---|
+| 独自ドメイン | `https://<名前>.<独自ドメイン>` | 独自ドメインの route に `previews_enabled: true` |
+| workers.dev | `https://<名前>-<Worker 名>.<アカウントのサブドメイン>.workers.dev` | `preview_urls: true`（`workers_dev: false` のままでよい） |
+
+- どちらの設定も無いと、`wrangler preview` は成功するのに URL が空になる。`brw check` はこれを ERROR にする。
+- これとは別に、デプロイごとの URL（`<ID 先頭 8 桁>-<Worker 名>...` や `<ID 先頭 8 桁>.<独自ドメイン>`）も出る。案内には Preview の URL（`brw url`）を使う。
+- 独自ドメインの Preview は、2 階層目のサブドメイン（`<名前>.develop.example.com`）の証明書の発行に数分かかる。push 直後に繋がらなければ待つ。
+- workers.dev の場合、プレビューのホスト名の先頭のラベルは「名前-Worker 名」なので、Worker 名の分だけプレビュー名に使える文字数が減る（63 文字まで）。
+
+## 本番用と開発用の Worker を分ける
+
+宣言に `deploy` を書くと、配備先ごとに Worker を分け、プレビューは `preview.target` の Worker（開発用）に作る（`references/config.md`）。CI は `brw render-wrangler --target <配備先> --write` でテンプレートから wrangler 設定を生成してから、`wrangler deploy` か `wrangler preview` を実行する（`brw gen-workflow deploy` / `preview` の雛形）。
+
+実機で確認した組み合わせ:
+
+| 構成 | 結果 |
+|---|---|
+| 本番: 独自ドメイン、`workers_dev: false`・`preview_urls: false` | 独自ドメインで本番が応答。workers.dev は無効（1042） |
+| 開発: 独自ドメインなし、`workers_dev: false`・`preview_urls: true` | Worker 本体の workers.dev は無効のまま、Preview だけ workers.dev で応答 |
+| 開発: 独自ドメイン＋`previews_enabled: true`、`preview_urls: false` | Preview は独自ドメインで応答。workers.dev の Preview は無効（1042） |
+
+後始末は `wrangler preview delete -y --worker-name <プレビュー先の Worker> --name <名前>`（`brw cleanup`）。設定ファイルが無くても削除先を指定できる。存在しない名前は終了コード 1。
+
+- `customDomain` を外して配備しても、`wrangler deploy` は前に付けた独自ドメインを Worker から外さない（実機で確認）。独自ドメイン配信から workers.dev 配信へ移すときは、ダッシュボードか Workers ドメイン API で独自ドメインを外す。残したままだと、Preview は独自ドメインと workers.dev の両方の URL で作られる。
+- Preview の削除は、数十秒ほどで独自ドメインにも反映される（それまでは前の内容が返ることがある）。
+
+検証環境で `brw render-wrangler` の生成結果をそのまま配備し、独自ドメイン配信・workers.dev 配信とも、`brw url` の URL と wrangler が返す Preview の URL が一致して応答すること、`brw cleanup --execute` で削除できることを確認した（wrangler 4.165.0）。
 
 ## 前提
 
@@ -20,7 +53,7 @@
 
 ## workers.dev の設定
 
-`workers_dev` と `preview_urls` は、省略せず明示する（独自ドメインが有効なら両方 `false`、無効なら両方 `true`）。`brw wrangler-config` が設定する。独自ドメインの有効判定は、`routes` の `custom_domain: true` で `enabled: false` でないもの。
+`workers_dev` と `preview_urls` は、省略せず明示する。配備先を宣言しない構成では `brw wrangler-config` が設定する（`workers_dev` は独自ドメインが無いときだけ `true`。`preview_urls` は workers.dev 配信なら `true`、独自ドメイン配信なら `workers_dev` と同じ）。配備先を宣言した構成では `brw render-wrangler` が設定する。独自ドメインの有効判定は、`routes` の `custom_domain: true` で `enabled: false` でないもの。
 
 実機の確認結果（wrangler 4.147.0、`routes` に独自ドメインがある使い捨て Worker）:
 

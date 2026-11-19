@@ -1,6 +1,6 @@
 // 共通処理: 宣言ファイルの読み込み・検証、ブランチ判定、workflow の走査。
 // 外部依存なし（Node 標準ライブラリのみ）。
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -38,6 +38,10 @@ export function enabledInRepo(root) {
 
 // 宣言ファイルが現在の commit に含まれているか。含まれていなければ、CI やほかの clone からは宣言が見えない
 export const configCommitted = (root) => git(root, "cat-file", "-e", `HEAD:${configRel(root)}`) !== null;
+
+// 宣言ファイルが現在の commit と同じ内容か（登録済みで、作業ツリーで書き換えていない）。
+// 確認を省く判断は、登録された宣言だけに基づかせる（作業中に書き換えた宣言で自分に許可を与えないため）
+export const configMatchesHead = (root) => configCommitted(root) && git(root, "diff", "--quiet", "HEAD", "--", configRel(root)) !== null;
 
 // glob（* は "/" を除く任意文字列、** は "/" を含む任意文字列）を正規表現へ変換する
 export function globToRegExp(glob) {
@@ -93,6 +97,14 @@ export function validateConfig(c) {
     }
   }
   if (c.maxNameLength !== undefined && !Number.isInteger(c.maxNameLength)) errs.push("maxNameLength は整数にしてください");
+  if (c.autoApprove !== undefined) {
+    const a = c.autoApprove;
+    if (typeof a !== "object" || a === null || Array.isArray(a)) errs.push("autoApprove はオブジェクトにしてください（push・pullRequest）");
+    else for (const [k, v] of Object.entries(a)) {
+      if (!["push", "pullRequest"].includes(k)) errs.push(`autoApprove.${k} は未知のキーです（push・pullRequest）`);
+      else if (typeof v !== "boolean") errs.push(`autoApprove.${k} は true / false にしてください`);
+    }
+  }
   if (c.preview !== undefined) {
     const p = c.preview;
     const provider = p.provider ?? (p.urlTemplate ? "url-template" : "none");
@@ -100,16 +112,129 @@ export function validateConfig(c) {
     if (provider !== "none" && typeof p.urlTemplate !== "string") errs.push("preview.urlTemplate が必要です（{alias} を含める）");
     if (typeof p.urlTemplate === "string" && !p.urlTemplate.includes("{alias}")) errs.push("preview.urlTemplate には {alias} を含めてください");
     if (p.aliasStripPrefix !== undefined && typeof p.aliasStripPrefix !== "string") errs.push("preview.aliasStripPrefix は文字列にしてください");
+    const targets = c.deploy?.targets && typeof c.deploy.targets === "object" ? Object.keys(c.deploy.targets) : null;
+    if (p.target !== undefined && (typeof p.target !== "string" || !targets?.includes(p.target)))
+      errs.push(`preview.target は deploy.targets の名前（${targets?.join(" / ") || "deploy が無い"}）にしてください`);
+    if (p.target === undefined && targets && provider === "cloudflare-previews") errs.push("deploy.targets があるときは preview.target（プレビューを作る配備先）が必要です");
   }
+  if (c.deploy !== undefined) errs.push(...validateDeploy(c.deploy));
   return errs;
 }
+
+// ---- 配備先（deploy） ------------------------------------------------------
+
+export const DEFAULT_BRW_SOURCE = { repository: "https://github.com/nekono-dev/branch-release-workflow.git", ref: "main" };
+const DEPLOY_PROVIDERS = ["cloudflare-workers"];
+
+function validateDeploy(dp) {
+  const errs = [];
+  if (typeof dp !== "object" || dp === null || Array.isArray(dp)) return ["deploy はオブジェクトにしてください"];
+  const str = (v) => typeof v === "string" && v.length > 0;
+  if (!DEPLOY_PROVIDERS.includes(dp.provider)) errs.push(`deploy.provider は ${DEPLOY_PROVIDERS.join(" / ")} にしてください`);
+  if (!str(dp.template)) errs.push("deploy.template（wrangler 設定のテンプレートのパス）が必要です");
+  for (const k of ["output", "renderHook"]) if (dp[k] !== undefined && !str(dp[k])) errs.push(`deploy.${k} は空でない文字列にしてください`);
+  if (dp.brwSource !== undefined) {
+    const s = dp.brwSource;
+    if (typeof s !== "object" || s === null) errs.push("deploy.brwSource はオブジェクトにしてください（repository・ref）");
+    else {
+      if (s.repository !== undefined && !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\.git$/.test(s.repository)) errs.push("deploy.brwSource.repository は https://github.com/<owner>/<repo>.git の形にしてください");
+      if (s.ref !== undefined && !(str(s.ref) && (/^[0-9a-f]{40}$/.test(s.ref) || validBranchName(s.ref)))) errs.push("deploy.brwSource.ref はブランチ名か 40 桁のコミットにしてください");
+    }
+  }
+  const t = dp.targets;
+  if (typeof t !== "object" || t === null || Array.isArray(t) || !Object.keys(t).length) errs.push("deploy.targets に配備先を1つ以上書いてください");
+  else
+    for (const [name, v] of Object.entries(t)) {
+      const at = `deploy.targets.${name}`;
+      if (!/^[a-z][a-z0-9-]*$/.test(name)) errs.push(`${at}: 配備先の名前は英小文字・数字・ハイフンにしてください`);
+      if (typeof v !== "object" || v === null) { errs.push(`${at} はオブジェクトにしてください`); continue; }
+      if (!Array.isArray(v.branches) || !v.branches.length || v.branches.some((b) => !str(b))) errs.push(`${at}.branches は1つ以上の文字列の配列にしてください`);
+      if (v.worker !== undefined && !str(v.worker)) errs.push(`${at}.worker は空でない文字列にしてください`);
+      if (v.customDomain !== undefined && !(str(v.customDomain) && !/:\/\/|\//.test(v.customDomain))) errs.push(`${at}.customDomain はホスト名だけを書いてください（https:// や / を含めない）`);
+    }
+  return errs;
+}
+
+// git check-ref-format --branch 相当の簡易判定（git を呼ばずに検証するため）
+const validBranchName = (b) => !/(^[-/.]|\.\.|[\s~^:?*[\\]|@\{|\/\/|[/.]$|\.lock$)/.test(b);
 
 export function normalizeConfig(c) {
   const preview = c.preview
     ? { provider: c.preview.provider ?? (c.preview.urlTemplate ? "url-template" : "none"), ...c.preview }
     : { provider: "none" };
-  return { baseBranch: "develop", maxNameLength: 54, ...c, preview };
+  const deploy = c.deploy
+    ? { output: "wrangler.jsonc", ...c.deploy, brwSource: { ...DEFAULT_BRW_SOURCE, ...(c.deploy.brwSource ?? {}) } }
+    : undefined;
+  return { baseBranch: "develop", maxNameLength: 54, ...c, preview, ...(deploy ? { deploy } : {}) };
 }
+
+// ---- JSONC --------------------------------------------------------------
+
+// JSONC（コメント・末尾カンマ入りの JSON）を読む。文字列の中身は変えない
+export function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      i = text.indexOf("*/", i + 2);
+      if (i < 0) throw new Error("コメントが閉じていません");
+      i++;
+    } else out += c;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+}
+
+// ---- 変数（${NAME}）の解決 ---------------------------------------------------
+
+const VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
+export const varNames = (s) => typeof s === "string" ? [...s.matchAll(VAR_RE)].map((m) => m[1]) : [];
+
+// 宣言で変数を使える値（配備先の worker・customDomain、preview.urlTemplate）に出てくる変数名
+export function configVarNames(config) {
+  const vals = [config.preview?.urlTemplate];
+  for (const t of Object.values(config.deploy?.targets ?? {})) vals.push(t.worker, t.customDomain);
+  return [...new Set(vals.flatMap(varNames))];
+}
+
+// 変数の値を探す。環境変数（空は未設定とみなす）→ GitHub Variables（gh api）→ 無ければ null。
+// gh の結果は 1 回の実行の中で覚えておく。BRW_NO_GH=1 なら gh を使わない（テスト用）
+const ghCache = new Map();
+export function lookupVar(name, cwd) {
+  if (process.env[name]) return process.env[name];
+  if (process.env.BRW_NO_GH === "1") return null;
+  if (!ghCache.has(name)) {
+    // gh variable get は新しい gh にしか無いため、古い gh でも使える REST API で読む（{owner}/{repo} は gh が cwd のリポジトリで置き換える）
+    const r = spawnSync("gh", ["api", `repos/{owner}/{repo}/actions/variables/${name}`, "--jq", ".value"], { cwd, encoding: "utf8", timeout: 15000 });
+    ghCache.set(name, r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null);
+  }
+  return ghCache.get(name);
+}
+
+// 文字列の ${NAME} を解決する。戻り値: { value（未解決の変数は残す）, missing: 未解決の変数名[] }
+export function resolveVars(s, cwd) {
+  const missing = [];
+  const value = s.replace(VAR_RE, (all, name) => {
+    const v = lookupVar(name, cwd);
+    if (v === null) missing.push(name);
+    return v ?? all;
+  });
+  return { value, missing: [...new Set(missing)] };
+}
+
+// ---- プレビューの配信方式 ----------------------------------------------------
+
+// URL 雛形のホスト名（:// の後から最初の / まで）
+export const urlHost = (tpl) => (tpl.split("://")[1] ?? tpl).split("/")[0];
+// URL 雛形のホスト名が .workers.dev で終われば workers.dev 配信、それ以外は独自ドメイン配信（変数は解決せずに判定する）
+export const deliveryOf = (tpl) => (typeof tpl === "string" && urlHost(tpl).endsWith(".workers.dev") ? "workers-dev" : "custom-domain");
 
 // 'refs/heads/' を除いた短いブランチ名にする
 export const shortRef = (r) => r.replace(/^refs\/heads\//, "").replace(/^\+/, "");

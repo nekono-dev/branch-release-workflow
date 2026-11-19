@@ -6,18 +6,20 @@
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートから worktree を作り直す）
 //   url [ブランチ]             プレビューURLを表示
 //   check                      宣言・workflow・provider 設定の整合検査
-//   gen-workflow [--write]     provider の preview workflow 雛形を出力（--write で .github/workflows/preview.yaml へ）
+//   gen-workflow [preview|deploy] [--write]  preview（provider）または deploy（配備先）の workflow 雛形を出力（--write で .github/workflows/<種類>.yaml へ）
 //   cleanup <ブランチ> [--execute]  provider 固有の後始末（既定は表示のみ）
-//   wrangler-config [ファイル] [--write]  独自ドメインの有効状況に応じて wrangler 設定の workers_dev / preview_urls を設定
+//   wrangler-config [ファイル] [--write]  独自ドメインの有効状況と配信方式に応じて wrangler 設定の workers_dev / preview_urls を設定（配備先を宣言しない構成）
+//   render-wrangler --target <配備先> [--write]  テンプレートから配備先の wrangler 設定を生成（--write で生成先へ書き renderHook を呼ぶ）
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_REL, configRel, checkName, configCommitted, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
-  scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees,
+  CONFIG_REL, configRel, checkName, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
-import { getProvider, previewUrl } from "./providers/index.mjs";
+import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
+import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
@@ -123,6 +125,182 @@ export function judgeCommand(command, cwd) {
   return worst;
 }
 
+// ---- フック用: 作業ブランチ運用の操作の確認を省けるか ---------------------------
+// 宣言の autoApprove で有効にした操作について、フックは許可（allow）を返し、利用者への確認を省く。
+//   push        作業ブランチへの通常の push
+//   pullRequest 作業ブランチから切り出し元（baseBranch）への PR の作成（gh pr create）
+// allow は Bash コマンド全体に効くため、コマンド全体がこれらの操作（と cd）だけのときに限る。
+// 少しでも外れるものは省かず、通常の確認に回す（拒否はしない）。
+
+// コマンドを引用符を考慮して区切る。戻り値: { segments: [{ tokens, pipes }] } か、解釈しきれないとき null。
+// 区切り: && と改行。パイプ（|）は直前の部分に付ける。; || & と、展開（$ ` \）は解釈しきれないので null
+export function splitCommand(command) {
+  const segments = [];
+  let tokens = [];
+  let pipes = null; // パイプの後ろのトークン列の配列
+  let cur = null; // 作りかけのトークン（null は無し）
+  let q = null; // 引用符の種類
+  const target = () => (pipes ? pipes[pipes.length - 1] : tokens);
+  const flush = () => {
+    if (cur !== null) target().push(cur);
+    cur = null;
+  };
+  const endSegment = () => {
+    flush();
+    if (tokens.length || pipes) segments.push({ tokens, pipes: pipes ?? [] });
+    tokens = [];
+    pipes = null;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (q === "'") {
+      if (c === "'") q = null;
+      else cur += c;
+      continue;
+    }
+    if (q === '"') {
+      if (c === '"') q = null;
+      else if (c === "$" || c === "`" || c === "\\") return null;
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur ??= "";
+    } else if (c === "$" || c === "`" || c === "\\" || c === ";" || c === "(" || c === ")") return null;
+    else if (c === "&" && command[i + 1] === "&") {
+      endSegment();
+      i++;
+    } else if (c === "\n") endSegment();
+    else if (c === "|") {
+      if (command[i + 1] === "|") return null;
+      flush();
+      (pipes ??= []).push([]);
+    } else if (c === "&") {
+      // 2>&1・&>/dev/null の & だけを許す（後回しの & は許さない）
+      if (!(cur !== null && /^\d?>$/.test(cur)) && command[i + 1] !== ">") return null;
+      cur = (cur ?? "") + c;
+    } else if (c === " " || c === "\t") flush();
+    else cur = (cur ?? "") + c;
+  }
+  if (q) return null;
+  endSegment();
+  return segments;
+}
+
+// 許すリダイレクト（出力を捨てる・まとめるだけ）。ファイルへの書き出しは含めない
+const SAFE_REDIRECT = /^(\d?>&\d|\d?>\/dev\/null|&>\/dev\/null)$/;
+// パイプの後ろに許すのは、出力の末尾・先頭を切り出すだけのコマンド
+const safePipe = (t) => (t[0] === "tail" || t[0] === "head") && (t.length === 1 || (t.length === 2 && /^-\d+$/.test(t[1])) || (t.length === 3 && t[1] === "-n" && /^\d+$/.test(t[2])));
+
+// 確認を省ける push のオプション。強制・削除・タグ・pre-push の省略・任意のコマンド実行につながるものは含めない
+const SAFE_PUSH_OPTS = new Set(["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--porcelain", "-n", "--dry-run", "--progress", "--no-progress"]);
+
+// git push の部分が確認を省ける形か。省けるなら { kind, cwd, args } を返す
+function safePush(t, cur) {
+  if (t[0] !== "git") return null; // 環境変数の前置（GIT_SSH_COMMAND など）は許さない
+  let dir = cur;
+  let i = 1;
+  while (i < t.length && t[i].startsWith("-")) {
+    if (t[i] !== "-C" || !t[i + 1]) return null; // -c（設定の上書き）などは許さない
+    dir = t[i + 1].startsWith("/") ? t[i + 1] : join(dir, t[i + 1]);
+    i += 2;
+  }
+  if (t[i] !== "push") return null;
+  const args = [];
+  for (const a of t.slice(i + 1)) {
+    if (SAFE_REDIRECT.test(a)) continue;
+    if (/[<>]/.test(a)) return null;
+    if (a.startsWith("-")) {
+      if (!SAFE_PUSH_OPTS.has(a)) return null;
+    } else if (a.startsWith("+") || a.startsWith(":") || a.includes(":+") || a.includes("refs/tags/")) return null; // 強制・削除・タグ
+    args.push(a);
+  }
+  return { kind: "push", cwd: dir, args };
+}
+
+// gh pr create のオプション。値を取るものと取らないもの。他のリポジトリを指す -R・ブラウザを開く -w などは含めない
+const PR_VALUE_OPTS = { "-B": "base", "--base": "base", "-H": "head", "--head": "head", "-t": null, "--title": null, "-b": null, "--body": null, "-F": null, "--body-file": null, "-l": null, "--label": null, "-a": null, "--assignee": null, "-r": null, "--reviewer": null, "-m": null, "--milestone": null, "-p": null, "--project": null, "-T": null, "--template": null };
+const PR_FLAG_OPTS = new Set(["-d", "--draft", "-f", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "--dry-run"]);
+
+// gh pr create の部分が確認を省ける形か。省けるなら { kind, cwd, base, head } を返す
+function safePullRequest(t, cur) {
+  if (t[0] !== "gh" || t[1] !== "pr" || t[2] !== "create") return null;
+  let base = null;
+  let head = null;
+  for (let i = 3; i < t.length; i++) {
+    let a = t[i];
+    if (SAFE_REDIRECT.test(a)) continue;
+    let value;
+    const eqAt = a.startsWith("--") ? a.indexOf("=") : -1;
+    if (eqAt > 0) {
+      value = a.slice(eqAt + 1);
+      a = a.slice(0, eqAt);
+    }
+    if (a in PR_VALUE_OPTS) {
+      if (value === undefined) {
+        if (i + 1 >= t.length) return null;
+        value = t[++i];
+      }
+      if (PR_VALUE_OPTS[a] === "base") base = value;
+      if (PR_VALUE_OPTS[a] === "head") head = value;
+    } else if (!PR_FLAG_OPTS.has(a) || value !== undefined) return null;
+  }
+  if (!base) return null; // 省くと gh はリポジトリの既定ブランチ（保護ブランチのことが多い）を使うので、明示を求める
+  if (head?.includes(":")) return null; // 別のリポジトリのブランチは対象外
+  return { kind: "pullRequest", cwd: cur, base, head: head ?? currentBranch(cur) };
+}
+
+export function autoApprovable(command, cwd) {
+  const segments = splitCommand(command);
+  if (!segments) return false;
+  let cur = cwd;
+  const ops = [];
+  for (const { tokens: t, pipes } of segments) {
+    if (pipes.some((p) => !safePipe(p))) return false;
+    if (t.length === 0) return false;
+    if (t[0] === "cd" && t.length === 2 && pipes.length === 0) {
+      cur = t[1].startsWith("/") ? t[1] : join(cur, t[1]);
+      continue;
+    }
+    const op = safePush(t, cur) ?? safePullRequest(t, cur);
+    if (!op) return false;
+    ops.push(op);
+  }
+  if (ops.length === 0) return false;
+  for (const op of ops) {
+    const root = repoRoot(op.cwd);
+    if (!root) return false;
+    const { config, error } = loadConfig(root);
+    if (error || !config || config.autoApprove?.[op.kind] !== true || !configMatchesHead(root)) return false;
+    if (op.kind === "push") {
+      if (!sameNamePush(op.args, op.cwd)) return false;
+      const targets = pushTargets(op.args, op.cwd);
+      if (!targets || targets.length === 0) return false;
+      if (targets.some((b) => judgeBranch(config, b).decision !== "allow")) return false;
+    } else {
+      // 取り込み先は切り出し元だけ。取り込み元は作業ブランチ（保護ブランチでない）
+      if (op.base !== config.baseBranch) return false;
+      if (!op.head || judgeBranch(config, op.head).decision !== "allow") return false;
+    }
+  }
+  return true;
+}
+// 送り先が、判定に使ったブランチ名そのものになるか。git の設定で別のブランチへ送られうるときは false
+function sameNamePush(args, cwd) {
+  // remote.<名前>.push は送り先の対応を書き換える（develop を main へ送る、など）
+  if (git(cwd, "config", "--get-regexp", "^remote\\..*\\.push$")) return false;
+  const refspecs = args.filter((a) => !a.startsWith("-")).slice(1);
+  if (refspecs.length > 0) return true;
+  // 送り先を省いた push は push.default と追跡先で決まる。同じ名前へ送る設定でなければ省かない
+  const mode = git(cwd, "config", "--get", "push.default") ?? "simple";
+  if (!["simple", "current"].includes(mode)) return false;
+  const branch = currentBranch(cwd);
+  if (!branch) return false;
+  const merge = git(cwd, "config", "--get", `branch.${branch}.merge`);
+  return merge === null || merge === `refs/heads/${branch}`;
+}
+
 async function hook() {
   let input = "";
   for await (const c of process.stdin) input += c;
@@ -134,7 +312,14 @@ async function hook() {
   }
   if (ev.tool_name !== "Bash" || !ev.tool_input?.command) return;
   const r = judgeCommand(ev.tool_input.command, ev.cwd ?? process.cwd());
-  if (r.decision === "allow") return;
+  if (r.decision === "allow") {
+    if (autoApprovable(ev.tool_input.command, ev.cwd ?? process.cwd())) {
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "[branch-release-workflow] 作業ブランチ運用の操作です（宣言の autoApprove により確認を省きます）。" },
+      }));
+    }
+    return;
+  }
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: r.decision, permissionDecisionReason: `[branch-release-workflow] ${r.reason}` },
   }));
@@ -324,7 +509,9 @@ function url(args) {
   const branch = args[0] ?? currentBranch(root) ?? fail("ブランチを特定できません。", 2);
   if (config.preview.provider === "none") fail("宣言の preview が無効（provider: none）のため、プレビューURLはありません。");
   if (!matchesAny(config.workBranches, branch) || checkName(config, branch)) fail(`ブランチ '${branch}' は作業ブランチの命名規則に合わないため、プレビューは発行されません。`);
-  console.log(previewUrl(config, branch));
+  const { url: u, missing } = previewUrlInfo(config, branch, root);
+  console.log(u);
+  if (missing.length) console.error(`注意: 変数 ${missing.join(", ")} を解決できませんでした（環境変数か GitHub Variables を設定してください）。`);
 }
 
 function check(args = []) {
@@ -336,7 +523,10 @@ function check(args = []) {
     findings.push({ level: "error", message: `${configRel(root)} が commit されていません。CI やほかの clone から宣言が見えないため、commit してリポジトリに登録してください。` });
   for (const f of undeclaredCiBranches(config, scanWorkflows(root)))
     findings.push({ level: "warn", message: `${f.file}: push 対象 '${f.glob}' が宣言の workBranches / protectedBranches に含まれません（意図しない CI/デプロイの可能性）。` });
-  if (!args.includes("--branches-only")) findings.push(...getProvider(config).check(root, config));
+  if (!args.includes("--branches-only")) {
+    if (config.deploy) findings.push(...deployCf.check(root, config));
+    findings.push(...getProvider(config).check(root, config));
+  }
   for (const f of findings) console.log(`${f.level === "error" ? "ERROR" : "WARN "} ${f.message}`);
   console.log("\n注意: workflow が本番向けかどうか（wrangler deploy か preview か等）と、リポジトリ外の設定（Pages の本番ブランチ等）は機械判定できません。");
   if (findings.some((f) => f.level === "error")) process.exit(1);
@@ -346,10 +536,13 @@ function check(args = []) {
 function genWorkflow(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
-  const text = getProvider(config).workflow(config);
-  if (!text) fail(`provider '${config.preview.provider}' には workflow 雛形がありません。`);
+  const kind = args.find((a) => !a.startsWith("--")) ?? "preview";
+  if (!["preview", "deploy"].includes(kind) || args.some((a) => a.startsWith("--") && a !== "--write")) fail("使い方: gen-workflow [preview|deploy] [--write]", 2);
+  let text;
+  if (kind === "deploy") text = config.deploy ? deployCf.workflow(config) : fail("宣言に deploy（配備先）がありません。");
+  else text = getProvider(config).workflow(config) ?? fail(`provider '${config.preview.provider}' には workflow 雛形がありません。`);
   if (!args.includes("--write")) return process.stdout.write(text);
-  const path = join(root, ".github/workflows/preview.yaml");
+  const path = join(root, `.github/workflows/${kind}.yaml`);
   if (existsSync(path)) fail(`${path} は既に存在します（上書きしません）。`);
   mkdirSync(join(root, ".github/workflows"), { recursive: true });
   writeFileSync(path, text);
@@ -360,27 +553,46 @@ function cleanup(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
   const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: cleanup <ブランチ> [--execute]", 2);
-  const c = getProvider(config).cleanup(config, branch);
+  const c = getProvider(config).cleanup(config, branch, root);
   if (!c) return console.log(`provider '${config.preview.provider}' には後始末がありません。`);
+  if (c.error) fail(c.error);
   console.log(`${c.cmd} ${c.args.join(" ")}`);
   if (!args.includes("--execute")) return console.log("（表示のみ。実行するには --execute）");
   process.exit(spawnSync(c.cmd, c.args, { cwd: root, stdio: "inherit" }).status ?? 1);
 }
 
-// 宣言ファイルや git リポジトリには依存しない（CI の設定生成でも使えるようにするため）
+// 宣言ファイルや git リポジトリが無くても動く（CI の設定生成でも使えるようにするため）。
+// 宣言が読めれば、その urlTemplate から配信方式を判定する。読めなければ独自ドメイン配信として扱う
 function wranglerConfig(args) {
+  const root = repoRoot(process.cwd());
+  const { config } = root ? loadConfig(root) : {};
+  const delivery = config?.preview?.provider === "none" ? "custom-domain" : deliveryOf(config?.preview?.urlTemplate);
   const file = args.find((a) => !a.startsWith("--")) ?? "wrangler.jsonc";
   if (!/\.jsonc?$/.test(file)) fail(`${file} は JSONC / JSON ではありません（toml は対象外です）。`);
   if (!existsSync(file)) fail(`${file} が見つかりません。`);
   let r;
   try {
-    r = applyWorkersDev(readFileSync(file, "utf8"));
+    r = applyWorkersDev(readFileSync(file, "utf8"), delivery);
   } catch (e) {
     fail(`${file} を処理できません: ${e.message}`);
   }
   if (!args.includes("--write")) return process.stdout.write(r.text);
   writeFileSync(file, r.text);
-  console.log(`${file}: 有効な独自ドメインが${r.active ? "あるため workers_dev / preview_urls を false にしました" : "ないため workers_dev / preview_urls を true にしました"}`);
+  console.log(`${file}: 有効な独自ドメインが${r.active ? "ある" : "ない"}${delivery === "workers-dev" ? "（workers.dev 配信）" : ""}ため workers_dev: ${r.want.workers_dev} / preview_urls: ${r.want.preview_urls} にしました`);
+}
+
+// テンプレートから配備先の wrangler 設定を生成する（specs/deploy D-3）
+function renderWrangler(args) {
+  const root = repoRoot(process.cwd()) ?? process.cwd();
+  const config = need(root);
+  if (!config.deploy) fail("宣言に deploy（配備先）がありません。配備先を宣言しない構成では wrangler-config を使います。");
+  const ti = args.indexOf("--target");
+  const target = ti >= 0 ? args[ti + 1] : undefined;
+  if (!target || args.some((a, i) => a !== "--write" && i !== ti && i !== ti + 1)) fail("使い方: render-wrangler --target <配備先> [--write]", 2);
+  const r = deployCf.render(root, config, target);
+  if (r.error) fail(r.error);
+  if (!args.includes("--write")) return process.stdout.write(r.text);
+  process.exit(deployCf.writeAndHook(root, config, target, r));
 }
 
 // Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
@@ -395,7 +607,7 @@ function guard(args) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  const cmds = { guard, hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig };
+  const cmds = { guard, hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);
 }

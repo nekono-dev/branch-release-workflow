@@ -19,7 +19,7 @@ node <skill>/scripts/brw.mjs <サブコマンド>
 
 - **保護ブランチ（`protectedBranches`）と、宣言に無いブランチでは commit・push しない。** 保護ブランチへの push はそのまま本番デプロイになりうるため。プラグインのフックが `git commit` / `git push` を止めるが、フックは Bash の git しか見ないので、手順の側でも守る。
 - **作業ブランチは `brw create` で作る。** `git checkout -b` や `git worktree add` を直接使うと命名規則の検証を通らず、規則に合わない名前ではプレビューが発行されない。
-- **作業ブランチへの commit と push は、許可を求めずに行ってよい。** 作業ブランチは何度 push しても切り出し元ブランチを汚さず、保護ブランチも壊さない。変更が本番側へ届くのは、切り出し元へのマージや保護ブランチへの PR という別の手順を通るときだけで、そこが守りになる。区切りごとに push しておけば、手元にしか無い変更が減り、プレビューも最新になる。リポジトリの CLAUDE.md などに別の取り決めがあればそちらに従う。
+- **作業ブランチへの commit と push は、許可を求めずに行ってよい。** 作業ブランチは何度 push しても切り出し元ブランチを汚さず、保護ブランチも壊さない。変更が本番側へ届くのは、切り出し元へのマージや保護ブランチへの PR という別の手順を通るときだけで、そこが守りになる。区切りごとに push しておけば、手元にしか無い変更が減り、プレビューも最新になる。リポジトリの CLAUDE.md などに別の取り決めがあればそちらに従う。作業ブランチから切り出し元（`baseBranch`）への PR の作成（`gh pr create --base <切り出し元>`）も、許可を求めずに行ってよい。切り出し元・保護ブランチへのマージは利用者の許可を得る。宣言の `autoApprove` で有効にしたリポジトリでは、フックがこれらの確認を省く（`references/config.md`）。
 - **worktree は、切り出し元へのマージ後、または保護ブランチへの PR 作成後に片付ける。** push しただけでは片付けない。作業ブランチは中途半端なまま止まることが多く、push はその作業の完了を意味しないため（3 章）。
 - 宣言が `develop` などを `workBranches` にしているリポジトリ（CI が無い等）では、そのブランチで作業してよい。
 
@@ -76,11 +76,14 @@ brw resume <ブランチ>   # 作業ブランチの続きを始める
 導入時や、CI の設定を変えたときに使う。
 
 ```sh
-brw check [--branches-only]              # 宣言・workflow・provider 設定の整合検査（オプションで provider を除外）
-brw gen-workflow [--write]               # provider の preview workflow 雛形（--write で .github/workflows/preview.yaml を作成。既存は上書きしない）
-brw cleanup <ブランチ> [--execute]        # provider 固有の後始末（既定は表示のみ）
-brw wrangler-config [ファイル] [--write]  # wrangler 設定の workers_dev / preview_urls を独自ドメインの有無に合わせる
+brw check [--branches-only]                    # 宣言・workflow・provider・配備先の整合検査（オプションで provider と配備先を除外）
+brw gen-workflow [preview|deploy] [--write]    # preview（既定）か deploy（配備先）の workflow 雛形（--write で .github/workflows/<種類>.yaml を作成。既存は上書きしない）
+brw cleanup <ブランチ> [--execute]              # provider 固有の後始末（既定は表示のみ）
+brw render-wrangler --target <配備先> [--write] # テンプレートから配備先の wrangler 設定を生成（宣言に deploy があるとき）
+brw wrangler-config [ファイル] [--write]        # 配備先を宣言しない構成で、wrangler 設定の workers_dev / preview_urls を合わせる
 ```
+
+宣言に `deploy` があれば、本番用と開発用（プレビュー先）の Worker を分けて配備する構成になる。wrangler 設定は CI が `render-wrangler` でテンプレートから生成するので、生成物を手で直したり commit したりしない。プレビューの配信方式（独自ドメインか workers.dev か）は `preview.urlTemplate` のホスト名で決まる。宣言の `${変数}` は環境変数か GitHub Variables で解決され、`brw url` が未解決を伝えたら、その変数の設定を利用者に確認する。
 
 `check` は workflow の `on.push.branches` を簡易解析し、宣言に無いブランチで CI が走る指定を警告する。workflow が本番向けか（`wrangler deploy` か preview か）という意味や、リポジトリ外の設定（Cloudflare 側の設定など）は機械判定できないので、利用者に確認する。Cloudflare の詳細は `references/cloudflare-previews.md` を読む。
 

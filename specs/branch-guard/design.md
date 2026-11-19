@@ -59,6 +59,7 @@ sequenceDiagram
 | baseBranch        | 文字列       | 省略時は develop             |
 | namePattern       | 正規表現     | 正規表現として解釈できること |
 | maxNameLength     | 整数         | 省略時は 54                  |
+| autoApprove       | オブジェクト | `push`・`pullRequest` の真偽値。省略時は false（D-8） |
 
 スクリプトの import は Node 標準モジュールと相対パスに限る。
 
@@ -157,6 +158,20 @@ sequenceDiagram
 
 - 自分の worktree の中から実行できるよう、git の操作は本体の作業ツリー（`git worktree list` の先頭）で行う。
 - 確認に失敗したときは何も消さず・作らず、理由を表示して終了コード 1 で終わる。
+
+### D-8: 作業ブランチ運用の操作の確認を省く (FR-12)
+
+宣言の `autoApprove` で有効にした操作（`push`: 作業ブランチへの push、`pullRequest`: 作業ブランチから切り出し元への `gh pr create`）に、フックは `permissionDecision: "allow"` を返す。Claude Code はこれを受けて利用者への確認を省く。settings.json の拒否ルール（`permissions.deny`）はフックの allow より優先される（PoC で確認済み）。allow は Bash コマンド全体に効くため、次をすべて満たすときだけ返し、満たさなければ何も返さない（通常の確認に回す）。
+
+| 条件 | 内容 |
+| ---- | ---- |
+| コマンドの形 | `git push`・`gh pr create` と `cd <dir>` を `&&` で連ねただけ。引用符の外に `;`・`\|\|`・`&`・括弧を含まず、引用符の外と二重引用符の中に展開（`$`・`` ` ``・`\`）を含まない。パイプは `tail`・`head` だけ |
+| git の前置 | 環境変数の前置と `-c` を含まない（任意のコマンドの実行につながるため）。`-C <dir>` は許す |
+| push のオプション | `-u`・`-q`・`-v`・`-n`・`--porcelain`・`--progress` 系だけ。強制・削除・タグ・`--all`・`--no-verify` などは含まない |
+| 送り先 | `+`（強制）・`:`（削除）・`refs/tags/` を含まない。すべて作業ブランチ |
+| git の設定 | `remote.<名前>.push` が無い。送り先を省く場合は `push.default` が `simple`・`current` で、追跡先が同じ名前 |
+| PR | `--base` が宣言の `baseBranch` と一致（省略は不可）。取り込み元（`--head` か現在のブランチ）が作業ブランチ。`-R`・`--web` など一覧に無いオプションを含まない |
+| 宣言 | 登録済みで、作業ツリーの内容が `HEAD` と同じ |
 
 ## 4. エラー処理
 

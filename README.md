@@ -1,9 +1,9 @@
 # branch-release-workflow
 
-本番向けブランチでの直接作業を防ぎ、作業ブランチ（`dev/XXXX` など）で作業させる Claude Code / Codex 共通スキル。作業ブランチの push でプレビュー、本番向けブランチの push で本番デプロイする運用の整備と案内も行う。
+本番向けブランチでの直接作業を防ぎ、作業ブランチ（`dev/XXXX` など）で作業させる Claude Code / Codex 共通スキル。作業ブランチの push でプレビュー、本番向けブランチの push で本番デプロイする運用の整備と案内も行う。本番用と開発用の Worker を分ける構成と、プレビューの独自ドメイン配信・workers.dev 配信のどちらにも対応する。
 
 - スキル: [SKILL.md](SKILL.md)（作業ブランチの作成、プレビュー案内、取り込み後の片付け、整合検査）
-- フック: [hooks/hooks.json](hooks/hooks.json)（保護ブランチ・宣言外ブランチへの `git commit` / `git push` を拒否）
+- フック: [hooks/hooks.json](hooks/hooks.json)（保護ブランチ・宣言外ブランチへの `git commit` / `git push` を拒否。宣言の `autoApprove` で作業ブランチへの push と切り出し元への PR の作成の確認を省く）
 
 運用はリポジトリ内の宣言ファイル `.branch-release-workflow.json`（記入例は [assets/config.example.json](assets/config.example.json)）で決まり、プラグインにはリポジトリ固有の値を持たない。導入時は宣言ファイルを作ってリポジトリに commit する（CI も同じ宣言で判定するため）。宣言ファイルが無く、リポジトリの設定でプラグインを有効にしてもいないリポジトリでは何もしない。
 
@@ -23,7 +23,7 @@ Codex での導入は Git clone と `node scripts/install-codex.mjs`（詳細は
 .claude-plugin/   プラグインとマーケットプレイスの定義
 hooks/            PreToolUse フック
 SKILL.md          スキル本体
-scripts/          brw.mjs（CLI）、lib.mjs、providers/
+scripts/          brw.mjs（CLI）、lib.mjs、providers/（プレビュー）、deploy/（配備先）
 references/       宣言ファイル・導入・Cloudflare Previews の詳細
 assets/           宣言ファイルの記入例
 evals/            スキルの評価ケース（claude plugin eval）
