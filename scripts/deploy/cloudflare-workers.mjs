@@ -1,5 +1,5 @@
 // 配備先（deploy.provider: cloudflare-workers）。テンプレートからの wrangler 設定の生成・配備用 workflow 雛形・検査。
-// 仕様は specs/deploy/design.md、背景は references/cloudflare-previews.md を参照。
+// 配備先の構成は references/cloudflare-previews.md を参照。
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 判定ロジックと各サブコマンドの自己テスト。一時 git リポジトリで実行する。 使い方: node tests/selftest.mjs
-// テスト名の「<spec名>/AC-n」は、仕様書の受け入れ条件との対応を表す。
+// テスト名に含まれる「<機能名>/AC-n」は、導入時の受け入れ条件を識別するための履歴上のラベル。
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

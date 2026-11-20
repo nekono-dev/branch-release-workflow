@@ -581,7 +581,7 @@ function wranglerConfig(args) {
   console.log(`${file}: 有効な独自ドメインが${r.active ? "ある" : "ない"}${delivery === "workers-dev" ? "（workers.dev 配信）" : ""}ため workers_dev: ${r.want.workers_dev} / preview_urls: ${r.want.preview_urls} にしました`);
 }
 
-// テンプレートから配備先の wrangler 設定を生成する（specs/deploy D-3）
+// 共有テンプレートと宣言から、指定した配備先の wrangler 設定を生成する。
 function renderWrangler(args) {
   const root = repoRoot(process.cwd()) ?? process.cwd();
   const config = need(root);
