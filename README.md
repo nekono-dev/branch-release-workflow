@@ -27,7 +27,8 @@ scripts/          brw.mjs（CLI）、lib.mjs、providers/（プレビュー）�
 references/       宣言ファイル・導入・Cloudflare Previews の詳細
 assets/           宣言ファイルの記入例
 evals/            スキルの評価ケース（claude plugin eval）
-specs/, tests/    開発用（仕様と自己テスト）
+.kiro/            cc-sdd のプロジェクトガイドと開発仕様
+tests/            スクリプトの自己テスト
 ```
 
 ## 開発
@@ -38,4 +39,4 @@ claude plugin validate .       # プラグインの検証
 claude plugin eval .           # スキルの評価
 ```
 
-仕様は `specs/` にある（仕様駆動開発。検証は spec-driven-development スキルの `check-all.mjs --root specs`）。このリポジトリには、特定のアプリケーション固有の値や例を含めない。
+仕様駆動開発には cc-sdd を使う。プロジェクトガイドは `.kiro/steering/`、機能ごとの開発仕様は `.kiro/specs/` に置く。このリポジトリには、特定のアプリケーション固有の値や例を含めない。

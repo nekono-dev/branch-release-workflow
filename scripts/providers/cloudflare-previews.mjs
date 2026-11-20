@@ -106,7 +106,7 @@ function checkRootConfig(root, config) {
   return out;
 }
 
-// 配備先を宣言した構成: URL 雛形とプレビュー先の配備先の整合（specs/preview D-8）
+// プレビュー URL の雛形が、宣言された配備先の配信方式と一致するか検査する。
 function checkTarget(root, config) {
   const out = [];
   const p = config.preview;
