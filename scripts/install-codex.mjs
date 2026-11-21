@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Git clone を Codex の skill 探索先へリンクする。既存の別の導入先は上書きしない。
 // --repo <導入先リポジトリ> を付けると、そのリポジトリの .codex/hooks.json へ BRW のフックを登録する（既存の定義は保持）。
+// linked worktree を指定すると、親チェックアウトへ登録し、その worktree の .codex/ を有効化する（Codex は worktree に .codex/ があるときだけ親の登録を読む）。
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";

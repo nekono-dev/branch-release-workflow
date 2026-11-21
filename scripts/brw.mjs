@@ -33,6 +33,7 @@ import {
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
+import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
 
@@ -400,6 +401,7 @@ function create(args) {
     mkdirSync(join(root, ".claude/worktrees"), { recursive: true });
     execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
     console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
+    hooksForWorktree(worktrees(root)[0]?.path ?? root, wt);
     if (unregistered) {
       mkdirSync(dirname(join(wt, rel)), { recursive: true });
       renameSync(join(root, rel), join(wt, rel));
@@ -409,6 +411,20 @@ function create(args) {
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
+}
+
+// 新しい worktree で Codex のフックが読まれるようにする。Codex は linked worktree で親チェックアウトの .codex/hooks.json を読むが、
+// worktree 自身に .codex/ ディレクトリがあるときだけ（8.4 実機）。登録と信頼は親に結び付く。親に BRW の登録が無ければ何もしない。
+// 失敗しても作成は成功のまま、注意だけを表示する。
+function hooksForWorktree(parent, wt) {
+  try {
+    const r = installWorktreeHooks({ parentDir: parent, worktreeDir: wt });
+    if (r.status === "skipped") return;
+    if (r.status === "failed") console.log(`注意: この worktree の .codex/ を作れず、Codex のフックが読まれない可能性があります。install-codex.mjs --repo ${wt} で確認してください。`);
+    else console.log("Codex のフックをこの worktree で有効にしました（親チェックアウトの登録を読みます）。親で /hooks の承認が済んでいなければ、承認するまで読み込まれません（承認は親と共通）。");
+  } catch (error) {
+    console.log(`注意: この worktree の Codex フックの有効化に失敗しました: ${error.message}`);
+  }
 }
 
 // 作業ブランチの切り出し元。create が記録したもの、無ければ宣言の baseBranch
@@ -571,6 +587,7 @@ function resume(args) {
       if (remote && git(newWt, "merge", "--ff-only", "--quiet", `origin/${branch}`) === null)
         fail(`${branch} の worktree を作りましたが、リモートの更新を取り込めませんでした: ${newWt}`);
       console.log(`ローカルのブランチから worktree を作りました${remote ? "（リモートの更新を取り込みました）" : "（リモートにはまだありません）"}: ${branch}\n  worktree: ${newWt}`);
+      hooksForWorktree(main.path, newWt);
       return;
     }
     if (remote) {
@@ -586,6 +603,7 @@ function resume(args) {
   mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
   execFileSync("git", ["worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`], { cwd: main.path, stdio: "inherit" });
   console.log(`リモートから取得し直して worktree を作りました: ${branch}\n  worktree: ${wt}`);
+  hooksForWorktree(main.path, wt);
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
 }

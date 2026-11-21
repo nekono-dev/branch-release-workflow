@@ -348,8 +348,23 @@ function workCallOf(command, cwd) {
   return null;
 }
 
-/** 成功した実行か。終了コードが 0 と明示され、中断されていないものだけ。判定できなければ失敗扱い（安全側）。 */
-const succeeded = (tr) => !!tr && typeof tr === "object" && !Array.isArray(tr) && tr.exit_code === 0 && tr.interrupted !== true;
+/**
+ * 成功した実行の出力文字列。成功と確認できなければ null（安全側）。実機（8.4）で確認した入力の形に合わせる。
+ *   Claude  オブジェクト `{stdout, stderr, interrupted, isImage, noOutputExpected}`。exit_code は届かない
+ *           （PostToolUse は成功した呼び出しだけに届き、失敗は別のイベント）。このため exit_code が無いときは interrupted:false を成功の根拠にする。
+ *   Codex   終了コードを含まない出力の文字列（失敗した呼び出しにも届く）。失敗の出力を成功と取り違えないよう、
+ *           「注意:」の行を除いて作業 ID だけの 1 行になる出力に限る（brw work start|resume は作業 ID を 1 つだけ出す）。
+ * exit_code が届いたときは 0 だけを成功とする。
+ */
+const successOutput = (tr) => {
+  if (typeof tr === "string") {
+    const ls = tr.split("\n").map((l) => l.trim()).filter((l) => l !== "" && !/^注意:/.test(l));
+    return ls.length === 1 && WORK_ID_ONE.test(ls[0]) ? ls[0] : null;
+  }
+  if (!tr || typeof tr !== "object" || Array.isArray(tr) || tr.interrupted === true) return null;
+  if (tr.exit_code !== undefined ? tr.exit_code !== 0 : tr.interrupted !== false) return null;
+  return [tr.stdout, tr.output].filter((s) => typeof s === "string").join("\n");
+};
 
 /**
  * PostToolUse: 成功した `brw work start|resume` の作業 ID を、ホストのセッションに関連付ける。
@@ -364,9 +379,9 @@ function recordWorkStart(input) {
     const session = sessionOf(ev);
     if (!cwd || !session) return;
     const call = workCallOf(ev.tool_input.command, cwd);
-    if (!call || !succeeded(ev.tool_response)) return;
-    const tr = ev.tool_response;
-    const out = [tr.stdout, tr.output].filter((s) => typeof s === "string").join("\n");
+    if (!call) return;
+    const out = successOutput(ev.tool_response);
+    if (out === null) return;
     const ids = [...new Set(out.match(WORK_ID_IN_TEXT) ?? [])];
     const file = stateFileOf(call.dir);
     if (!file) return;

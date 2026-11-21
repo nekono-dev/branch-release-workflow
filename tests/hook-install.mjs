@@ -5,7 +5,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkClaudeHooks, installCodexHooks, registrationSourceOf, mergeCodexHooks, codexCommand } from "../scripts/hook-install.mjs";
+import { activateWorktree, checkClaudeHooks, installCodexHooks, installWorktreeHooks, registrationSourceOf, mergeCodexHooks, codexCommand } from "../scripts/hook-install.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -161,7 +161,12 @@ export const runHookInstallChecks = async (eq) => {
       const wt = mkWorktree(r.dir, "dev/hook-wt");
       const src = registrationSourceOf(wt);
       const res = installCodexHooks({ repoDir: wt, launcherPath: LAUNCHER });
-      eq("hook-install/6.3 linked worktree からの導入は親チェックアウトの .codex/hooks.json を登録元にする", [src.linked, src.source === realpathSync(r.dir), res.source === realpathSync(r.dir), existsSync(codexFile(r.dir)), existsSync(join(wt, ".codex"))], [true, true, true, true, false]);
+      eq("hook-install/6.3 linked worktree からの導入は親チェックアウトの .codex/hooks.json を登録元にする（worktree の hooks.json は作らない）", [src.linked, src.source === realpathSync(r.dir), res.source === realpathSync(r.dir), existsSync(codexFile(r.dir)), existsSync(codexFile(wt))], [true, true, true, true, false]);
+      // 8.4 実機: Codex は worktree に .codex/ ディレクトリがあるときだけ親の hooks.json を読む。導入は worktree を有効化し、未追跡として現れないようにする
+      const ex = readFileSync(join(r.dir, ".git/info/exclude"), "utf8");
+      eq("hook-install/8.4 worktree からの導入は worktree の .codex/ を有効化し、info/exclude で未追跡の表示から外す（重複して足さない）", [res.worktreeActivated, existsSync(join(wt, ".codex")), ex.split("\n").filter((l) => l === ".codex/").length, gitOut(wt, "status", "--porcelain", "--untracked-files=all").includes(".codex")], [true, true, 1, false]);
+      installCodexHooks({ repoDir: wt, launcherPath: LAUNCHER });
+      eq("hook-install/8.4 再実行しても exclude は重複しない", readFileSync(join(r.dir, ".git/info/exclude"), "utf8").split("\n").filter((l) => l === ".codex/").length, 1);
       const again = installCodexHooks({ repoDir: r.dir, launcherPath: LAUNCHER });
       eq("hook-install/6.3 親チェックアウトから再実行しても同じ定義を二重登録しない", [again.status, again.changes.length], ["registered", 0]);
       // worktree 側に同じ定義がある場合は、継承と二重になるため衝突として止める
@@ -171,6 +176,22 @@ export const runHookInstallChecks = async (eq) => {
       writeFileSync(codexFile(dup), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: codexCommand(LAUNCHER, "Stop") }] }] } }));
       const d = installCodexHooks({ repoDir: dup, launcherPath: LAUNCHER });
       eq("hook-install/6.3 worktree 側に同じ自分の定義があれば二重登録として衝突にする", d.status, "conflict");
+    } finally {
+      r.cleanup();
+    }
+  }
+
+  {
+    // installWorktreeHooks: 親に BRW の登録があるときだけ worktree を有効化する
+    const r = mkRepoWithRemote({ branch: "main" });
+    try {
+      const w1 = mkWorktree(r.dir, "dev/wt-one");
+      const skipped = installWorktreeHooks({ parentDir: r.dir, worktreeDir: w1 });
+      eq("hook-install/8.4 親に BRW の登録が無ければ、worktree には何もしない", [skipped.status, existsSync(join(w1, ".codex"))], ["skipped", false]);
+      installCodexHooks({ repoDir: r.dir, launcherPath: LAUNCHER });
+      const w2 = mkWorktree(r.dir, "dev/wt-two");
+      const done = installWorktreeHooks({ parentDir: r.dir, worktreeDir: w2 });
+      eq("hook-install/8.4 親に登録があれば、worktree に .codex/ を作って有効化する（hooks.json は作らず、再実行しても同じ）", [done.status, existsSync(join(w2, ".codex")), existsSync(codexFile(w2)), installWorktreeHooks({ parentDir: r.dir, worktreeDir: w2 }).status, activateWorktree(w2)], ["activated", true, false, "activated", true]);
     } finally {
       r.cleanup();
     }

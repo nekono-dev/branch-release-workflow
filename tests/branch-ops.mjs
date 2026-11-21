@@ -5,6 +5,9 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installCodexHooks } from "../scripts/hook-install.mjs";
+import { diagnoseHooks } from "../scripts/hook-diagnose.mjs";
+import { realpathSync } from "node:fs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const BRW = join(dirname(fileURLToPath(import.meta.url)), "../scripts/brw.mjs");
@@ -57,6 +60,31 @@ export const runBranchOpsChecks = async (eq) => {
     const r = brw(l.dir, ["create", "legacy", "--branch-only"]);
     eq("branch-ops/7.1 恒常的な分岐元に指定された dev/ 名は作業ブランチとして作らない", [r.status, hasRef(l.dir, "refs/heads/dev/legacy")], [1, false]);
     l.cleanup();
+  }
+
+  // ---- worktree ごとの Codex フック登録（8.4: Codex は worktree で親の .codex を読まない）----
+  {
+    const launcher = realpathSync(join(dirname(BRW), "agent-hooks.mjs"));
+    const codexHome = mkdtempSync(join(tmpdir(), "brw-codexhome-"));
+    const env = { CODEX_HOME: codexHome };
+    const t = mkTeam();
+    try {
+      // 親に登録が無いときは何もしない
+      const plain = brw(t.dir, ["create", "plain"], env);
+      eq("branch-ops/8.4 親に Codex の登録が無ければ、create は worktree に .codex/ を作らない", [plain.status, existsSync(join(t.dir, ".claude/worktrees/dev-plain/.codex"))], [0, false]);
+      installCodexHooks({ repoDir: t.dir, launcherPath: launcher });
+      const made = brw(t.dir, ["create", "hooked"], env);
+      const wt = join(t.dir, ".claude/worktrees/dev-hooked");
+      const wtd = (trust) => diagnoseHooks({ pluginRoot: dirname(dirname(BRW)), codexRepoDir: wt, host: "codex", codexTrust: trust, env: {} }).routes.filter((x) => x.environment === "local").map((x) => x.status);
+      eq("branch-ops/8.4 親に登録があれば create は worktree の .codex/ を有効化して案内する（hooks.json は作らない。診断は信頼済みで active・未信頼で untrusted）",
+        [made.status, existsSync(join(wt, ".codex")), existsSync(join(wt, ".codex/hooks.json")), /有効にしました/.test(made.stdout), wtd("trusted"), wtd("untrusted")], [0, true, false, true, Array(4).fill("active"), Array(4).fill("untrusted")]);
+      gitOut(t.dir, "branch", "dev/loc2", "develop");
+      const res = brw(t.dir, ["resume", "dev/loc2"], env);
+      eq("branch-ops/8.4 resume が作る worktree も有効化される", [res.status, existsSync(join(t.dir, ".claude/worktrees/dev-loc2/.codex"))], [0, true]);
+    } finally {
+      t.cleanup();
+      rmSync(codexHome, { recursive: true, force: true });
+    }
   }
 
   // ---- resume: ローカルにだけあるブランチから worktree を作る ----

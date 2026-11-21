@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installCodexHooks } from "../scripts/hook-install.mjs";
+import { installCodexHooks, installWorktreeHooks } from "../scripts/hook-install.mjs";
+import { mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 // scripts/hook-diagnose.mjs は 6.4 で作る。未実装の間は「未実装」として失敗する（RED の確認用）
 const diagModule = await import("../scripts/hook-diagnose.mjs").catch(() => null);
@@ -97,6 +98,27 @@ const EXPECTED_LIMIT_IDS = [
 ];
 
 export const runHookDiagnoseChecks = async (eq) => {
+  // ---- linked worktree: 親が登録済みでも、worktree に .codex/ が無ければ届かない（Codex 0.167 実機、8.4）----
+  {
+    const r = mkRepoWithRemote({ branch: "main" });
+    try {
+      installCodexHooks({ repoDir: r.dir, launcherPath: LAUNCHER });
+      const wt = mkWorktree(r.dir, "dev/diag-wt");
+      const local = (res) => res.routes.filter((x) => x.environment === "local");
+      const none = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "trusted" });
+      eq("hook-diagnose/8.4 親が登録済みでも、.codex/ の無い worktree は全イベント not-installed（worktree-not-registered）",
+        local(none).map((x) => [x.status, x.reasonCode]), Array(4).fill(["not-installed", "worktree-not-registered"]));
+      const parentRes = diagnoseHooks({ pluginRoot: root, codexRepoDir: r.dir, env: {}, host: "codex", codexTrust: "trusted" });
+      eq("hook-diagnose/8.4 親チェックアウトの診断は従来どおり active", local(parentRes).map((x) => x.status), Array(4).fill("active"));
+      installWorktreeHooks({ parentDir: r.dir, worktreeDir: wt });
+      const own = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "trusted" });
+      const unt = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "untrusted" });
+      eq("hook-diagnose/8.4 worktree を有効化すれば、親の登録に従い信頼済みは active・未信頼は untrusted",
+        [local(own).map((x) => x.status), local(unt).map((x) => x.status)], [Array(4).fill("active"), Array(4).fill("untrusted")]);
+    } finally {
+      r.cleanup();
+    }
+  }
   // ---- 健全な導入（実際の BRW のランチャーを使う）----
   {
     const codex = tmp("brw-diag-codex-");

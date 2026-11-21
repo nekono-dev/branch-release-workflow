@@ -59,3 +59,61 @@ node tests/real-env/cleanup.mjs --include-ref-rulesets   # 記録のない brw-p
 | `BRW_REAL_ENV_DIR` | 任意。状態ファイルと一時クローンの場所（既定 `/tmp/brw-real-env`） |
 
 設定用の資格情報は gh のログインから作る。検証対象のリポジトリは `nekono-dev/branch-release-workflow`（利用者が検証用に使うことを許可している）。
+
+# 実ホストのフックイベント検証（brw-enforcement 8.4）
+
+実際の Claude Code（2.1.329）と Codex（codex-cli 0.167.0）から BRW のフックが呼ばれることを観測する。`BRW_REAL_ENV=1` のときだけ動く。実 GitHub には書き込まない。
+
+## 手順
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/host-events.mjs --dry-run            # 呼び出しなしで計画（シナリオと回数）を表示
+node tests/real-env/host-events.mjs --host claude        # Claude のシナリオ C1〜C8
+node tests/real-env/host-events.mjs --host codex         # Codex のシナリオ X1〜X7（X6 は linked worktree）
+node tests/real-env/host-events.mjs --scenario C4,C5     # 指定のシナリオだけ
+node tests/real-env/host-events.mjs --diagnose-only      # 診断（hook-diagnose）との突き合わせだけ（ホストを呼ばない）
+node tests/real-env/host-events.mjs --reset-counter      # 呼び出し回数のカウンタを戻す
+```
+
+- 作業場所は `/tmp/brw-real-env/events/`（Claude 用・Codex 用に main・dev の各リポジトリ。origin は `git@github.com:…` 形式だが、`core.sshCommand` と `GIT_SSH_COMMAND` の試験用 ssh でローカルの bare リポジトリへ向く。`gh` は PATH 先頭の偽物で、呼ばれると `fake-gh.log` に記録して失敗する）。
+- フックは `tests/real-env/hook-logger.mjs` を挟んで登録する。各イベントの入力・応答・終了コードを日時付きで `/tmp/brw-real-env/hook-log/<host>.jsonl` に追記し、`scripts/agent-hooks.mjs` の応答をそのままホストへ返す（トークン様の文字列は伏せる）。ホストの生出力は `events/out/`。観測ログはリポジトリに置かない。
+- Claude はプロジェクトの `.claude/settings.json`（`--setting-sources project`）、Codex は `installCodexHooks` による `.codex/hooks.json`（ランチャーだけ記録用ラッパー）に登録する。利用者の `~/.claude`・`~/.codex` の設定ファイルは書き換えない。
+- Codex のフック信頼は、非対話では承認できないため `--dangerously-bypass-hook-trust`（その 1 回の呼び出しだけ）で代用し、未承認の状態は同じ呼び出しでこのフラグを付けない（X1）ことで観測する。プロジェクトの信頼は `-c projects."<dir>".trust_level="trusted"` で渡す（設定ファイルは書き換えない）。
+- 呼び出し回数の上限は Claude 12・Codex 14（カウンタは `events/calls.json`）。上限に達したら止まる。
+
+## 観測結果の要約（実行日 2026-11-21）
+
+| 項目 | Claude Code | Codex |
+|---|---|---|
+| main 上の `git commit` の拒否 | PreToolUse の deny が届き、ホストはツールを拒否（HEAD 不変） | PreToolUse の deny が届き、実行されない（HEAD 不変） |
+| 開発ブランチへの通常 `git push` | PreToolUse の allow で確認なしに実行（bare へ反映） | PreToolUse は応答なし（Codex は allow を返せない）。サンドボックス内で実行できた。PermissionRequest は届かず（下記） |
+| 参照を動かす操作（`git tag`） | PreToolUse の ask。非対話の `-p` では未承認のまま実行されない | 応答なし（設計どおり） |
+| `gh pr merge`・`--auto` | どちらも deny。偽 gh は呼ばれない | どちらも deny。偽 gh は呼ばれない |
+| 適合した `gh pr create`（main 宛） | PreToolUse の allow。確認なしに偽 gh が呼ばれた | 応答なし（実行された） |
+| 作業 ID の関連付け（PostToolUse） | 届く。`tool_response` は `{stdout, stderr, interrupted, isImage, noOutputExpected}` で `exit_code` は無い | 届く。`tool_response` は出力の文字列（例 `"w-…\n"`）で、失敗した呼び出しにも届く |
+| 終了時の案内（Stop） | `{"decision":"block","reason":…}` をホストが受け入れ、セッションが継続した。2 回目は `stop_hook_active:true` で応答なし | 同じ形をホストが受け入れ、継続した。2 回目は `stop_hook_active:true` で応答なし |
+| 作業の禁止（`restrict --no-push`） | push が deny。Stop は案内しない | 同じ |
+| フック未導入 | フックイベント 0 件。main への commit が通った（診断の `not-installed` と一致） | （未導入の作業場所は未実施。診断は `unverifiable`） |
+| フック未承認 | （該当なし） | 同じ登録でフラグを付けないとフックイベント 0 件（診断の `untrusted` と一致） |
+| プラグイン経由（`${CLAUDE_PLUGIN_ROOT}`） | `--plugin-dir` で読み込んだ実体の hooks/hooks.json が展開され、deny が届いた | （該当なし） |
+
+## 設計と fixture に基づく前提との照合
+
+- Claude PostToolUse の `tool_response` に `exit_code` は無い（`interrupted:false` と `stdout`・`stderr` がある）。Codex は終了コードの無い出力文字列だけ。6.2 の「`exit_code===0`」前提は実機と食い違うため、`scripts/agent-hooks.mjs` の成功判定（`successOutput`）を実機の形に合わせた（Claude は `exit_code` が無ければ `interrupted:false`、Codex は注意の行を除いて作業 ID だけの 1 行の出力に限る。`exit_code` が届けば 0 のみ成功）。`tests/agent-hooks-session.mjs` に実機の形の検査を追加した。
+- Codex の PreToolUse は deny のみ、PermissionRequest・Stop の入出力は設計どおりの形でホストに受け入れられた（PermissionRequest の実到達は下記の限界）。Stop の入力は `session_id`・`turn_id`・`cwd`・`stop_hook_active`・`last_assistant_message` などを持つ。
+- Codex は `session_id` に thread_id を渡し、BRW の関連付けと一致した。`transcript_path`・`model`・`permission_mode` などの追加項目があるが、BRW は読まない。
+- `${CLAUDE_PLUGIN_ROOT}` は Claude がフックのコマンドで展開した（C8）。
+
+## 観測できなかったもの・未解決の不一致
+
+- **linked worktree（訂正済み）**: 当初の観測（worktree に `.codex` が無いと親の登録が届かない）を、Codex の `hooks/list`（モデルを呼ばず、cwd ごとに実際に読み込むフックを返す app-server の API）で詳しく調べた。
+  - linked worktree は、**親（本体）チェックアウトの `.codex/hooks.json` を読む**。ただし worktree 自身に **`.codex/` ディレクトリがあるときだけ**（空でもよい）。無ければ、親が登録済みでもフックは 1 件も届かない。
+  - worktree 側の `.codex/hooks.json` の中身は読まれない（独自の Stop 定義を置いても一覧に出ない）。登録と信頼（`trustStatus`）は親の hooks.json に結び付き、worktree ごとの承認は要らない。
+  - 対応: `brw create`・`brw resume` が作る worktree に、親に BRW の登録があるとき `.codex/`（印のファイル付き）を作って有効化し、共通の `info/exclude` に `.codex/` を足す。`install-codex.mjs --repo <worktree>` も同様に有効化する。診断は、親が登録済みでも `.codex/` の無い worktree を `not-installed`（`worktree-not-registered`）と表示する。
+  - 実機（X6）: `brw create` が有効化した worktree では親の登録のフックが届き、`restrict --no-push` の作業の `git push` と `gh pr merge` が deny された。`.codex/` の無い worktree はフック 0 件で push・merge がそのまま実行された。診断（有効化した worktree: 信頼済み active・未信頼 untrusted、無い worktree: not-installed[worktree-not-registered]）と一致した。
+- **PermissionRequest**: `codex exec`（非対話）では、承認を要する実行（権限の昇格の要求）をモデルが行わず、PermissionRequest は 1 件も届かなかった。allow の応答の実到達は未観測（対話の TUI が必要）。`approval_policy = "untrusted"` は 0.167 では使えない。
+- **サンドボックス**: Codex の workspace-write では `.git` が書き込み禁止で、`brw work start` が状態ファイル（`.git/brw/work`）を作れず失敗した。検証では状態の保存先だけを `--add-dir` で書き込み可にした。実運用では書き込みの承認（権限の昇格）が要る。
+- **MCP の matcher（`mcp__.*`）**: MCP サーバーを用意していないため、正規表現としての解釈は実機で未観測（Bash の matcher は両ホストで届いた）。
+- **Codex の信頼承認の実操作**: `/hooks` での承認は自動化できないため未実施。信頼済みはバイパスフラグで、未承認はフラグなしで観測した。なお `codex app-server` の `hooks/list` が各フックの `trustStatus` と `currentHash` を返すため、信頼状態の読み取りは今後可能（診断の `codexTrust` は現状、呼び出し側の入力）。
+- **クラウド（管理対象フック）**: 本環境では確認できない。診断は `unsupported`（managed-hooks-required）のまま。

@@ -112,6 +112,30 @@ export const runAgentHookSessionChecks = async (eq) => {
     }
   }
   {
+    // 実機（8.4）で確認した tool_response の形。Claude は exit_code が無く interrupted:false、Codex は出力の文字列だけが届く
+    const claudeReal = (stdout, extra = {}) => ({ stdout, stderr: "", interrupted: false, isImage: false, noOutputExpected: false, ...extra });
+    const r = repoOf();
+    try {
+      const id = publish.startWork(r.dir, {}).work.workId;
+      postOf("claude", r.dir, START(r.dir), claudeReal(id, { interrupted: true }));
+      postOf("codex", r.dir, START(r.dir), `node:fs:1364\nError: ENOENT, mkdir '/x/.git/brw/work'\n    at ${id}`, "codex-s1");
+      postOf("codex", r.dir, START(r.dir), `${id}\n${id}`, "codex-s1");
+      eq("enforcement/2.2 実機の形でも、中断・失敗の出力（ID だけでない文字列）では記録しない", workOf(r.dir, id).sessionId, undefined);
+      postOf("claude", r.dir, START(r.dir), claudeReal(id));
+      eq("enforcement/2.2 実機の Claude の形（exit_code なし・interrupted:false）で記録する", workOf(r.dir, id).sessionId, SESSION);
+    } finally {
+      r.cleanup();
+    }
+    const r2 = repoOf();
+    try {
+      const id = publish.startWork(r2.dir, {}).work.workId;
+      postOf("codex", r2.dir, START(r2.dir), `注意: 進行中の作業 w-old-deadbeef を中断して、新しい作業を始めます。\n${id}\n`, "codex-s1");
+      eq("enforcement/2.2 実機の Codex の形（出力の文字列。注意の行を除いて ID だけ）で記録する", workOf(r2.dir, id).sessionId, "codex-s1");
+    } finally {
+      r2.cleanup();
+    }
+  }
+  {
     // 同じ HEAD の別作業を取り違えない: 現在の作業（state の current）と一致する ID だけを採る
     const r = repoOf();
     try {

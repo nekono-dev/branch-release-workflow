@@ -7,8 +7,8 @@
 // 外部依存なし（Node 標準ライブラリのみ）。
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** Codex で登録するイベントと matcher。Stop は matcher を持たない。 */
 export const CODEX_HOOKS = [
@@ -96,6 +96,35 @@ export function registrationSourceOf(dir) {
   if (!linked) return { source: worktree, linked: false, git: true, worktree };
   if (basename(realpathSync(common)) !== ".git") return { source: null, linked: true, git: true, worktree, reasonCode: "unknown-common-dir" };
   return { source: dirname(realpathSync(common)), linked: true, git: true, worktree };
+}
+
+/**
+ * linked worktree で Codex に親チェックアウトの .codex/hooks.json を読ませるための有効化（Codex 0.167 を 8.4 で実機確認）。
+ * Codex は linked worktree で、親チェックアウトの `.codex/hooks.json` を読む。ただし worktree 自身に `.codex/` ディレクトリがあるときだけで
+ * （空でもよい）、worktree 側の hooks.json の中身は読まれない。無ければ親が登録済みでもフックは 1 件も届かない。
+ * 空のディレクトリは git clean などで消えるため、説明の置き場所となる印のファイルも置き、共通の info/exclude で未追跡の表示から外す。
+ * 失敗しても導入は止めない（戻り値 false）。
+ */
+export function activateWorktree(worktree) {
+  try {
+    const dir = join(worktree, ".codex");
+    if (lstatOrNull(dir) && !lstatOrNull(dir).isDirectory()) return false;
+    mkdirSync(dir, { recursive: true });
+    const mark = join(dir, ".brw-worktree");
+    if (!existsSync(mark)) writeFileSync(mark, "Codex は linked worktree に .codex/ があるときだけ、親チェックアウトの .codex/hooks.json を読みます。この印は BRW が置きました。\n");
+    const rel = gitLine(worktree, "rev-parse", "--git-path", "info/exclude");
+    if (rel) {
+      const file = resolve(worktree, rel);
+      const cur = existsSync(file) ? readFileSync(file, "utf8") : "";
+      if (!cur.split("\n").some((l) => l.trim() === ".codex/" || l.trim() === "/.codex/")) {
+        mkdirSync(dirname(file), { recursive: true });
+        appendFileSync(file, `${cur === "" || cur.endsWith("\n") ? "" : "\n"}.codex/\n`);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 設定の文字列で [features] の hooks（旧キー codex_hooks）が偽か。 */
@@ -187,7 +216,7 @@ const writeAtomic = (file, text, mode) => {
  *   reasonCode: 理由の機械判別用（registered・untrusted は null）。unsupported は command-hooks-unavailable・hooks-disabled、
  *               conflict は duplicate-worktree・unreadable-json・not-a-file・symlink・shape-mismatch・legacy-brw-hook・unknown-common-dir
  *   managedHooksRequired: 管理対象フック（Global MCP など）が前提の実行環境か（コマンドフックが使えない場合のみ true）
- * 導入先は linked worktree では親チェックアウト。worktree 側に同じ定義があると二重になるため衝突にする。
+ * 導入先は linked worktree では親チェックアウト（Codex は親の hooks.json を読む）。worktree には `.codex/` の有効化（activateWorktree）も行う。worktree 側に同じ定義があると二重になるため衝突にする。
  * opts.commandHooks: false なら、コマンドフックを使えない実行環境として扱う。opts.featuresText: 設定ファイルの文字列（[features] の判定に使う）。
  */
 export function installCodexHooks({ repoDir, launcherPath, commandHooks = true, featuresText = "" }) {
@@ -228,11 +257,11 @@ export function installCodexHooks({ repoDir, launcherPath, commandHooks = true, 
     return refuse("shape-mismatch", "既存の .codex/hooks.json の形が想定と違うため、書き換えません。");
   }
   if (m.blocked) return refuse(m.reasonCode, m.blocked, { conflicts: m.conflicts });
-  if (m.changes.length === 0) return result("registered", "unknown", null, { conflicts: m.conflicts });
+  if (m.changes.length === 0) return result("registered", "unknown", null, { conflicts: m.conflicts, ...(src.linked ? { worktreeActivated: activateWorktree(src.worktree) } : {}) });
 
   mkdirSync(dirname(file), { recursive: true });
   writeAtomic(file, `${JSON.stringify(m.doc, null, 2)}\n`, mode);
-  return result("untrusted", "review-required", null, { changes: m.changes, conflicts: m.conflicts });
+  return result("untrusted", "review-required", null, { changes: m.changes, conflicts: m.conflicts, ...(src.linked ? { worktreeActivated: activateWorktree(src.worktree) } : {}) });
 }
 
 /**
@@ -253,4 +282,16 @@ export function checkClaudeHooks(pluginRoot) {
   if (all.some((x) => CLAUDE_LEGACY_RE.test(x.command))) return { ...base, status: "conflict", missing: [], reasonCode: "legacy-brw-hook" };
   const missing = CLAUDE_HOOKS.filter((h) => !all.some((x) => x.event === h.event && x.matcher === h.matcher && CLAUDE_CMD_RE(h.event).test(x.command))).map(label);
   return { ...base, status: missing.length ? "missing" : "registered", missing, reasonCode: missing.length ? "missing-registration" : null };
+}
+
+/**
+ * 親チェックアウトに BRW の Codex 登録があるとき、新しい linked worktree でそれが読まれるよう有効化する（brw create・brw resume が呼ぶ）。
+ * 登録とその信頼（/hooks の承認）は親チェックアウトの hooks.json に結び付き、worktree ごとの承認は要らない。
+ * 親に登録が無い・親を決められなければ何もしない（status: "skipped"）。結果: { status: "activated" | "skipped" | "failed", parent }
+ */
+export function installWorktreeHooks({ parentDir, worktreeDir }) {
+  let doc = null;
+  try { doc = JSON.parse(readFileSync(join(parentDir, ".codex", "hooks.json"), "utf8")); } catch { doc = null; }
+  if (!hasManaged(doc)) return { status: "skipped", parent: parentDir, reason: "親チェックアウトに BRW の Codex 登録がありません。" };
+  return { status: activateWorktree(worktreeDir) ? "activated" : "failed", parent: parentDir };
 }

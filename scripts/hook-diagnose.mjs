@@ -64,8 +64,8 @@ const LIMITS = [
   { id: "graphql-indeterminate", host: "both", text: "GitHub の GraphQL は対象を確定できないため、常に確定不能として扱います。" },
   { id: "ref-moving-local", host: "both", text: "update-ref・reset・symbolic-ref・tag・branch の変更系など、ローカルの参照を動かす操作は、Claude では確認を求め、Codex では応答を返さず通常の承認に任せます。拒否はされません。" },
   { id: "over-detection", host: "both", text: "-c の危険な設定や、引数に展開・ワイルドカードを含む fetch は、安全側に倒れるため過検出になりえます。" },
-  { id: "tool-response-format", host: "both", text: "PostToolUse の tool_response の形（exit_code の有無や型）は実機で未確認です。欠けていれば作業は記録されません（安全側）。" },
-  { id: "codex-format-unverified", host: "codex", text: "Codex の hooks.json の形、matcher の正規表現としての解釈、worktree の親の読み込み、ハッシュによる信頼は、実機で未確認です（8.4）。" },
+  { id: "tool-response-format", host: "both", text: "PostToolUse の tool_response は、Claude は exit_code の無いオブジェクト、Codex は出力の文字列で届くことを実機（8.4）で確認し、その形で成功を判定します。判定できない形なら作業は記録されません（安全側）。" },
+  { id: "codex-format-unverified", host: "codex", text: "Codex の hooks.json の形、matcher の正規表現としての解釈、信頼の実承認（/hooks）は、実機で未確認です（8.4）。linked worktree は、worktree に .codex/ ディレクトリがあるときだけ親チェックアウトの hooks.json が読まれることを実機で確認済みです。" },
   { id: "codex-hooks-disabled-partial", host: "codex", text: "Codex の hooks 無効の判定は限定的です。[features] の見出しにコメントが付く場合、ドット形式のキー、プロジェクトの .codex/config.toml は見逃します。" },
   { id: "codex-trust-by-caller", host: "codex", text: "Codex の信頼状態は読み取れません。呼び出し側が渡した値（codexTrust）を使い、渡されなければ確認不能とします。" },
   { id: "codex-command-hooks-caller", host: "codex", text: "コマンドフックを使えるかどうかは呼び出し側が渡します（既定は使える）。CLI からは常に使える前提です。" },
@@ -82,6 +82,9 @@ const readJsonOrNull = (file) => {
 
 /** 導入場所が決まらないときの登録状態。 */
 const unknownAt = (reasonCode, reason) => ({ status: "unknown", reasonCode, reason, missing: new Map() });
+
+/** linked worktree に `.codex/` ディレクトリが無い。Codex は worktree に .codex/ があるときだけ親の hooks.json を読む（8.4 実機）。 */
+const WORKTREE_NOT_REGISTERED = "worktree-not-registered";
 
 /**
  * Claude プラグインの登録状態（checkClaudeHooks の読み取り結果）。
@@ -103,7 +106,18 @@ function claudeRegistration(pluginRoot) {
  * Codex の登録状態（.codex/hooks.json の読み取り）。mergeCodexHooks は純粋な変換なので、ファイルは書かない。
  * 戻り値の形は claudeRegistration と同じ。hooksDisabled は [features] で hooks が無効な設定（unsupported）。
  */
-function codexRegistration({ codexRepoDir, launcher, featuresText }) {
+function codexRegistration(args) {
+  const reg = codexRegistrationOfSource(args);
+  if (reg.status !== "ok" || !args.codexRepoDir) return reg;
+  // linked worktree は、worktree 自身に .codex/ ディレクトリが無いと親の登録が読まれない（親が登録済みでも届かない）
+  try {
+    const src = registrationSourceOf(args.codexRepoDir);
+    if (src.linked && !lstatOrNull(join(src.worktree, ".codex"))?.isDirectory()) return { ...reg, missing: new Map(ROUTE_EVENTS.codex.map((e) => [e, WORKTREE_NOT_REGISTERED])) };
+  } catch { /* 登録元の判定は codexRegistrationOfSource で済んでいる */ }
+  return reg;
+}
+
+function codexRegistrationOfSource({ codexRepoDir, launcher, featuresText }) {
   if (!launcher) return unknownAt("location-unspecified", "BRW のプラグインの場所が指定されていないため、Codex の登録を確認できません。");
   if (!codexRepoDir) return unknownAt("location-unspecified", "Codex の導入先が指定されていないため、登録を確認できません。");
   if (!existsSync(codexRepoDir)) return unknownAt("location-missing", "Codex の導入先が存在しないため、登録を確認できません。");
@@ -308,7 +322,7 @@ const PROBE_REASON = {
  * ホストのフック経路の状態を診断する。読み取り専用（導入先の設定は書かない）。
  * 引数:
  *   pluginRoot     BRW の clone（hooks/hooks.json と scripts/agent-hooks.mjs を持つディレクトリ）。Claude の登録と Codex のランチャーの場所。
- *   codexRepoDir   Codex の導入先（作業ディレクトリ。linked worktree は親の .codex を読む）。
+ *   codexRepoDir   Codex の導入先（作業ディレクトリ。linked worktree は親の .codex を読むが、worktree に .codex/ ディレクトリが要る）。
  *   host           "claude" または "codex" で絞る（省略時は両方）。
  *   commandHooks   このローカル実行環境でコマンドフックが使えるか（既定 true。偽なら Codex のローカル経路は非対応）。
  *   featuresText   Codex の設定ファイルの文字列（[features] の hooks が無効か判定する）。読むのは呼び出し側。
@@ -346,6 +360,7 @@ function localRoute({ h, event, reg, commandHooks, codexTrust, launcher, pluginR
   if (reg.status === "unsupported") return L("unsupported", reg.reasonCode, reg.reason);
   if (reg.missing.has(event)) {
     const code = reg.missing.get(event);
+    if (code === WORKTREE_NOT_REGISTERED) return L("not-installed", code, "この worktree に .codex/ ディレクトリが無いため、親チェックアウトの登録は読まれません。brw create・brw resume で作り直すか、install-codex.mjs --repo <この worktree> で有効化してください。");
     return L("not-installed", code, code === "not-installed" ? "フックが導入されていません。導入を実行してください。" : "このイベントの登録がありません。導入をやり直してください。");
   }
   // 未承認と分かっている Codex は、応答の確認より先に未信頼と表示する（承認までは読み込まれない）
