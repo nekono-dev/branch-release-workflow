@@ -15,9 +15,9 @@
 //   pause --work <id> --reason <理由>   作業の次の公開を保留する（再開は work resume）
 //   url [ブランチ]             プレビューURLを表示
 //   check [--branches-only] [--ruleset]  宣言・workflow・provider 設定の整合検査。続けてフックの稼働を経路ごとに表示し、--ruleset で Ruleset の状態を読み取りで検査する
-//                              終了コード: 0 問題なし、1 宣言・整合の誤りや Ruleset のずれ、3 Ruleset の確認不能・選択待ち（フックの状態は終了コードに含めない）
-//   setup [--ruleset on|off]   導入: 対象候補を表示し、Ruleset の採否を決めて適用し（対話は「導入する」が既定）、フックを登録する
-//                              非対話で採否が無ければ Ruleset の適用を保留する（フックは進める）。終了コード: 0 完了、1 誤り、2 使い方、3 保留
+//                              終了コード: 0 問題なし、1 宣言・整合の誤りや Ruleset のずれ、3 Ruleset の確認不能・過去の選択が読めない保留（見送り・未選択は 0）（フックの状態は終了コードに含めない）
+//   setup [--ruleset on|off]   導入: 対象候補を表示し、フックを登録する。Ruleset は既定 off（--ruleset on か対話で y のときだけ適用する）
+//                              非対話で採否が無ければ見送る（通信なし・フックは進める）。過去の選択が読めないときだけ保留する。終了コード: 0 完了・見送り、1 誤り、2 使い方、3 保留
 //   setup --migrate [--keep-confirm push|pullRequest|all]   旧パス .claude/branch-release-workflow.json の宣言を新しいパスへ移行する（明示時のみ書き込み。旧パスは残す）
 //   gen-workflow [preview|deploy] [--write]  preview（provider）または deploy（配備先）の workflow 雛形を出力（--write で .github/workflows/<種類>.yaml へ）
 //   cleanup <ブランチ> [--execute]  provider 固有の後始末（既定は表示のみ）

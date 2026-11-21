@@ -26,7 +26,7 @@ export const runRulesetChoiceChecks = async (eq) => {
 
     // ---- 導入する選択 ----
     const before = resolveChoice(d, TARGET);
-    eq("ruleset/4.1 未選択の対象は選択待ちとして返す", [before.ok, before.status], [true, "pending"]);
+    eq("ruleset/4.1 未選択の対象は選択待ちとして返し、記録なしは unset（既定 off）で区別する", [before.ok, before.status, before.unset], [true, "pending", true]);
 
     const rec = recordChoice(d, { ...TARGET, enabled: true });
     eq("ruleset/4.1 導入を選んだ選択を保存できる", rec.ok, true);
@@ -39,6 +39,7 @@ export const runRulesetChoiceChecks = async (eq) => {
     // ---- 対象の変更と ID の不一致は選択待ち ----
     const moved = resolveChoice(d, { ...TARGET, refs: ["develop"] });
     eq("ruleset/4.6 保護対象の分岐元が変わったら選択待ちとして返す", [moved.status, /分岐元/.test(moved.reason ?? "")], ["pending", true]);
+    eq("ruleset/4.6 対象変更の選択待ちは unset にしない（既定の見送りに落とさず保留する）", moved.unset === true, false);
     const idMismatch = resolveChoice(d, { ...TARGET, repositoryId: 999 });
     eq("ruleset/4.6 保存済みと異なるリポジトリ ID は選択待ちとして返す", [idMismatch.status, /ID/.test(idMismatch.reason ?? "")], ["pending", true]);
     const otherHost = resolveChoice(d, { ...TARGET, host: "ghe.example.com" });

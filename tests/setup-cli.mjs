@@ -178,9 +178,12 @@ export const runSetupCliChecks = async (eq) => {
     try {
       const w = createWorld();
       const res = await setupRun(r.dir, [], { makeSession: sessionsOf(w) });
-      eq("setup/7.3 非対話で採否が無ければ Ruleset は保留し（終了コード 3）、GitHub へは通信しない", [res.code, networkCalls(w), existsSync(choiceFileOf(r.dir))], [3, 0, false]);
-      eq("setup/7.3 保留でもフック（Codex の .codex/hooks.json）は導入する", existsSync(codexHooksOf(r.dir)), true);
-      eq("setup/7.3 保留の案内に --ruleset on|off の指定を示す", res.text.includes("--ruleset"), true);
+      // 方針変更（2026-11-21）: Ruleset は既定 off。非対話で未指定は保留（3）ではなく見送り（0）。認証・通信・書き込み・記録は 0
+      eq("setup/7.3 非対話で --ruleset 未指定なら Ruleset は既定どおり導入せず（終了コード 0）、GitHub へ通信せず、選択も記録しない", [res.code, networkCalls(w), w.writes, existsSync(choiceFileOf(r.dir))], [0, 0, 0, false]);
+      eq("setup/7.3 既定の見送りでもフック（Codex の .codex/hooks.json）は導入する", existsSync(codexHooksOf(r.dir)), true);
+      eq("setup/7.3 既定の見送りの案内に、後から --ruleset on で導入できると示す", res.text.includes("--ruleset on"), true);
+      const later = await setupRun(r.dir, ["--ruleset", "on"], { env: { BRW_SETUP_GH_TOKEN: ADMIN_TOKEN, BRW_WORK_GH_TOKEN: WORK_TOKEN }, makeSession: sessionsOf(createWorld({ adminPerms: true, workPerms: false })) });
+      eq("setup/7.3 既定の見送りのあとでも --ruleset on で導入でき（終了コード 0）、選択が保存される", [later.code, resolveChoice(r.dir, { ...TARGET, repositoryId: 42 }).status], [0, "selected"]);
     } finally { r.cleanup(); }
   }
   {
@@ -203,8 +206,20 @@ export const runSetupCliChecks = async (eq) => {
       const w = createWorld();
       const t = ttyDeps("n");
       const res = await setupRun(r.dir, [], { ...t.deps, makeSession: sessionsOf(w) });
-      eq("setup/7.3 対話では「導入する [Y/n]」を聞き、対象と効果は聞く前に表示する", [t.asked.length, t.asked[0]?.includes("導入する [Y/n]"), res.out.includes("github.com/acme/app"), res.out.includes("squash")], [1, true, true, true]);
+      eq("setup/7.3 対話では「導入しますか [y/N]」（既定は見送り）を聞き、対象と効果は聞く前に表示する", [t.asked.length, t.asked[0]?.includes("導入しますか [y/N]"), res.out.includes("github.com/acme/app"), res.out.includes("squash")], [1, true, true, true]);
       eq("setup/7.3 対話で n と答えたら見送りとして保存し、GitHub へは通信しない", [res.code, networkCalls(w), resolveChoice(r.dir, TARGET).status], [0, 0, "skipped"]);
+    } finally { r.cleanup(); }
+  }
+
+  // 対話で Enter（既定）は見送り。通信 0・書き込み 0
+  {
+    const r = ghRepo(CONFIG);
+    try {
+      const w = createWorld();
+      const t = ttyDeps("");
+      const res = await setupRun(r.dir, [], { ...t.deps, makeSession: sessionsOf(w) });
+      eq("setup/7.3 対話で Enter（既定）は見送りになり、GitHub へ通信せず書き込まない（終了コード 0）", [res.code, networkCalls(w), w.writes, resolveChoice(r.dir, TARGET).status], [0, 0, 0, "skipped"]);
+      eq("setup/7.3 対話の見送りでもフックは導入する", existsSync(codexHooksOf(r.dir)), true);
     } finally { r.cleanup(); }
   }
 
@@ -213,12 +228,12 @@ export const runSetupCliChecks = async (eq) => {
     const r = ghRepo(CONFIG);
     try {
       const w = createWorld({ adminPerms: true, workPerms: false });
-      const t = ttyDeps("");
+      const t = ttyDeps("y");
       const env = { BRW_SETUP_GH_TOKEN: ADMIN_TOKEN, BRW_WORK_GH_TOKEN: WORK_TOKEN };
       const res = await setupRun(r.dir, [], { ...t.deps, env, makeSession: sessionsOf(w) });
       const rec = resolveChoice(r.dir, { ...TARGET, repositoryId: 42 });
       const rs = w.rulesets[0];
-      eq("setup/7.3 対話で既定（Enter）の「導入する」を選ぶと、Ruleset を 1 件追加し、適用後検査まで通る（終了コード 0）", [res.code, w.writes, w.rulesets.length], [0, 1, 1]);
+      eq("setup/7.3 対話で y と答えると（既定は見送りのため明示が必要）、Ruleset を 1 件追加し、適用後検査まで通る（終了コード 0）", [res.code, w.writes, w.rulesets.length], [0, 1, 1]);
       eq("setup/7.3 追加する Ruleset は対象の分岐元すべてを完全な ref で指定し、バイパスなし・有効", [rs?.conditions?.ref_name?.include, rs?.bypass_actors, rs?.enforcement, rs?.target], [["refs/heads/develop", "refs/heads/release"], [], "active", "branch"]);
       eq("setup/7.3 適用後検査が通ったら、記録の Ruleset ID を確認済みにする", [rec.status, rec.appliedRulesetIds, choiceJson(r.dir).repos["github.com/acme/app"].applied[0]?.verified], ["selected", [rs.id], true]);
       eq("setup/7.3 認証の値は出力にも選択の記録にも出さない", [res.text.includes(ADMIN_TOKEN), res.text.includes(WORK_TOKEN), readFileSync(choiceFileOf(r.dir), "utf8").includes(ADMIN_TOKEN)], [false, false, false]);
@@ -294,7 +309,8 @@ export const runSetupCliChecks = async (eq) => {
     try {
       const w = createWorld();
       const c = await checkRun(r.dir, { ruleset: true }, { makeSession: sessionsOf(w) });
-      eq("check/7.3 導入の選択が未設定の Ruleset は選択待ちとして表示し、通信しない（終了コード 3）", [c.code, c.text.includes("未設定"), networkCalls(w)], [3, true, 0]);
+      // 方針変更（2026-11-21）: 未選択は既定 off として問題にしない（保留の 3 ではなく 0）
+      eq("check/7.3 導入の選択が未設定の Ruleset は未選択（既定は適用しない）として表示し、通信せず終了コード 0", [c.code, c.text.includes("未選択"), networkCalls(w)], [0, true, 0]);
     } finally { r.cleanup(); }
   }
   {
@@ -351,9 +367,9 @@ export const runSetupCliChecks = async (eq) => {
     try {
       const env = { ...process.env, CODEX_HOME: NO_CODEX };
       const s = spawnSync("node", [BRW, "setup"], { cwd: r.dir, env, encoding: "utf8" });
-      eq("setup/7.3 brw setup は非対話で採否が無ければ終了コード 3 で止まる（実際の CLI の配線）", [s.status, (s.stdout + s.stderr).includes("--ruleset")], [3, true]);
+      eq("setup/7.3 brw setup は非対話で採否が無ければ既定どおり導入せず終了コード 0（実際の CLI の配線。方針変更 2026-11-21）", [s.status, (s.stdout + s.stderr).includes("--ruleset")], [0, true]);
       const c = spawnSync("node", [BRW, "check", "--ruleset"], { cwd: r.dir, env, encoding: "utf8" });
-      eq("check/7.3 brw check --ruleset は非対話で選択が無ければ終了コード 3（実際の CLI の配線）", c.status, 3);
+      eq("check/7.3 brw check --ruleset は非対話で選択が無ければ未選択として終了コード 0（実際の CLI の配線。方針変更 2026-11-21）", c.status, 0);
       const b = spawnSync("node", [BRW, "check", "--branches-only"], { cwd: r.dir, env, encoding: "utf8" });
       eq("check/7.3 --branches-only の出力にはフックの節も Ruleset の節も出ない", [b.status, b.stdout.includes("フック"), b.stdout.includes("Ruleset")], [0, false, false]);
       const bo = spawnSync("node", [BRW, "check", "--branches-only", "--ruleset"], { cwd: r.dir, env, encoding: "utf8" });
