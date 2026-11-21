@@ -11,9 +11,42 @@ import { deliveryOf, globToRegExp, loadConfig, normalizeConfig, parsePushBranche
 import * as deployCf from "../scripts/deploy/cloudflare-workers.mjs";
 import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
+import { runSupportChecks } from "./support/selftest-support.mjs";
+import { runEnforcementChecks } from "./enforcement.mjs";
+import { runDecisionChecks } from "./decision.mjs";
+import { runGithubWriteChecks } from "./github-write.mjs";
+import { runGithubClientChecks } from "./github-client.mjs";
+import { runGithubRulesetChecks } from "./github-ruleset.mjs";
+import { runWorkStateChecks } from "./work-state.mjs";
+import { runReadyChecks } from "./ready.mjs";
+import { runPublishPlanChecks } from "./publish-plan.mjs";
+import { runPublishPushChecks } from "./publish-push.mjs";
+import { runPublishPrChecks } from "./publish-pr.mjs";
+import { runRulesetChoiceChecks } from "./ruleset-choice.mjs";
+import { runRulesetPreflightChecks } from "./ruleset-preflight.mjs";
+import { runRulesetApplyChecks } from "./ruleset-apply.mjs";
+import { runRulesetInspectChecks } from "./ruleset-inspect.mjs";
+import { runAgentHookChecks } from "./agent-hooks.mjs";
+import { runAgentHookSessionChecks } from "./agent-hooks-session.mjs";
+import { runHookInstallChecks } from "./hook-install.mjs";
+import { runHookDiagnoseChecks } from "./hook-diagnose.mjs";
+import { runBranchOpsChecks } from "./branch-ops.mjs";
+import { runPublishCliChecks } from "./publish-cli.mjs";
+import { runSetupCliChecks } from "./setup-cli.mjs";
+import { runIntegrationPublishChecks } from "./integration-publish.mjs";
+import { runHookLoggerChecks } from "./hook-logger.mjs";
+import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
+// 一時ディレクトリの後始末: この実行専用の親ディレクトリを作り、TMPDIR をそこへ向ける。
+// os.tmpdir() を使う全テストと子プロセスの一時物がこの下に集まるため、終了時にこの親だけを消せば漏れなく片付く。
+// 自分が作ったパスだけを消すので、他セッションの /tmp/brw-* には触れない。
+const runTmp = mkdtempSync(join(tmpdir(), "brw-selftest-run-"));
+process.env.TMPDIR = runTmp;
+const cleanupRunTmp = () => { try { rmSync(runTmp, { recursive: true, force: true }); } catch { /* 後始末の失敗でテスト結果は変えない */ } };
+process.on("exit", cleanupRunTmp);
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { cleanupRunTmp(); process.exit(130); });
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const brw = join(root, "scripts/brw.mjs");
 let failed = 0;
@@ -208,6 +241,12 @@ eq("branch-guard/AC-14 保護ブランチ・宣言外への push は省かない
 eq("branch-guard/AC-14 強制・削除・タグ・全ブランチは省かない", [aa("git push -f origin develop"), aa("git push --force-with-lease origin develop"), aa("git push origin +develop"), aa("git push origin :develop"), aa("git push --delete origin develop"), aa("git push --tags origin"), aa("git push --all origin"), aa("git push --no-verify origin develop")], [false, false, false, false, false, false, false, false]);
 eq("branch-guard/AC-14 push 以外を含むコマンドは省かない", [aa("git push origin develop && rm -rf x"), aa("git push origin develop; echo x"), aa("git push origin develop || true"), aa("git push origin develop | sh"), aa("git push origin develop > out.txt"), aa("git push origin $(echo develop)"), aa("git push origin develop | tail -3 | sh"), aa("GIT_SSH_COMMAND=x git push origin develop"), aa("git -c core.sshCommand=x push origin develop"), aa("git push origin develop &")], [false, false, false, false, false, false, false, false, false, false]);
 eq("branch-guard/AC-14 宣言で有効にしていなければ省かない", aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } })), false);
+// 新既定（未指定は有効）に旧判定を合わせた確認。autoApproveOf（lib.mjs）と同じ結果になる
+const autoUnset = mkRepo("develop", { ...autoCfg, autoApprove: undefined });
+eq("branch-guard/AC-14 autoApprove 未指定の登録済み宣言は確認を省く（新既定）", [aa("git push origin develop", autoUnset), aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprove: { pullRequest: true } }))], [true, true]);
+const autoUnsetDirty = mkRepo("develop", { ...autoCfg, autoApprove: { push: false } });
+writeFileSync(join(autoUnsetDirty, ".claude/branch-release-workflow.json"), JSON.stringify({ ...autoCfg, autoApprove: undefined }));
+eq("branch-guard/AC-14 autoApprove 未指定でも、未登録（編集中）の宣言では省かない", aa("git push origin develop", autoUnsetDirty), false);
 const autoDirty = mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } });
 writeFileSync(join(autoDirty, ".claude/branch-release-workflow.json"), JSON.stringify(autoCfg));
 eq("branch-guard/AC-14 作業ツリーで書き換えた宣言では省かない", aa("git push origin develop", autoDirty), false);
@@ -240,7 +279,9 @@ eq("branch-guard/AC-15 他のリポジトリ・ブラウザ・展開・別のコ
   ap('gh pr create --base develop --title "t"; rm -rf x'),
   ap("gh pr merge 1"),
 ], [false, false, false, false, false]);
-eq("branch-guard/AC-15 pullRequest を有効にしていなければ省かない", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true } })), false);
+// 新既定（未指定は有効）に合わせ、「無効」は明示的な false で表す。未指定は有効になる（lib.mjs の autoApproveOf と一致）
+eq("branch-guard/AC-15 pullRequest を明示的に false にしていれば省かない", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true, pullRequest: false } })), false);
+eq("branch-guard/AC-15 pullRequest が未指定なら新既定で省く", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true } })), true);
 const hookOut = (cmd, repo) => spawnSync("node", [brw, "hook"], { cwd: repo, input: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd }, cwd: repo }), encoding: "utf8" }).stdout;
 eq("branch-guard/AC-14 フックは省けるとき allow を返し、それ以外の許可では何も返さない", [JSON.parse(hookOut("git push origin develop", auto)).hookSpecificOutput.permissionDecision, hookOut("git commit -m x", auto), hookOut("git push origin develop && ls", auto)], ["allow", "", ""]);
 
@@ -446,6 +487,110 @@ g(ckRepo, "commit", "-q", "-m", "生成物");
 const ck = deployCf.check(ckRepo, normalizeConfig(ckCfg));
 eq("deploy/AC-10 保護ブランチに無い配備先のブランチを警告", ck.some((f) => f.level === "warn" && f.message.includes("'staging'")), true);
 eq("deploy/AC-10 git に登録された生成先を警告", ck.some((f) => f.level === "warn" && f.message.includes("登録")), true);
+
+// ---- 宣言の互換読み込みとブランチ分類（brw-enforcement 1.1） ----
+import * as lib from "../scripts/lib.mjs";
+{
+  const base = { workBranches: ["dev/*", "release/*"], protectedBranches: ["main"], baseBranch: "develop" };
+  const cls = (c, b) => (lib.classifyBranch ? lib.classifyBranch(lib.normalizeConfig(c), b) : "未実装");
+  // 要件 1.1, 1.3: ルート宣言を優先し、旧パスだけでも既存の書式で読む
+  const both = mkRepo("dev/foo", base);
+  writeFileSync(join(both, ".branch-release-workflow.json"), JSON.stringify({ ...base, baseBranch: "root-base" }));
+  eq("enforcement/6.3 ルート宣言と旧宣言が両方あればルートを優先する", [lib.loadConfig(both).config.baseBranch, lib.loadConfig(both).legacy], ["root-base", false]);
+  const legacyOnly = mkRepo("dev/foo", base);
+  eq("enforcement/6.3 旧パスだけの宣言も既存の書式で読み込む", [lib.loadConfig(legacyOnly).config.baseBranch, lib.loadConfig(legacyOnly).legacy], ["develop", true]);
+  // 要件 2.1, 6.3: 恒常的な分岐元は baseBranch と固定名の baseBranches から解決する
+  eq("enforcement/1.3 恒常的な分岐元は baseBranch と baseBranches の重複なしの和", lib.normalizeConfig({ ...base, baseBranches: ["staging", "develop"] }).permanentBases, ["develop", "staging"]);
+  eq("enforcement/1.3 baseBranches にパターンや空文字は書けない", [validateConfig({ ...base, baseBranches: ["rel/*"] }).length, validateConfig({ ...base, baseBranches: [""] }).length, validateConfig({ ...base, baseBranches: "x" }).length, validateConfig({ ...base, baseBranches: ["staging"] }).length], [1, 1, 1, 0]);
+  // 要件 1.3, 2.1: 保護対象を開発指定より優先し、分岐元は開発から除く
+  const dup = { ...base, workBranches: ["dev/*", "main", "develop", "staging", "feature/x"], baseBranches: ["staging"] };
+  eq("enforcement/1.3 保護指定は開発指定より優先する", cls(dup, "main"), "protected");
+  eq("enforcement/1.3 恒常的な分岐元は開発指定と重複しても開発ではない", [cls(dup, "develop"), cls(dup, "staging")], ["base", "base"]);
+  eq("enforcement/1.3 開発ブランチ・宣言外の分類", [cls(dup, "feature/x"), cls(dup, "dev/a"), cls(dup, "other/z"), cls(dup, null)], ["development", "development", "undeclared", "undeclared"]);
+  eq("enforcement/1.3 命名規則に合わない開発指定は宣言外扱い", cls({ ...base, namePattern: "^dev/[a-z]+$" }, "dev/A1"), "undeclared");
+  eq("enforcement/1.3 一時的な brwBase は分岐元の集合に入らない", lib.normalizeConfig(base).permanentBases, ["develop"]);
+  // 要件 4.1, 6.4: 個別の分岐元は公開と片付けで共用する
+  const br = mkRepo("dev/foo", base);
+  eq("enforcement/6.4 個別の分岐元が無ければ宣言の baseBranch", lib.branchBase ? lib.branchBase(br, lib.normalizeConfig(base), "dev/foo") : "未実装", "develop");
+  g(br, "config", "branch.dev/foo.brwBase", "dev/parent");
+  eq("enforcement/6.4 記録済みの brwBase を優先する", lib.branchBase ? lib.branchBase(br, lib.normalizeConfig(base), "dev/foo") : "未実装", "dev/parent");
+  // 要件 2.1, 2.6: 登録済み宣言で項目ごとの既定値、明示 false は維持
+  const aa = (a, reg) => (lib.autoApproveOf ? lib.autoApproveOf(lib.normalizeConfig(a === undefined ? base : { ...base, autoApprove: a }), reg) : "未実装");
+  eq("enforcement/2.1 登録済み宣言で未指定の項目は既定で有効", [aa(undefined, true), aa({}, true), aa({ push: true }, true)], [{ push: true, pullRequest: true }, { push: true, pullRequest: true }, { push: true, pullRequest: true }]);
+  eq("enforcement/2.6 明示的な false は維持し、他の項目だけ既定を適用", [aa({ push: false }, true), aa({ pullRequest: false }, true)], [{ push: false, pullRequest: true }, { push: true, pullRequest: false }]);
+  eq("enforcement/2.1 未登録・編集中の宣言は既定を適用しない", aa({ push: true }, false), { push: false, pullRequest: false });
+}
+
+// ---- テスト補助の動作確認（brw-enforcement 1.2） ----
+await runSupportChecks(eq);
+
+// ---- 操作の分類と対象の確定（brw-enforcement 2.1） ----
+await runEnforcementChecks(eq);
+await runGithubWriteChecks(eq);
+
+// ---- 操作可否の共通判定（brw-enforcement 2.3） ----
+await runDecisionChecks(eq);
+
+// ---- GitHub クライアントの土台（brw-enforcement 3.1） ----
+await runGithubClientChecks(eq);
+await runGithubRulesetChecks(eq);
+
+// ---- 作業 ID と中断・再開の記録（brw-enforcement 4.1） ----
+await runWorkStateChecks(eq);
+
+// ---- 完了申告と公開準備の確定（brw-enforcement 4.2） ----
+await runReadyChecks(eq);
+
+// ---- 公開計画の発行と検証（brw-enforcement 4.3） ----
+await runPublishPlanChecks(eq);
+
+// ---- 公開の push 実行と照合（brw-enforcement 4.4） ----
+await runPublishPushChecks(eq);
+
+// ---- 完了公開の PR 再利用・作成（brw-enforcement 4.5） ----
+await runPublishPrChecks(eq);
+
+// ---- Ruleset の対象範囲と導入の選択の再利用（brw-enforcement 5.1） ----
+await runRulesetChoiceChecks(eq);
+
+// ---- Ruleset 導入の事前検査（brw-enforcement 5.2） ----
+await runRulesetPreflightChecks(eq);
+
+// ---- Ruleset の再利用と追加（brw-enforcement 5.3） ----
+await runRulesetApplyChecks(eq);
+
+// ---- 実効ルールと通常作業の権限の検査（brw-enforcement 5.4） ----
+await runRulesetInspectChecks(eq);
+
+// ---- フックの応答と公開計画の照合（brw-enforcement 6.1） ----
+await runAgentHookChecks(eq);
+
+// ---- 作業 ID の関連付けと終了時の案内（brw-enforcement 6.2） ----
+await runAgentHookSessionChecks(eq);
+
+// ---- フックの登録と導入状態（brw-enforcement 6.3） ----
+await runHookInstallChecks(eq);
+
+// ---- フックの稼働と対応経路の診断（brw-enforcement 6.4） ----
+await runHookDiagnoseChecks(eq);
+
+// ---- CLI のブランチ操作と共通判定、開発間のローカル取り込み、片付け条件（brw-enforcement 7.1） ----
+await runBranchOpsChecks(eq);
+
+// ---- 完了公開の CLI（brw-enforcement 7.2） ----
+await runPublishCliChecks(eq);
+
+// ---- 導入・移行と状態検査の CLI（brw-enforcement 7.3） ----
+await runSetupCliChecks(eq);
+
+// ---- Git 操作と完了公開の統合・回帰（brw-enforcement 8.1） ----
+await runIntegrationPublishChecks(eq);
+
+// ---- Ruleset の導入・検査の契約（brw-enforcement 8.2） ----
+await runIntegrationRulesetChecks(eq);
+
+// ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
+await runHookLoggerChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

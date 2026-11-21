@@ -80,14 +80,88 @@ claude --plugin-dir <このリポジトリの clone>
 - 保護ブランチ上で `git commit` を試み、フックに拒否されること
 - `brw create <名前>` で作業ブランチと worktree ができること
 
+## 4. Ruleset とフックを導入する（brw setup）
+
+```sh
+brw setup                   # 対話で採否を決める（Enter で「導入する」）
+brw setup --ruleset off     # 見送る（GitHub の認証は不要。選択は保存され、次回も見送りになる）
+brw setup --ruleset on      # 導入する（非対話でも採否を指定できる）
+```
+
+`brw setup` は次の順に進める。
+
+1. 宣言を読み、ローカルのリモート設定から対象（GitHub のリポジトリ。`origin` を優先）を表示する。
+2. 恒常的な分岐元（`baseBranch` と `baseBranches`）を Ruleset の対象にする。作業ブランチや一時的な分岐元は対象にしない。
+3. 導入するかを決める。対話では対象と効果を示し、`導入する [Y/n]` を既定「導入する」で聞く。非対話で採否が無いときは Ruleset の適用を保留し（終了コード 3）、フックの導入は続ける。
+4. 導入する場合は、GitHub の応答でホスト・所有者・名前を照合してリポジトリ ID を確定する。保存済みの ID と違えば、書き込まずに再確認を求める。
+5. 管理権限と既存のルールを事前に確かめる（読み取りだけ）。不足・競合・確認不能があれば、変更せず理由を表示する。
+6. 不足している分岐元だけを対象に Ruleset を 1 件追加する。既存の Ruleset は更新・削除しない。
+7. 適用後の有効な設定を読み直し、PR 必須・squash 限定・バイパスなしを確かめる。
+8. フックを導入する。Codex は導入先の `.codex/hooks.json` に登録する（同じ登録の再実行は変更なし）。Claude は同梱の登録を検査する。
+
+追加される Ruleset は `brw-pr-squash` という名前で、対象は分岐元の完全な `refs/heads/<名前>`、PR 必須・squash 限定・バイパスなし・有効である。既存のレビュー・必須チェックは別のルールのまま変更しない。squash がリポジトリで無効な場合は、リポジトリ全体の設定を暗黙に変えず、競合として表示する。
+
+認証は 2 つに分ける。
+
+| 環境変数 | 用途 | 未設定のとき |
+|---|---|---|
+| `BRW_SETUP_GH_TOKEN` | 導入・適用・状態検査の設定用（管理権限が必要） | gh の保存済みログインを使う |
+| `BRW_WORK_GH_TOKEN` | 作業経路の権限の確認（通常作業で使う認証。Ruleset を変えられないもの） | 作業経路を確認できず、適用後の検査は確認不能（終了コード 3）になる |
+
+値は表示も記録もしない。`BRW_WORK_GH_TOKEN` を設定して `brw check --ruleset` を実行すると、作業経路が Ruleset を迂回できないことを確かめられる。
+
+注意（非対話の実行）: `--ruleset on` は非対話（エージェントや CI）でも指定できる。その場合、`BRW_SETUP_GH_TOKEN` が未設定だと gh の保存済みログイン（そのホストの既定の資格情報）で Ruleset を書き込む。つまり、その端末の管理権限でエージェントが書き込みを起動できてしまう。エージェントに導入を任せるときは、管理権限のない資格情報を保存済みログインにしておくか、`BRW_SETUP_GH_TOKEN` に導入専用の資格情報を渡し、通常の作業の環境には置かないこと。`brw setup` と `brw check --ruleset` の子の gh には、この 2 つの変数は継承させない（引数の資格情報 1 つだけを渡す）。
+
+## 5. 状態を確かめる（brw check）
+
+```sh
+brw check                    # 宣言の整合とフックの稼働（経路ごと）を表示する
+brw check --ruleset          # 加えて Ruleset の状態を読み取りだけで検査する（書き込みはしない）
+brw check --branches-only    # 宣言と分岐の整合だけ（フックと Ruleset は表示しない）
+```
+
+| 終了コード | 意味 |
+|---|---|
+| 0 | 問題なし（見送りの Ruleset を含む） |
+| 1 | 宣言・整合の誤り、または Ruleset の設定のずれ（迂回できる作業経路を含む） |
+| 2 | 使い方の誤り |
+| 3 | Ruleset の確認不能・選択待ち（確認できる権限や選択を用意して再実行する） |
+
+フックの状態（`active`・`not-installed`・`untrusted`・`unsupported`・`conflict`・`unverifiable`）は経路ごとに表示し、終了コードには含めない。対応していない経路（クラウドの実行環境、ツールが別経路の書き込み、対話シェルの命令など）の限界も一覧で示す。
+
+## 6. 旧パスの宣言を移行する
+
+`.claude/branch-release-workflow.json` だけのリポジトリは、次で新しいパスへ移す。
+
+```sh
+brw setup --migrate                        # 変更点を表示してから .branch-release-workflow.json を作る
+brw setup --migrate --keep-confirm push    # push も確認を求める（既定では省く）
+```
+
+- 旧パスの内容と明示した値（`false` など）は保つ。旧パスは残すので、内容を確認して commit したあと `git rm` で削除する。
+- 新しい既定値では、`autoApprove` を省いた項目の確認を省く（旧版は確認を求めていた）。移行の差分にこの変更点が出るので、従来どおり確認を求めたい項目は `--keep-confirm` で明示する。
+- 新旧の宣言の内容が違うときは上書きせず、どちらを使うかを利用者に決めてもらう。
+
+## 7. 復旧
+
+- 特定の作業で push や PR を止める: `brw work restrict --work <作業 ID> --no-push`（または `--no-pr`）。記録した禁止は外せない。
+- 宣言の確認省略を止める: 宣言の `autoApprove` の該当キーを `false` にして commit する。
+- Codex のフックを外す: `.codex/hooks.json` から `agent-hooks.mjs` を指す BRW の定義だけを取り除く（ほかの定義は残す）。Claude はプラグインを無効化する。
+- Ruleset を外す: BRW は既存の Ruleset を削除しない。`brw setup` が表示した Ruleset ID（`brw-pr-squash`）を、GitHub の Rulesets 画面で管理者が削除する。既存のルールの復旧を伴う変更は、その管理主体に委ねる。
+- 導入をやり直す: 対象や分岐元が変わったら `brw setup` で採否を選び直す。保存済みの選択は `<git の共通ディレクトリ>/brw/ruleset-choice.json` にあり、壊れている場合は直すか削除してから選び直す。
+
 ## Codex
 
 同じリポジトリを外部へ clone し、Codex の探索先からリンクする。Claude の hooks は Codex に自動導入されない。
 
 ```sh
 git clone https://github.com/nekono-dev/branch-release-workflow.git ~/.local/share/branch-release-workflow
-node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs
+node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs --repo /path/to/repo
 ```
+
+`--repo` で導入先リポジトリの `.codex/hooks.json` に BRW のフックを登録する（既存の定義は保持し、同じ登録の再実行は変更なしで終わる）。登録後、Codex で `/hooks` から信頼を承認する。登録元や衝突を解決できなければ対象の箇所を表示して止まる。
+
+linked worktree では、Codex（0.167 で実機確認）は**親（本体）チェックアウトの `.codex/hooks.json` を読む**が、worktree 自身に `.codex/` ディレクトリがあるときだけである（空でもよい。worktree 側の hooks.json の中身は読まれず、登録と信頼は親に結び付く）。`.codex/` が無い worktree では、親が登録済みでもフックは届かない。`brw create`・`brw resume` は、親に BRW の登録があるとき新しい worktree に `.codex/` を作って有効化する（共通の `info/exclude` に `.codex/` を足し、未追跡として現れないようにする。`info/exclude` は親チェックアウトと全 worktree で共有されるため、この除外は親にも及び、親の `.codex/`（hooks.json など）も未追跡として表示されなくなる）。`install-codex.mjs --repo <worktree>` も同じ有効化を行い、同じ共通の `info/exclude` に `.codex/` を追記する。手作業で作った worktree は `install-codex.mjs --repo <その worktree>` で有効化する。診断（`brw check`）は、`.codex/` の無い worktree を `worktree-not-registered`（未導入）と表示する。
 
 更新は `git -C ~/.local/share/branch-release-workflow pull --ff-only`。検証済みの版に固定する運用では、そのコミットを fetch / checkout する。リンク先は同じ clone なので、コピーし直す必要はない。プロジェクト単位なら `--skills-dir /path/to/project/.agents/skills` を指定し、生成されたリンクを .gitignore に入れる。別の導入先が既にある場合は上書きしない。
 

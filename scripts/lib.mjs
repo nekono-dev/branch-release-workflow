@@ -65,16 +65,17 @@ export const matchesAny = (globs, branch) => globs.some((g) => globToRegExp(g).t
 export function loadConfig(root) {
   const rel = configRel(root);
   const path = join(root, rel);
-  if (!existsSync(path)) return { config: null, path };
+  const legacy = rel === LEGACY_CONFIG_REL;
+  if (!existsSync(path)) return { config: null, path, legacy };
   let raw;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (e) {
-    return { error: `${rel} の JSON が不正です: ${e.message}`, path };
+    return { error: `${rel} の JSON が不正です: ${e.message}`, path, legacy };
   }
   const errors = validateConfig(raw);
-  if (errors.length) return { error: `${rel} が不正です:\n- ${errors.join("\n- ")}`, path };
-  return { config: normalizeConfig(raw), path };
+  if (errors.length) return { error: `${rel} が不正です:\n- ${errors.join("\n- ")}`, path, legacy };
+  return { config: normalizeConfig(raw), path, legacy };
 }
 
 const PROVIDERS = ["none", "url-template", "cloudflare-previews"];
@@ -89,6 +90,9 @@ export function validateConfig(c) {
   strArr("protectedBranches");
   if (Array.isArray(c.workBranches) && c.workBranches.length === 0) errs.push("workBranches は1つ以上必要です");
   if (c.baseBranch !== undefined && typeof c.baseBranch !== "string") errs.push("baseBranch は文字列にしてください");
+  // 恒常的な分岐元の固定名（パターンは書けない）
+  if (c.baseBranches !== undefined && (!Array.isArray(c.baseBranches) || c.baseBranches.some((s) => typeof s !== "string" || !s || /[*?[\]]/.test(s))))
+    errs.push("baseBranches は固定のブランチ名（パターン不可）の文字列の配列にしてください");
   if (c.namePattern !== undefined) {
     try {
       new RegExp(c.namePattern);
@@ -165,8 +169,20 @@ export function normalizeConfig(c) {
   const deploy = c.deploy
     ? { output: "wrangler.jsonc", ...c.deploy, brwSource: { ...DEFAULT_BRW_SOURCE, ...(c.deploy.brwSource ?? {}) } }
     : undefined;
-  return { baseBranch: "develop", maxNameLength: 54, ...c, preview, ...(deploy ? { deploy } : {}) };
+  const n = { baseBranch: "develop", maxNameLength: 54, ...c, preview, ...(deploy ? { deploy } : {}) };
+  // 恒常的な分岐元は baseBranch と固定名の baseBranches だけ（一時的な brwBase は含めない）
+  return { ...n, permanentBases: [...new Set([n.baseBranch, ...(c.baseBranches ?? [])])] };
 }
+
+// 登録済みの宣言で、項目ごとの確認省略の既定値を決める。未指定は有効、明示的な false は維持する。
+// 未登録・編集中の宣言（registered が偽）は確認を省略しない
+export const autoApproveOf = (config, registered) => {
+  const a = config.autoApprove ?? {};
+  return { push: registered === true && a.push !== false, pullRequest: registered === true && a.pullRequest !== false };
+};
+
+// 作業ブランチの切り出し元。create が記録した brwBase を優先し、無ければ宣言の baseBranch（公開と片付けで共用）
+export const branchBase = (cwd, config, branch) => git(cwd, "config", `branch.${branch}.brwBase`) || config.baseBranch;
 
 // ---- JSONC --------------------------------------------------------------
 
@@ -251,6 +267,16 @@ export function judgeBranch(config, branch) {
     return { decision: "deny", reason: `'${branch}' は保護ブランチです。作業ブランチ（${config.workBranches.join(", ")}）で作業してください。` };
   if (matchesAny(config.workBranches, branch)) return { decision: "allow", reason: `'${branch}' は作業ブランチです。` };
   return { decision: "deny", reason: `'${branch}' は宣言（workBranches: ${config.workBranches.join(", ")}）に無いブランチです。作業ブランチへ切り替えてください。` };
+}
+
+// ブランチの分類。戻り値: "protected" | "base" | "development" | "undeclared"
+// 保護対象を最優先し、次に恒常的な分岐元。開発ブランチは workBranches に一致し命名規則を満たすものだけ
+export function classifyBranch(config, branch) {
+  if (!branch) return "undeclared";
+  if (matchesAny(config.protectedBranches ?? [], branch)) return "protected";
+  if ((config.permanentBases ?? [config.baseBranch]).includes(branch)) return "base";
+  if (matchesAny(config.workBranches, branch) && !checkName(config, branch)) return "development";
+  return "undeclared";
 }
 
 // ブランチ名 → alias（DNS ラベルになるため "/" を "-" に置き換える）

@@ -1,0 +1,244 @@
+# 実装タスク
+
+- [ ] 1. 共通の宣言と検証環境を整える
+- [x] 1.1 宣言の互換読み込みとブランチ分類を拡張する
+  - ルート宣言を優先し、旧パスだけのリポジトリも既存の書式で読み込む。
+  - 恒常的な分岐元を固定名から解決し、保護対象を開発指定より優先する。個別の分岐元は公開と片付けで共用する。
+  - 登録済み宣言で項目ごとの既定値を適用し、明示的な `false` は維持する。旧・新宣言と重複指定のテストで結果を確認できる。
+  - _Boundary: 宣言・Git_
+  - _Requirements: 1.1, 1.3, 2.1, 2.6, 4.1, 6.3, 6.4_
+- [x] 1.2 ローカルで再現できる契約テストを準備する
+  - Node.js 22、Git の一時リポジトリと bare remote、両ホストのフック入力例を用意する。
+  - GitHub 応答を差し替え、要求先と書き込み件数を記録する。実際の GitHub 認証なしで、成功・権限不足・応答喪失を再現できる。
+  - 既存の自己テストを回帰基準として実行できる状態にする。
+  - _Boundary: テスト基盤_
+  - _Requirements: 1.1, 2.7, 5.2, 6.1, 6.3_
+
+- [ ] 2. 操作の分類と共通判定を実装する
+- [x] 2.1 シェルと Git の操作対象を確定する
+  - 引用符と作業ディレクトリを扱い、`git -C`、現在の ref、remote、refspec、追跡設定を使って変更対象を照合する。
+  - ブランチ作成・再開、commit、push、マージを分類する。強制、削除、タグ、複合コマンドを通常 push と区別する。
+  - 判定不能な変更を識別でき、正常な照会や未導入のリポジトリが通過することを確認する。
+  - _Boundary: 操作判定_
+  - _Depends: 1.1, 1.2_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.8_
+- [x] 2.2 GitHub への書き込み経路を操作に変換する
+  - 対応する `gh` と MCP の書き込み入力から、対象ホスト・リポジトリと操作を識別する。
+  - PR 作成の head・base と、マージ・自動マージ予約を区別する。対象不明、必須入力欠落、未対応の書き込みを判定に渡せる。
+  - 未対応経路をフックで遮断できるか、導入検査向けに識別できる形にする。
+  - _Boundary: 操作判定_
+  - _Requirements: 1.1, 1.4, 2.6, 3.2, 3.3, 6.1_
+- [x] 2.3 開発・保護・宣言外の操作可否を共通化する
+  - 正規の作成・再開、保護対象への直接変更、開発ブランチ間のマージ、保護対象への PR 作成を区別する。
+  - 対応経路で曖昧な変更、開発間・宣言外への直接の PR 作成、GitHub マージと予約を拒否する。
+  - 適合判定と確認省略を別に判定し、登録済み宣言と作業の禁止を照合する。同じ操作の判定理由をホスト間で比較できる。
+  - _Boundary: 操作判定_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.6, 2.8, 3.1, 3.2, 3.3_
+
+- [ ] 3. GitHub の読み取りと限定した書き込みを実装する
+- [x] 3.1 (P) 対象リポジトリと認証を固定する
+  - 対象ホスト・リポジトリ ID を照合し、設定用の認証を同一の導入処理で固定する。
+  - 認証、権限、不明な入力、通信エラーを区別し、資格情報を表示せずに呼び出し先と結果を検証できる。
+  - ホストや対象の食い違いで書き込みに進まないことを契約テストで確認する。
+  - _Boundary: GitHub クライアント_
+  - _Depends: 1.2_
+  - _Requirements: 2.7, 4.6, 5.1, 5.2_
+- [x] 3.2 PR の検索・取得・作成を実装する
+  - 同一の head・base リポジトリと ref に一致するオープン PR を検索し、取得時に OID と URL を検証する。
+  - 確定済みの対象に PR を作成し、競合や応答喪失を再取得で照合できる結果として返す。
+  - 一致しない PR を成功扱いせず、マージ用の書き込み経路を公開しない。
+  - _Boundary: GitHub クライアント_
+  - _Requirements: 2.3, 2.4, 2.7, 3.3_
+- [x] 3.3 Ruleset と実効ルールを照会する
+  - 親ルールを含む一覧、詳細、対象 ref の実効ルールを取得し、ページングと ref 名のエンコードを扱う。
+  - リポジトリ設定、権限情報、バイパス情報の有無を返し、取得不能と空の設定を区別できる。
+  - 確定済みの対象リポジトリへの追加要求だけを受け付け、返却 ID とエラーを検証する。
+  - _Boundary: GitHub クライアント_
+  - _Requirements: 5.1, 5.3, 5.4, 5.5, 5.6, 5.7, 6.2_
+
+- [ ] 4. 作業状態から公開までを実装する
+- [x] 4.1 作業 ID と中断・再開を記録する
+  - 新規作業に ID を発行し、同一 worktree の別作業を区別する。中断と明示再開を記録する。
+  - worktree 単位の状態を一時ファイルから置換し、操作別の結果と禁止を保存する。PR 本文や秘密情報を記録しない。
+  - 同じセッションと HEAD で２件目を始めても、１件目の公開済み状態や禁止を引き継がないことを確認できる。
+  - _Boundary: 完了公開_
+  - _Depends: 1.1, 1.2_
+  - _Requirements: 2.2, 2.5, 2.6, 2.7_
+- [x] 4.2 完了申告と取り込み先から公開準備を確定する
+  - 完了条件と検証結果を申告し、コミット・worktree・公開先を固定する。未コミット、検証失敗、宛先不明なら準備済みにしない。
+  - 分岐元記録・既存 PR・既定値を照合し、食い違いは明示指定に戻す。
+  - 準備結果から、開発間の push のみと保護対象への PR を伴う公開を区別できる。
+  - _Boundary: 完了公開_
+  - _Depends: 1.1, 2.3, 3.1, 3.2_
+  - _Requirements: 2.2, 2.3, 2.5, 3.1, 3.3_
+- [x] 4.3 許可する書き込みを固定した公開計画を作る
+  - 作業 ID、対象、head、宣言と禁止の版を照合し、push と PR 作成を個別に判定する。
+  - 禁止と通常確認待ちを計画から外し、許可された副作用だけを記録する。計画の発行は遠隔を書き換えず、版が変わった計画は失効する。
+  - 未適用の制限を追加すると同じ作業の計画が使えなくなり、次の書き込みが止まることを確認する。
+  - _Boundary: 完了公開_
+  - _Depends: 2.3, 3.2_
+  - _Requirements: 2.1, 2.2, 2.5, 2.6, 2.8_
+- [x] 4.4 承認済みの範囲で push を実行・照合する
+  - 計画、登録済み宣言、最新の作業状態を副作用前に再検証し、確定 OID を明示した通常 push を行う。
+  - 公開実行を直列化し、操作間で中断や制限を反映する。遠隔 ref が期待 OID と一致した時点で push 成功を記録する。
+  - push 禁止、失敗、既に同じ OID が公開されている場合、通常確認を経た個別の実行を区別して結果を返す。
+  - _Boundary: 完了公開_
+  - _Depends: 2.3_
+  - _Requirements: 2.1, 2.2, 2.6, 2.7, 2.8_
+- [x] 4.5 保護対象への PR を再利用・作成して結果を返す
+  - 遠隔 ref と最新の制限を確認し、保護対象の場合にだけ計画内の PR 作成を行う。開発間は push で完了し、PR の書き込みが発生しない。
+  - 作成後、応答喪失時、再試行時に PR の head・base・OID を照合し、一致すれば URL を返す。push 成功後に PR だけが失敗した場合も途中結果が残る。
+  - 対象 URL、base、GitHub 上で利用者が squash マージする案内を返す。PR 作成の禁止や遠隔の食い違いは、成功済み操作とともに報告する。
+  - _Boundary: 完了公開_
+  - _Depends: 2.3, 3.2_
+  - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.3_
+
+- [ ] 5. Ruleset の選択・追加・検査を実装する
+- [x] 5.1 (P) 対象範囲と導入の選択を再利用できるようにする
+  - ホスト、リポジトリ、恒常的な分岐元の集合に採否を結び付ける。適用済み ID は選択と別に記録する。
+  - 同一の対象に限って選択を再利用し、対象変更やリポジトリ ID の不一致は選択待ちとして返す。
+  - 見送りの記録は GitHub 認証なしで保存でき、同じ対象は次回も見送りになる。
+  - _Boundary: Ruleset_
+  - _Depends: 1.1, 3.1_
+  - _Requirements: 4.1, 4.3, 4.4, 4.5, 4.6_
+- [x] 5.2 導入権限とルールの利用可否を事前に確認する
+  - 認証状態と対象への書き込み権限を分け、認証方式ごとの読み取り証拠を解釈する。同じ認証を適用に引き継ぐ。
+  - 対象 ref、GitHub プラン、squash 設定と既存の制限を検査する。試験的な設定変更を行わず、不足や不明を理由付きで報告する。
+  - 管理ロールがあってもトークンの権限不足やプラン不明の場合、書き込み件数がゼロになることを確認する。
+  - _Boundary: Ruleset_
+  - _Depends: 3.1, 3.3_
+  - _Requirements: 5.1, 5.2, 5.3, 5.5, 5.7_
+- [x] 5.3 適合するルールを再利用し、必要な対象だけに追加する
+  - 既存の有効なルールと記録済み ID を照合し、充足していれば再利用する。
+  - 競合しない不足分に限って、完全な対象 ref、PR 必須、squash 限定、バイパスなしの Ruleset を追加する。既存のレビュー・チェックや対象外の設定を変更しない。
+  - ローカルの適用を直列化する。応答消失や複数候補では再取得して理由と候補を示し、追加の書き込みを保留できる。
+  - _Boundary: Ruleset_
+  - _Depends: 3.3_
+  - _Requirements: 5.3, 5.5, 5.6, 5.7, 5.8_
+- [x] 5.4 実効ルールと通常作業の権限を検査する
+  - 適用後・日常検査で、対象、PR 必須、squash、他のルールとの整合を再取得する。
+  - 作業経路ごとの実際の主体と変更・迂回権限を照合する。管理された SSH・MCP の証跡も扱い、不明な主体やバイパス情報欠落は確認不能にする。
+  - 適用済み、設定のずれ、適用後の確認失敗、作業経路の確認不能を区別した結果を返す。
+  - _Boundary: Ruleset_
+  - _Depends: 3.3_
+  - _Requirements: 5.4, 5.5, 5.6, 5.8, 6.2_
+
+- [ ] 6. エージェントのフックを共通判定と公開状態へ接続する
+- [x] 6.1 Claude Code と Codex の実行前判定を接続する
+  - Claude の `PreToolUse` と Codex の `PreToolUse`・`PermissionRequest` を各ホストの契約に合わせる。
+  - 通常 push と保護対象への PR 作成、信頼済み BRW の限定した公開計画を照合する。計画外の副作用、不正な書き込み入力、複合した命令では確認省略を返さない。
+  - 拒否・確認省略・通常ポリシーへの委譲で各ホストの応答を検証し、承認イベントがない場合も CLI 内の制限が残ることを確認する。
+  - _Boundary: フック変換、操作判定、完了公開_
+  - _Depends: 2.2, 2.3, 4.3, 4.5_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.6, 2.8, 3.2, 6.1_
+- [x] 6.2 作業 ID の関連付けと終了時の案内を接続する
+  - `PostToolUse` で正常な作業開始・再開を確認し、ホストのセッションと worktree に関連付ける。
+  - `Stop` で準備済みの未完了作業だけを案内する。調査、途中作業、中断、関連付け不能では書き込まずに終了できる。
+  - 同じ HEAD の別作業、同一作業の再試行、禁止の追加を模擬イベントで検証する。
+  - _Boundary: フック変換、完了公開_
+  - _Depends: 4.1, 4.3_
+  - _Requirements: 2.2, 2.5, 2.6, 2.7, 6.1_
+- [x] 6.3 両ホストへフックを登録する
+  - Claude プラグインのイベントを登録し、Codex では信頼対象のプロジェクトフックと絶対パスのランチャーを設定する。
+  - worktree で有効な登録元と継承を確認し、既存の定義を保持する。２回目の導入で変更がなく、衝突箇所を報告できる。
+  - コマンドフックを使えない実行環境と、管理対象フックの要否を診断に渡せる。
+  - _Boundary: フック変換、ホスト導入_
+  - _Requirements: 1.1, 4.4, 6.1_
+- [x] 6.4 フックの稼働と対応経路を診断する
+  - 無害な検査呼び出しで拒否、確認省略、作業関連付けに必要なイベントの到達を確認する。
+  - 登録と信頼状態の証拠を使い、未導入、未信頼、非対応、確認不能を経路ごとに表示する。
+  - Codex のコマンドフック非対応のクラウド経路と、イベントが届かなかっただけのローカル経路を区別できる。
+  - _Boundary: フック変換、ホスト導入_
+  - _Requirements: 1.1, 2.1, 6.1_
+
+- [ ] 7. CLI と通常の作業手順へ接続する
+- [x] 7.1 ブランチ操作を共通判定へ接続する
+  - 既存の作成・再開と互換の判定入口を保ち、ローカルブランチからの worktree 再開を扱う。
+  - 確定した元コミットを開発ブランチへ取り込む。競合を報告し、開発間の取り込みで PR が作成されないことと保護対象へのローカルマージが拒否されることを確認する。
+  - 既存の片付け条件を維持し、遠隔状態が不明な場合や未コミット・未 push の変更がある worktree は残す。
+  - _Boundary: CLI、宣言・Git、操作判定_
+  - _Depends: 1.1, 2.3_
+  - _Requirements: 1.1, 1.2, 1.3, 3.1, 3.2, 6.3, 6.4_
+- [x] 7.2 エージェントの作業完了を公開の入口へ接続する
+  - 作業開始・準備・制限・中断・再開から、公開計画と公開結果までを同一の作業 ID で呼び出せるようにする。
+  - エージェントの作業手順に公開準備の条件を組み込み、調査だけの場合や途中の push で公開済みにならないことを確認する。
+  - 保護対象には URL と squash の案内を返し、開発間はローカルマージを案内する。個別確認・再試行・中断が必要な場合は次の操作が出力される。
+  - _Boundary: CLI、完了公開、フック変換_
+  - _Depends: 4.3, 4.5, 6.1, 6.2_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.3_
+- [x] 7.3 導入・移行と状態検査を接続する
+  - 対話では対象と効果を表示して「導入する」を既定にし、非対話で採否がない場合は適用を保留する。見送りでもフックを導入できる。
+  - 一連の選択・事前検査・追加・適用後検査を CLI に接続し、フックの稼働と Ruleset の状態を個別に表示する。
+  - 旧宣言の移行で既存の明示制限を維持し、新しい既定値と復旧手順が導入時の案内・宣言例に反映される。
+  - _Boundary: CLI、Ruleset、ホスト導入_
+  - _Depends: 5.1, 5.2, 5.3, 5.4, 6.3, 6.4_
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 5.1, 5.2, 5.3, 5.4, 5.5, 6.1, 6.2, 6.3_
+
+- [ ] 8. 既存の運用と両ホストでの動作を検証する
+- [x] 8.1 Git 操作と完了公開の統合・回帰テストを実行する
+  - 一時リポジトリでブランチ操作、既存の片付けとプレビュー・配備を確認する。旧宣言と既存 CLI の自己テストが通る。
+  - 調査・中断・別作業や準備前の呼び出しで PR が作られず、未コミット・未 push の作業が保たれることを確認する。
+  - 遠隔の変更、禁止と通常確認待ち、push 後の PR 失敗・再試行について、対象と個々の書き込み件数を確認する。
+  - _Boundary: 統合テスト_
+  - _Depends: 7.1, 7.2_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 3.1, 3.2, 3.3, 6.3, 6.4_
+- [x] 8.2 Ruleset の導入・検査を契約テストで確かめる
+  - 見送り、権限不足、プラン不明、同一ルールの再利用、対象変更を再現し、事前検査失敗時の書き込みゼロを確認する。
+  - 応答喪失や別管理者の変更で設定を再取得し、既存ルールを保持したまま重複追加を避けられることを確認する。
+  - バイパス情報欠落、設定を変更できる作業主体、確認不能な認証では、実効検査が迂回不可と表示しないことを確認する。
+  - _Boundary: 統合テスト_
+  - _Depends: 7.3_
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 6.2_
+- [x] 8.3 実環境検証用のリポジトリとホストを準備する
+  - 検証専用 GitHub リポジトリ、対象 ref、設定用と通常作業用の資格情報、squash の利用条件を用意する。
+  - 対応するローカル Claude Code と Codex にフックを導入し、信頼済みと未信頼の状態を切り替えて検査できる。
+  - 通常運用のリポジトリを使わず、両ホストのテストに必要な対象 ref と認証を確認できる。
+  - _Boundary: 実環境検証基盤_
+  - _Depends: 6.3, 7.3_
+  - _Requirements: 5.1, 5.4, 5.8, 6.1_
+- [x] 8.4 Claude Code と Codex の実際のイベント到達を検証する
+  - 対応する経路で操作の拒否、適合した通常 push・PR 作成の確認省略、作業 ID の関連付け、終了時の案内を観測する。
+  - 作業別の禁止、未信頼・未導入・非対応の表示、通常確認が必要な操作と自動許可される操作の違いを確認する。
+  - どのホスト・経路で成功したかが診断結果と一致し、GitHub マージと自動マージ予約が拒否される。
+  - _Boundary: 実環境フック検証_
+  - _Depends: 6.4, 7.2_
+  - _Requirements: 1.1, 1.3, 1.4, 2.1, 2.2, 2.5, 2.6, 3.2, 6.1_
+- [x] 8.5 GitHub のマージ条件と利用者への引き継ぎを検証する
+  - 設定用の認証で Ruleset を対象 ref に適用し、通常作業の認証による直接 push、rebase マージ、merge commit が拒否されることを確認する。
+  - エージェントが返した PR と取り込み先を利用者が GitHub 上で確認し、必要なチェックとレビューを満たした PR だけを squash で取り込めることを確認する。
+  - 設定の適用結果、拒否の結果と対象 ref が CLI の実効検査に一致する。
+  - _Boundary: 実環境 Ruleset 検証_
+  - _Depends: 5.4, 7.3, 8.3_
+  - _Requirements: 3.3, 5.4, 5.5, 5.7, 5.8, 6.2_
+
+## Implementation Notes
+
+- 1.1: `classifyBranch`・`autoApproveOf`・`permanentBases` は lib.mjs に追加済みだが、既存の `judgeBranch` とフックの `autoApprovable` へは未配線。操作判定（2.3）とフック接続（6.1）で配線する。命名規則に合わない開発指定は宣言外として扱う。
+- 1.2: テスト補助は tests/support/ にある（git-fixture・hook-fixtures・fake-github）。偽 GitHub は `request(method, path, body)` 形式で routes は完全一致のみ。3.x でクライアントの注入点を決めるとき、必要ならアダプタや可変パス対応を足す。Codex のフック入力形は想定の fixture で、実機の形との一致は 8.4 で確認する。既存の自己テストは /tmp/brw-* を実行ごとに残す（既存の挙動で、1.2 の補助は残さない）。
+- 2.1: 操作の分類は scripts/operation-policy.mjs の `classifyCommand(command, cwd)`（結果を返すだけで brw.mjs へは未接続。既存の tokenize/splitCommand とは別の字句解析を持つため、2.3 か 6.x で統合を検討する）。確定できない・判定不能な変更は安全側（unresolved/unparseable）に倒す。残る限界: 別スクリプトや node/python/make 経由で git を呼ぶ場合は検出できない（導入診断で明示する）。READ_ONLY 扱いの reset・update-ref・symbolic-ref などローカルの ref を動かすサブコマンドは照会扱いのまま（2.3 以降で要判断）。`-c` の危険設定と引数に展開・ワイルドカードを含む fetch は過検出になりうる。
+- 2.2: GitHub 書き込みの識別は scripts/github-operations.mjs と operation-policy.mjs の `classifyCommand`・`classifyMcpCall(toolName, toolInput, cwd)`。新しい操作の種類は pr-create（head・base を持つ）・github-merge（ローカルの merge とは別）・auto-merge・unsupported-write（area・action・refWrite を持つ）。2.3 はこの名前に合わせる。GraphQL は対象を常に確定不能として返す。`other-mcp`（GitHub か判断できない MCP）は操作が空で通過するため、6.4 の導入検査が scope を見て強制範囲外と報告する。curl・wget は URL に github を含み書き込みオプションがあるものだけ識別する（GHES で URL に github を含まない場合は検出できない。導入診断で明示する）。`gh -R` で別リポジトリを指す場合、cwd が未導入だと通過する（git の -C と同じ扱い）。`GH_HOST` だけ指定した場合のホスト照合は 2.3 で注意する。
+- 2.3: 共通判定は scripts/operation-decision.mjs の `evaluate(op, ctx)`・`contextFor(op, restrictions)`・`evaluateAll(classified, restrictions)`・`decisionSignature(d)`。結果は verdict（deny/pass/eligibleForApproval）・compliance（適合）・approval（確認省略）が別項目で、host は結果に影響しない。作業の禁止は `context.restrictions={noPush,noPr}` で受け取り、保存と読み出しは 4.1/4.3。保護・分岐元への切り替えは「適合・確認省略なし」、開発ブランチ上の `git merge main` は拒否。申し送り: (a) 6.1 は evaluateAll の確認省略が classify の認識した操作だけの結果である点を受け、認識外コマンドが混ざる複合コマンドでは確認省略を返さない。(b) 4.4 は push 先 URL が宣言のリポジトリと一致することを確かめる（`git push up dev/foo` は origin 以外のリモートでも開発ブランチなら確認省略になる）。(c) policy が照会扱いにする `update-ref`・`branch -D`・`reset --hard`・`symbolic-ref`・`tag` など、ローカルの参照を動かす操作は通過する。2.2 の分類の見直しか 6.1 で扱う。MCP の `update_pull_request`（base 変更）は範囲外・通常承認になる。
+- 3.1: GitHub クライアントは scripts/github-client.mjs の `createGitHubSession({host, token, transport})`（ホストと資格情報を固定）。`confirmTarget` が応答のリポジトリ ID と照合し、`request(target, method, path, body)` の書き込みは `POST /repos/{o}/{r}/pulls` と `POST /repos/{o}/{r}/rulesets` だけを許可リストで許す（3.2・3.3 が他の書き込みを足すときだけ広げる）。結果は auth/permission/unknown-input/server/network/refused/target-mismatch。偽 GitHub は transport 関数で注入し、meta.host を記録する。申し送り: (a) 書き込みの 5xx に `outcomeUnknown:true` が付かない。3.2 の冒頭で直す。(b) 429・408・3xx が unknown-input になる（429 は server か専用区分が望ましい）。(c) `badPath` は `%2e%2e`・`%2f`・`{}` を拒否しない（読み取りのみで実害は小さいが拒否が堅い）。(d) 403 のレート制限は permission と区別しない。(e) 3.1 はテストより先に実装を書いたが、テストは振る舞いを個別に検証していて実装を壊すと失敗する。
+- 3.2: PR の操作は github-client.mjs の `session.findOpenPull`・`getPull`・`createPull` の 3 つだけ公開し、共通の `pullDifferences` で state・URL・base・head の ref とリポジトリ・head の OID を検証する。一致しない PR は成功扱いにしない。作成の結果は `reconcile`（再取得で照合が必要か）と `created`・`createdUrl`・`differences` を持つ。書き込みの 5xx・408・通信エラーは `outcomeUnknown:true`。429・408 は server、3xx は target-mismatch。`badPath` はパス部分の `%` とパス全体の `{}` を拒否する。申し送り: (a) 3.3 は `rules/branches/{branch}` で ref 名を `%2F` にエンコードするため、その経路だけ狭く許可する仕組みを足す。 (b) 4.5 は PR の draft を再利用してよいか決める（現状は draft でも一致すれば成功扱い）。 (c) 公開されている `session.request` は許可経路 `POST /pulls` に任意の本文を送れ、`createPull` の head 制限を通らない。呼び出し側（4.x・5.x）は `createPull` 経由で使う。
+- 3.3: Ruleset の照会は github-client.mjs の `session.getRepositorySettings`・`listRulesets`（親ルール込み・全ページ）・`getRuleset`・`getBranchRules(target, ブランチ名)`・`createRuleset`。応答にない項目は null で返し、false や空として扱わない。バイパス情報がない詳細は `bypassActors:null`・`bypassInfo:"missing"`。実効ルールの取得は `okBranch` で検査してから %2F にエンコードする（公開 `request` の `%` 拒否は維持）。`POST /rulesets` は公開 `request` からは送れず `createRuleset` だけが送れる。本文は name・target・enforcement・bypass_actors・conditions・rules に限り、target は branch、enforcement は active、bypass_actors は空、`conditions.ref_name.include` は完全な `refs/heads/<名>` のみ、exclude は空。5.3 がこれに合わない本文を作る場合は緩和が要る。作成の応答は返却 ID と内容を検証し、応答喪失・5xx・408・ID なしは `outcomeUnknown`+`reconcile`、食い違いは `createdId`+`differences` の target-mismatch。申し送り: (a) `rulesetDifferences` はルールの種類しか比べない。`pull_request` の `allowed_merge_methods` が squash 限定かを含む詳細検査は 5.3・5.4 で必ず入れる。 (b) `okBranch` は英数字と `._-`・`/` のブランチ名に限る（`+`・`@`・非 ASCII を含む分岐元は Ruleset 化できない。導入時の案内に出す）。 (c) `createRuleset` は `parameters` にクローン不能な値があると `DataCloneError` を投げる（通信前で安全側。呼び出し側は例外を扱うか、`refused` に統一する）。 (d) 実効ルールの重複検出キーは ruleset_id/type/parameters で、同一内容が重複すると unknown-input になる。
+- 4.1: 作業状態は scripts/publish.mjs（API: startWork・pauseWork・resumeWork・setRestrictions・recordResult・setStatus・readWork・currentWork・getRestrictions・stateFileOf。戻り値は `{ok, ...}` か `{ok:false, error:{kind:"invalidInput"|"conflict", message}}`）。状態は `<git 共通ディレクトリ>/brw/work/<worktree の realpath の sha256 先頭 16 桁>.json`、ロックは同名に `.lock`（3 秒待ち、60 秒超の持ち主のいないロックは rename で外す）。禁止は追加のみで外せず、`getRestrictions` は `context.restrictions` へそのまま渡せる。状態ファイルが壊れている・読めない・形が違う・作業 ID が見つからないときは新規作業と更新を拒否し、禁止は両方 true。遷移は inProgress→ready、ready→inProgress／pushed／published、pushed→published のみ。公開済みは再開できない。再開時に `ready.headOid` が現在の HEAD と違えば準備済みを取り消し、results.push・results.pr も消す。結果には outcome・code と、認証情報・クエリ・フラグメントを含まない https の URL（origin+pathname に正規化）だけを保存する。CLI（`brw work start|resume|restrict`・`brw pause`）と PostToolUse の関連付けは未接続で、4.2 以降・6.2・7.2 で接続する。4.2 は `ready` に `headOid` を持たせる。URL のパス部分に入った秘密らしい文字列は構造上区別できず、そのまま保存される。
+- 4.2: 準備確定は scripts/publish.mjs の `markReady(cwd, workId, input, {lockWaitMs})`。取り込み先は明示指定→記録済み brwBase→宣言の baseBranch の順で、明示指定は記録・既存 PR との食い違いを解消する手段として採用し `integration.source` に残す。`ready.publication` は開発ブランチ宛なら "push"、保護・分岐元宛なら "pr"。未追跡ファイルも未コミット扱い。失敗は `{kind, code, message}`。申し送り: (a) `input.existing` を省くと既存 PR の照合が無言で省かれる。4.3・7.x は必ず `findOpenPull` の結果を渡す。 (b) `findOpenPull` は base で絞るため、別 base の既存 PR は `base-conflict` として検出されない。4.5 は base を絞らない検索か複数候補で再照合する。 (c) 取り込み先ブランチの遠隔での存在確認は 4.4・4.5。宣言と現在 commit の一致確認は 4.3。
+- 4.3: 公開計画は scripts/publish.mjs の `issuePlan(cwd, workId, {repository, existing, lockWaitMs})` と `checkPlan(cwd, workId, planId)`。計画は作業状態の `plan`（planId・headOid・repositoryId・versions・writes）で、eligibleForApproval の push・PR だけが `writes` に入り、禁止・通常確認待ち・push 済みは返り値の `excluded` のみ。既存 PR の再利用は `reuse` として返し writes に入れない。版は宣言・禁止・ready・push 先（destination のダイジェスト）で、変わると `<種類>-changed` で失効。申し送り: (a) 4.4 は実行直前に遠隔 ref・OID・results の再確認と直列化を行う（`checkPlan` は版・HEAD・作業ツリーのみ、results の変化は見ない）。 (b) PR の分類は仮の `--title brw` で行っている。4.5 は実行直前に `createPull` 経由で同じ判定を取り直し、既存 PR を再取得して照合する。 (c) noPush で push 済みの場合 PR は計画に入る。4.5 は作成前に遠隔の対象 ref が同じ OID か読み取りで確認する。
+- 4.4: push は scripts/publish.mjs の `runPush(cwd, workId, {planId, repository, confirmed?, lockWaitMs?})`。結果は `{ok, outcome(success/prohibited/needsApproval/failed), code, execution(auto/confirmed/already-published)}`。公開は `<状態ファイル>.run.lock` で直列化し、操作開始（作業の `started.push={at,oid,execution}`。Data Models 未記載）は状態ロック内の再検証後に記録する。push は `<oid>:refs/heads/<branch>` の 1 refspec に `--no-follow-tags --no-recurse-submodules`。禁止中でも遠隔に同じ OID があれば already-published で success（PR 処理へ進める）。成功時の結果記録と pushed 遷移は 1 回のロックで行い、失敗は `recorded:false`。遠隔の拒否は `push-rejected`（non-fast-forward/fetch first）と `remote-rejected`（フック・ルールセット）を区別。申し送り: (a) `confirmed:true` は利用者が実際に通常承認を与えた場合だけ渡す。責任は 6.x・7.2 の接続側。 (b) 4.5 も同じ `.run.lock` と状態ロック内の直前再検証を使う（`acquire` は publish.mjs 内の非公開関数なので同ファイル内に置くか export を足す）。 (c) 強制終了時は started が残り results が未記録になるが、再実行は遠隔 OID を読んで判定するため二重 push にならない。
+- 4.5: PR は scripts/publish-pr.mjs の `runPublishPr(cwd, workId, {planId, repository, session, confirmed, title, body, lockWaitMs})`（publish.mjs の `acquire`・`update`・`verifyPlan` 等を export して共用）。開発間（publication=push）は GitHub に触れず遠隔 OID の読み取りだけで published。保護対象は状態ロック内で計画・制限・判定（実際の title で再分類）を取り直し `started.pr` を記録してから `createPull` だけで書く。既存 PR は base を絞らない GET で探し、別 base は `base-conflict`、draft は再利用せず `pr-draft`（draft が真偽値で取れなければ `pr-unconfirmed`）。応答喪失・競合は再照合して一致すれば `reconciled`。結果は `notice`（GitHub 上で squash マージする案内）、`push` の結果付き。申し送り: (a) 呼び出し側（6.x・7.x）は新規作成時に `title` を必ず渡す（無いと `pr-title-required`）。タイトル・本文は利用者に求めてから渡す。 (b) `confirmed:true` は利用者が通常承認した場合だけ。noPush＋手動 push 済みの `gh pr create` は自動承認されず needsApproval。 (c) prohibited・needsApproval・failed では published にせず pushed のまま。 (d) push→PR の順序の統括（`brw publish`）は 6.x・7.2 で接続する。 (e) `session.request` が任意の POST 経路を公開している点（3.2 申し送り (c)）は未解決。呼び出し側は必ず `createPull` 経由にする。
+- 5.1: Ruleset の導入選択は scripts/ruleset-choice.mjs（`recordChoice`・`recordApplied`・`markVerified`・`resolveChoice`）。保存は `<git 共通ディレクトリ>/brw/ruleset-choice.json`（ロック＋一時ファイル置換）。`resolveChoice` は selected / skipped / pending（reason と `knownRulesetIds` 付き）を返し、適用済み ID は保存済み repositoryId と一致する記録だけを返す。壊れた・形違いの記録は pending、書き込みは conflict。見送りは認証なしで保存できる。design の File Structure にある `scripts/rulesets.mjs` とは別ファイル（5.2 以降はここから import）。申し送り: (a) repositoryId を取り直すと旧 ID の適用済み記録は再利用・報告から外れる（記録は残る）。旧 Ruleset の後始末は 5.3・5.4。 (b) `markVerified` は確認済みの記録だけで、実効ルールの取得は 5.4。 (c) 壊れた記録は利用者が直すか削除するまで選択も保存できない（導入診断 6.4 で案内する）。
+- 5.2: 事前確認は scripts/ruleset-preflight.mjs の `runRulesetPreflight(session, target, branch, {authKind, knownRulesetIds})`（verdict は ready/blocked/unknown、`writeAllowed` は ready のときだけ true、`session` を 5.3 へ引き継ぐ）。個別検査 `checkAuthentication`・`checkTargetAccess`・`checkWriteAuthority`・`checkRulesetAccess`・`checkRulesetAvailability`・`inspectExistingRules`・分岐元の存在確認を export。すべて読み取りのみ。classic/OAuth は admin かつ `x-oauth-scopes` に `repo` がある場合だけ ok、ヘッダーなしの認証は fine-grained 扱いで Repository 所有の既存 Ruleset のバイパス情報を証拠にし、無ければ unknown。`authKind` の申告がヘッダーと食い違えば厳しい側。3.1 の `checkAuth` は `scopes`（許可リスト `pickHeaders` の x-oauth-scopes のみ）を返すよう拡張済み。申し送り: (a) ヘッダーを除去するプロキシ越しの classic トークンや、既存 Ruleset が空の新規導入（非公開）は unknown になり導入が止まる。6.4 の診断で理由と対処を案内する。 (b) 分岐元の存在確認はブランチ一覧の全ページ読み取り（上限 50 ページ、超過は unknown）。 (c) 5.3 は `existing.reusable`・`brwRecorded`・`bypassUnknown`・`squashOnly` を使って再利用か追加かを決める。
+- 5.3: Ruleset の適用は scripts/ruleset-apply.mjs の `applyRuleset(cwd, {session, target, refs, authKind?}, {lockWaitMs?})` と `rulesetBodyOf(refs)`（Ruleset 名 `brw-pr-squash`）。順序は resolveChoice（skipped/pending は通信しない）→ `<ruleset-choice.json>.apply.lock`（通信中も保持、待ち 3 秒）→ 分岐元ごとに `runRulesetPreflight`（1 つでも writeAllowed でなければ書き込まない）→ 不足分の分岐元だけを 1 件の Ruleset にまとめて `createRuleset`。結果 status は applied/reused/skipped/pending/blocked/unknown/conflict/rejected/mismatch/invalidInput（ok は applied・reused のみ）。応答不確実（outcomeUnknown・409・422）は一覧と詳細を再取得して照合し、同条件 1 件なら記録、複数なら conflict（候補 ID）、0 件なら unknown。再送しない。申し送り: (a) 部分充足時、`recordApplied` は選択の refs 全体で記録するが include は不足分だけ（結果の `includedRefs`・`reusedRulesetIds`）。`appliedRulesetIds` を「全分岐元を覆う」と読まず、5.4 は分岐元ごとに実効ルールを再取得して確認する。 (b) mismatch で作成された ID も記録する（削除・更新はしない）。記録にあるだけで有効とみなさない。 (c) 作成直後の一覧に出ない遅延は unknown になり、次回の再検査で再利用される。 (d) 候補の識別は名前に加えて include・所有元・バイパス・squash の一致で行う。 (e) `markVerified` は 5.4 が呼ぶ。
+- 5.4: 実効検査は scripts/ruleset-inspect.mjs の `inspectRulesets(session, target, refs, {routes, afterApply, cwd})`（読み取りのみ）。結果 status は enforced/drift/verify-failed/unverifiable/invalidInput（優先順位 drift > verify-failed > unverifiable）。分岐元ごとに実効ルール・有効化・target=branch・include/exclude（`~ALL`・`~DEFAULT_BRANCH`、glob は解釈せず drift 側）・PR 必須・squash 限定・バイパスを検査。`afterApply:true` は不一致も verify-failed。`markVerified` は afterApply で全分岐元 ok・repositoryId 確定のときだけ呼ぶ（作業経路の結果とは独立）。routes は `{name, transport: gh|ssh|mcp, session?, declaredActor?, managed?}`: gh は作業用 session で実主体と権限を読み、ssh・mcp は `managed:{actor, fixed:true, evidence, permissions:{admin,push}}` が必須（自己申告のみは unverifiable）。管理者権限の経路は drift、バイパス対象があると主体の所属を照合できず unverifiable、経路 0 件も unverifiable。申し送り: (a) 6.x・7.3 は作業用の認証で作った session を gh 経路に渡す（管理者の session を渡すと drift）。 (b) ssh・mcp の managed 証跡は GitHub では検証しない。出所は呼び出し側（6.4 の導入診断）で担保する。 (c) 早期に drift・verify-failed で戻った場合、経路の個別表示が楽観的になりうる（総合判定は安全側）。 (d) `brw check --ruleset` の CLI 接続は 7.x。
+- 6.1: ホスト応答の変換は scripts/agent-hooks.mjs（`handleHook(host, event, input)`・`decideHook`・`responseOf`・`runHook`・`HOST_EVENTS`。`node scripts/agent-hooks.mjs <claude|codex> <イベント>` で標準入出力）。Claude PreToolUse は deny/allow/ask、Codex PreToolUse は deny のみ、Codex PermissionRequest は `decision.behavior` の allow/deny、pass は応答なし。確認省略は単独の git・gh（先頭 cd のみ可）、語に分けられ、`eligibleForApproval`、かつ素の push は origin の取得先と origin・対象 remote の全 push URL（`--all`、insteadOf 適用後）が同一 GitHub リポジトリのときだけ。信頼済み publish は `node <brw.mjs の実体> publish --work <id> --plan <id> [--title] [--body-file]` の形のみで、`checkPlan` 照合・書き込みの形・head・OID・件名を満たし、`--body-file` は作業ディレクトリ配下の通常ファイル（realpath も配下）に限る。参照を動かす操作（update-ref・reset・symbolic-ref・tag・branch の変更系）は Claude で ask、Codex は応答なし。MCP の書き込みは deny のみ（確認省略は付与しない）。壊れた状態は noPush・noPr を両方 true として扱う。申し送り: (a) hooks/hooks.json はまだ旧 `brw.mjs hook` を呼ぶ。6.3 で登録し、旧フックとの二重判定（例: --all の ask）を置き換えで解消する。 (b) Codex の入出力の形は設計と fixture に基づく。実機一致は 8.4。 (c) `brw publish` の引数の形（--work・--plan・--title・--body-file）を 7.2 で一致させる。実体パスは絶対パスで呼ぶ（`${CLAUDE_PLUGIN_ROOT}` の展開前文字列は信頼しない）。 (d) 作業の禁止は current の作業だけを見る。セッションとの関連付けは 6.2。 (e) 診断 6.4 で案内する限界: origin 自体が別リポジトリを指す場合や `url.<…>.insteadOf` で origin ごと書き換えた場合は信頼の基準が origin のため allow になる、Codex PreToolUse は ask を返せず承認なしの環境では参照移動の歯止めにならない、`bash -c`・括弧など入れ子の分類不能（2.1）、`--body-file` の判定後差し替え（配下の通常ファイルのみで実害は小さい）。 (f) MCP の PR 作成は確認省略しない方針（拒否か通過のみ）。
+- 6.2: `HOST_EVENTS` に Claude・Codex とも `PostToolUse` と `Stop` を追加（scripts/agent-hooks.mjs の `recordWorkStart`・`workCallOf`・`pendingOf`・`stopGuidance`、scripts/publish.mjs の `attachSession(cwd, workId, sessionId)`）。PostToolUse は信頼済み BRW 実体の `work start` / `work resume --work <id>` が `tool_response.exit_code===0` かつ非中断で、出力に現在の作業 ID があり、state の current・非中断・非公開のときだけ sessionId を記録（採用は current で決める）。Stop は読み取りのみ（ロック・書き込みなし）、`stop_hook_active` なら何もせず、sessionId が一致する ready/pushed の未公開作業だけを `{decision:"block", reason}` で案内（HEAD が準備後に変わった作業は再開か中断の案内）。noPush だけ残る ready と noPr だけ残る pushed、inProgress・中断・関連付け不能・壊れた状態は応答なし。申し送り: (a) 7.2: `start` の関連付けは別セッションの sessionId を上書きしない形に絞る（`w.sessionId` 未設定のみ、または `attachSession` に引き継ぎ可否を足す）。`brw work plan`・`brw publish`・`brw pause` の引数名を Stop の案内文と一致させ、公開完了・中断時の関連付け解除を担う。`work start|resume` の出力には作業 ID を 1 つだけ出す。 (b) 8.4: Claude・Codex の実機の `tool_response` の形（`exit_code` の有無・型、Codex の文字列形式）で PostToolUse の成功判定を確認する（欠落時は記録しない安全側）。Codex の Stop 応答契約も実機確認。 (c) hooks.json への登録は 6.3。
+- 6.3: フック登録は scripts/hook-install.mjs（`installCodexHooks({repoDir, launcherPath, commandHooks, featuresText})`・`mergeCodexHooks`・`checkClaudeHooks(pluginRoot)`・`registrationSourceOf(dir)`）。Claude は hooks/hooks.json に PreToolUse（Bash・`mcp__.*`）・PostToolUse（Bash）・Stop の 4 件を `node "${CLAUDE_PLUGIN_ROOT}/scripts/agent-hooks.mjs" claude <イベント>` で登録し、旧 `brw.mjs hook` は登録から外した（CLI としては残り selftest AC-14 が依存。削除は 7.x で判断）。Codex は `node install-codex.mjs --repo <dir>` で `.codex/hooks.json` に絶対パス（realpath＋シェル引用）のランチャーで 6 件（PreToolUse・PermissionRequest の Bash と `mcp__.*`、PostToolUse、Stop）を既存定義を保ってマージ。自分の定義は `node '<…>/scripts/agent-hooks.mjs' codex <イベント>` の全体一致だけ。結果 status は registered（trust unknown）/untrusted（今回登録・変更、/hooks での承認待ち）/unsupported/conflict/blocked、`reasonCode`（command-hooks-unavailable・hooks-disabled・duplicate-worktree・unreadable-json・not-a-file・symlink・shape-mismatch・legacy-brw-hook・unknown-common-dir 等）と `managedHooksRequired`（commandHooks:false のときだけ true）を付ける。書き込みは同ディレクトリの一時ファイル＋rename で既存モードを引き継ぎ、symlink・非通常ファイルは conflict。linked worktree は親チェックアウトの `.codex` を登録元とし、共通ディレクトリが `.git` でないもの（bare・separate-git-dir・サブモジュール）は登録元を決めず conflict。申し送り: (a) 6.4 は `hooksDisabled` の検出が限定的（`[features]` 見出しのコメント付き・ドットキー・プロジェクトの `.codex/config.toml` は見逃す）な点と、trust unknown（登録済み・未変更）の実確認、`commandHooks:false` を渡す経路（CLI からは常に true）を扱う。 (b) 7.x は README.md 18 行と references/setup.md の Codex の節を `--repo` に合わせて更新し、旧 `brw.mjs hook` の削除を判断する。 (c) 8.4 は Codex の `.codex/hooks.json` の形・matcher `mcp__.*` の正規表現解釈・worktree の親読み込み・ハッシュ信頼の実機一致を確認する。 (d) 旧フックの宣言 `autoApprove` 未指定時、新判定は確認省略する（設計の新規既定に沿う）。 (e) `MANAGED_RE` の `^` 外しの変異はテストをすり抜ける（末尾一致の保持入力を足すとよい）。
+- 6.4: 稼働診断は scripts/hook-diagnose.mjs の `diagnoseHooks({pluginRoot, codexRepoDir, host?, commandHooks?=true, featuresText?, codexTrust?="unknown", env?})`（読み取り専用）。戻り値は `{routes, limits}`。経路は host（claude/codex）× environment（local/cloud）× event の 14 件で、`status`（active/not-installed/untrusted/unsupported/conflict/unverifiable）・`reasonCode`・`reason`・`managedHooksRequired`・`probes` を持つ。判定順は 非対応（commandHooks:false・hooks 無効）→ 登録 → Codex 未信頼 → 登録と同じランチャーを子プロセスで実行した応答。拒否（保護ブランチへの commit）・確認省略（開発ブランチへの push）・PostToolUse（検査用リポジトリで `work start` の合成入力→sessionId の記録を読み取りで確認）・Stop（ready の未公開作業で `decision:"block"`、作業なしで応答なし）の実応答を確認し、何もしない・誤応答のランチャーは active にしない。クラウドは両ホストとも unsupported（managed-hooks-required、managedHooksRequired:true）。Codex の信頼状態は読めないため呼び出し側の `codexTrust`、既定は unverifiable。検査は一時リポジトリ内に閉じ（HOME・GIT_CONFIG_GLOBAL/SYSTEM を隔離、子の環境は PATH・LANG・LC_ALL と明示 env のみ）、終了時に必ず削除。`limits` は 22 件（本文書の 2.1・2.2・2.3・6.1(e)・6.3(a) の限界を網羅）で、テストは ID の完全一致で固定。申し送り: (a) 7.x の CLI 接続（`brw check`・導入診断）はこの結果を表示する。診断全体は経路ごとに一時リポジトリを作り直すため遅い（selftest 全体で 1 分強）。必要なら共有化する。 (b) 8.4 は Claude・Codex の実機配信（PostToolUse・Stop の到達）、Codex の信頼状態の読み取り、クラウドの管理対象フックの実在確認を行う。 (c) Claude の probe コマンドは hooks.json から読まず固定文字列で組み立てる（登録の照合は `checkClaudeHooks`）。
+- 7.1: scripts/brw.mjs に判定を揃えた。`create` は保護・分岐元（`baseBranches` の固定名）・命名規則違反を `classifyBranch` で拒否（既存の終了コード・文言を維持）。`resume` は開発ブランチだけを再開し、ローカルにだけあるブランチ・遠隔と同じ線上のローカルブランチから worktree を作る（遠隔と分岐していれば止める、本体の作業ツリーで使用中なら止める、作成後 `--ff-only`）。新規 `brw merge <取り込み元>`（取り込み先は現在の worktree のブランチ）は両方が開発ブランチであること、未コミット・取り込み途中状態の拒否を確認し、取り込み元のローカル OID を固定して `git merge --no-edit`、GitHub・gh には接続しない。競合は自動解決せず競合ファイルを一覧して中断状態（`git merge --abort`）を案内する。`finish` は遠隔状態を `ls-remote --exit-code` で present/absent/unknown に区別し、unknown は残し（旧版より厳しい）、absent でも取り込み判定（祖先・squash 同内容・gh の MERGED PR）が成立すれば旧来どおり片付ける（squash＋遠隔削除の運用を維持。旧版 `git show HEAD:scripts/brw.mjs` と 4 シナリオで終了コード一致を確認）。申し送り: (a) merge は `evaluate`（evalMerge）でなく `classifyBranch` 直呼び。確認省略の判定は CLI では行わない。7.2 でフック側（`git merge` の判定）と揃えるか判断する。 (b) merge の取り込み元 OID 固定は同期実行のため変異で未検出（実害は rev-parse と merge の間の競合のみ）。 (c) `brw merge` の案内文は 7.2・7.3 の文書側（SKILL.md・references）で扱う。 (d) squash 後に同一ファイルへ変更を積んだ未 push の commit は done にならず残る側に倒れる（旧版と同じ限界）。 (e) 宣言が作業ツリーで未 commit の状態でも merge は止めない。
+- 7.2: 公開の入口は scripts/publish-cli.mjs（`runWork`・`runPublish`・`runPause`。brw.mjs に配線）。`brw work start`（作業 ID を stdout に 1 つだけ出力、注意は stderr）・`work resume --work <id>`・`work restrict --work <id> --no-push|--no-pr`・`work ready --work <id> …`（追加オプション `--failed`・`--target`）・`work plan --work <id>`・`publish --work <id> --plan <id> [--title <t> --body-file <path>] [--confirmed]`・`pause --work <id> --reason <r>`。GitHub session は GH_TOKEN・GITHUB_TOKEN・`gh auth token` の順（github.com のみ。資格情報は出力・記録しない）。`start` の関連付けは他セッションの sessionId を上書きしない（`attachSession({onlyIfUnset})`）、中断（`pauseRecord`）と公開完了（`setStatus(published)`・`completeWork`）で解除。新規 PR は `--title` 必須（無いと `pr-title-required` で次の操作を出力）、タイトル・本文は利用者に求めてから渡す。保護対象には PR の URL と「GitHub 上で squash マージ」の案内、開発間は `brw merge` の案内を出力。`--confirmed` は `process.stdin.isTTY` が真のときだけ有効（非 TTY は書き込まず、利用者が自分の端末で実行する全文を案内）。TTY 判定の注入はテストの deps だけで、環境変数・引数では迂回できない。禁止（noPush・noPr）は `--confirmed` でも迂回できない。フックは `--confirmed` 付き publish を確認省略しない。SKILL.md に「4. 変更作業の完了と公開（push・PR）」を追加（旧 4 は 5 に繰り下げ）、README・references/setup.md の Codex 導入を `--repo` に合わせた。申し送り: (a) 8.1/7.3 の統合テストに、非 TTY の `brw publish --confirmed` を spawn して終了コード 1・遠隔に ref なしを確認する 1 件を足す（本番既定の `process.stdin.isTTY === true` はテストが注入で迂回している）。 (b) エージェント自身が pty・`NODE_OPTIONS=--require` で isTTY を偽装することは防げない（任意コード実行と同層の限界）。6.4 の診断の限界一覧か 8.4 で扱う。 (c) `brw work plan` で push だけ利用者が承認した場合、PR は計画に入らず plan-pr-missing になる。計画を取り直せば完了する。 (d) tests/agent-hooks-session.mjs の期待値を中断時の関連付け解除に合わせて更新済み。 (e) 実機の PostToolUse・Stop の配信は 8.4。
+- 7.3: 導入・状態検査は scripts/setup-cli.mjs（`runSetup`・`decideChoice`・`installRuleset`・`installHooks`・`migrationOf`/`runMigrate`・`runStateCheck`）と brw.mjs の `setup`・`check`。順序は decideChoice（指定→保存済み→対話の既定「導入する [Y/n]」→保留）→ recordChoice → confirmTarget（ホスト・所有者・名前を応答で照合しリポジトリ ID 確定、保存 ID と違えば保留）→ resolveChoice → applyRuleset → inspectRulesets{afterApply:true}。見送り（off）は GitHub 認証・通信なしで選択を保存しフック導入へ進む。非対話で採否が無ければ Ruleset を保留（フックは導入）。TTY 判定は `process.stdin.isTTY === true` のみ（注入はテストの deps だけ）。対象候補は origin 優先、origin が無く複数 remote なら決めず保留（push URL で判定）。環境変数: `BRW_SETUP_GH_TOKEN`（設定用。未設定なら gh の保存済みログイン）、`BRW_WORK_GH_TOKEN`（作業経路の確認用。未設定なら確認不能）。どちらも `ghEnv`（github-client.mjs）が子プロセスから除去し、必要な 1 つだけ渡す。`brw check` の終了コード: 0 問題なし、1 誤り・設定のずれ・衝突、2 使い方の誤り、3 保留・確認不能。フックの状態は終了コードに含めず、見送りの Ruleset は 0。`--branches-only` はフック・Ruleset を表示せず、`--ruleset` との同時指定は 2。setup 側の適用後検査は verify-failed を 1、日常の check では確認不能 3。`setup --migrate` は排他書き込み（wx）で旧パスを残し、差分表示、明示 false は維持、未指定は新既定（有効）になる点を案内（`--keep-confirm push|pullRequest|all` は `--migrate` と併用）。references/setup.md・config.md・README に新既定と復旧手順を追記。申し送り: (a) 非対話の `brw setup --ruleset on` は設計どおり許可。設定用認証が無いと gh の保存済みログインで管理権限の書き込みが起きる点を setup.md に明記済み（利用者判断）。 (b) 8.x: brw.mjs 289 行付近の旧 `autoApprove?.[kind] !== true` 判定と lib.mjs `autoApproveOf`（未指定は有効）の整合、実機のフック信頼フローと入出力の形（8.4）、エージェントによる isTTY 偽装（pty・`NODE_OPTIONS`）の限界の記載（6.4 の限界一覧か 8.4）。 (c) `assets/config.example.json` は明示 true のまま（新既定と矛盾しない）。 (d) `github-client.mjs` が導入用の環境変数名を知る点は層の分離として緩い（必須でないが、除去リストを引数で渡す形が望ましい）。 (e) 非対話の `brw publish --confirmed` の spawn テストは tests/publish-cli.mjs にあり、本番既定の isTTY 判定を検証する。
+- 8.1: 統合テストは tests/integration-publish.mjs（`integration/8.1`、50 件。実 `scripts/brw.mjs`・`scripts/agent-hooks.mjs` を spawn、origin は GitHub 形式の URL＋試験用 ssh で bare remote、`tests/support/gh-shim.mjs` の偽 gh に要求ログ。HOME・Git 設定は一時の場所）。覆うもの: ブランチ操作・旧宣言・url/gen-workflow、準備前・中断・別作業で PR 0 件かつ作業保持、遠隔の別 OID・noPush・noPr・autoApprove:false・非 TTY `--confirmed`、PR 403 後の再試行で push を繰り返さず PR 1 件、応答喪失後の既存 PR 再利用、フックの拒否・確認省略・GitHub マージ/自動マージ拒否（両ホスト）。変異（禁止の無視・PR 再利用削除・`--force`・TTY 常に真）は検出。申し送り（任意の強化）: (a) 3c に `results.pr.outcome === "prohibited"` の assert を足すと noPr の単独防御を検出できる。 (b) フック検査に deny の理由コード（`github-merge` 等）の assert を足す。 (c) 要件 1.2（`git worktree add`・`git switch -c` の拒否）・1.4（`unresolved`）・1.5（未導入リポジトリで通過）・2.8（`--force`・削除形 refspec）は統合に無く、tests/enforcement.mjs・decision.mjs の単体で担保。 (d) 開発ブランチ同士の push 成功（PR なし・published）の統合 1 件と、保護対象向け `brw finish`（`gh pr list` 経路。偽 gh は未対応で exit 2）の偽 gh 拡張が未実施。 (e) 多重防御により単独削除では検出されない等価変異がある（publish.mjs:672 の noPush、準備前チェック、noPr の 3 箇所、`github-merge` 分岐）。
+- 8.2: Ruleset 契約テストは tests/integration-ruleset.mjs（`ruleset-int/8.2`、27 件。実 `brw setup/check` の spawn と、状態を持つ通信層を注入した in-process の `runSetup`・`runStateCheck`）。覆うもの: 見送り（通信 0 件）・権限不足・プラン不明・同一ルールの再利用・対象変更/ID 不一致での選択の取り直し、事前検査失敗時の書き込み 0 件、応答喪失/5xx/別管理者/候補複数で再取得し再送せず既存 Ruleset を保持（POST のみ、PUT・PATCH・DELETE 0 件）、バイパス欠落・作業主体 admin・作業認証なし/401 では enforced と表示しない。この検証中に scripts/setup-cli.mjs の `reportApply` を修正: 事前検査が `unknown` のとき確認できなかった項目と再試行の対応を表示（要件 5.2）、`reconciled` のとき「既存の同条件の Ruleset を確認して記録しました」と表示（今回の要求で作られたか別管理者が作ったかは判別できないため断定しない。終了コード・記録は不変）。申し送り: (a) reconciled の文言「応答が届かなかったため」は 409・422 でも出るので「応答が不確かだったため」に緩和するとよい。 (b) classic トークンでバイパス欠落（preflight の `bypassUnknown`）の統合 1 件、409・422 で既存の同条件 1 件がある場合の表示テストが未実施。 (c) 統合テストの後始末が `try/finally` でなく、中断時に `/tmp/brw-ruleset-int-*` が残る（`try/finally` 化を推奨）。 (d) 実 GitHub での Ruleset の効力（直接 push・rebase マージ・merge commit の拒否）・実際の認証種別（fine-grained・App）での権限判定・`brw check` の実効検査と実環境の拒否結果の一致は 8.3〜8.5。
+- 8.3: 実環境基盤は tests/real-env/（`common.mjs`・`prepare.mjs`・`hosts.mjs`・`cleanup.mjs`・README.md。`BRW_REAL_ENV=1` のときだけ動き、selftest には配線しない）。本リポジトリ（nekono-dev/branch-release-workflow）を検証用に使い、`main`・既存ブランチ・既存設定には触れず、使い捨てブランチ `verify/brw-base-<epoch>`（main の commit から作成）だけを Ruleset の対象にする。一時クローン `/tmp/brw-real-env/clone` の検証用宣言（`baseBranch`・`baseBranches` を専用ブランチ、`protectedBranches:["main"]`、未 commit）と状態ファイル `.brw-verify-state.json`。認証: gh ログイン（classic/OAuth、scopes gist/read:org/repo/workflow、admin）が 1 つだけで、設定用・作業用とも同じログインから作る。非管理の token があれば `BRW_REAL_ENV_WORK_TOKEN` で作業用に差し替える。hosts.mjs は一時 HOME・CODEX_HOME で `install-codex.mjs --repo` を実行し、Codex は導入済み・未信頼（`review-required`）、`diagnoseHooks` の `codexTrust` 切り替え（untrusted/trusted/unknown）、Claude は `checkClaudeHooks`・`diagnoseHooks`。cleanup.mjs は記録分（Ruleset・PR・`verify/` ブランチ・一時クローン）だけを削除し、ブランチ名が `verify/brw-base-<数字>` でなければ中止、`--include-ref-rulesets` は対象が専用ブランチ 1 本だけの Ruleset を加える。8.3 実行後に GitHub に残るのは `verify/brw-base-1795253198` の 1 本（Ruleset 0・open PR 0）。申し送り: (a) 8.5 で非管理の資格情報が無い間、Ruleset の bypass_actors が空でも管理者は設定変更権限を持つため `brw check` の作業経路は drift と表示されるのが正しい（README に明記）。管理者でも bypass が空なら直接 push は拒否されるため、拒否の確認は可能。 (b) Codex の信頼の実承認は `/hooks` での利用者操作で自動化できない。診断への入力値の切り替えまでを検証する。 (c) 8.4/8.5 が Ruleset・PR・ブランチを作ったら `node tests/real-env/prepare.mjs --record ruleset=<id>|pr=<番号>|branch=<名前>` で記録し、終了時に `cleanup.mjs`（`brw-pr-squash` は `--include-ref-rulesets`）で片付ける。 (d) 一時クローンの origin は公開 https で資格情報が無い。push を伴う検証では `authEnv()` 由来の token を渡す。クローン内の検証用宣言は未 commit のままで、必要ならローカルでだけ commit し push しない。
+- 8.4: 実ホスト検証は tests/real-env/host-events.mjs（`--host claude|codex|both`・`--dry-run`・`--scenario`・`--diagnose-only`）と hook-logger.mjs（入出力を伏せ字付きで記録）。実機（Claude Code・Codex 0.167）で拒否・確認省略・ask・マージ拒否・sessionId の関連付け・Stop の block・未導入/未信頼の診断が設計どおり動き、診断と一致した。実機で見つけた食い違いを 2 件修正: (1) PostToolUse の `tool_response`。Claude は `exit_code` が無く `stdout`/`stderr`/`interrupted`、Codex は文字列（失敗した呼び出しにも届く）。`successOutput` で判定（不明は記録しない安全側）。(2) 6.3 の前提を訂正: Codex の linked worktree は、worktree に `.codex/` ディレクトリがあるときだけ親の `.codex/hooks.json` を読む（hooks/list で実測）。worktree 自身の hooks.json は読まれず、登録と信頼は親に結び付く（worktree ごとの承認は不要）。`brw create`/`resume` と `install-codex.mjs --repo <worktree>` が `.codex/`（印 `.brw-worktree`）を作り、共通 info/exclude に `.codex/` を足す。手作業の `git worktree add` や `git clean -fdx` 後は届かず、診断が `not-installed[worktree-not-registered]` を出す。未観測: Codex PermissionRequest（`codex exec` では発生せず）、MCP matcher `mcp__.*`、`/hooks` の実承認（呼び出しごとに回避フラグ）、クラウドの管理対象フック。診断の `codexTrust` は入力のままだが、hooks/list が `trustStatus` を返すため読み取りは今後可能。非対話 Codex では `.git` が書き込み禁止で `work start` が失敗し `--add-dir` で回避。申し送り: (a) info/exclude への `.codex/` 追記は親にも及ぶ（setup.md に追記を推奨）。 (b) hook-logger は `gh pr create --body` の本文を伏せないため、実データのシナリオに広げるときは `--body`/`-b` を伏せる。 (c) 実 GitHub への書き込みは無し。残りは `verify/brw-base-1795253198` のみ。
+- 8.5: 実 GitHub（使い捨てブランチ `verify/brw-base-*` 1 本のみ）で検証済み、コード修正なし。`brw setup --ruleset on`（設定用認証）で Ruleset `brw-pr-squash` を対象 ref 1 本だけに適用（PR 必須・`allowed_merge_methods=["squash"]`・bypass 空・active、main は対象外を GET で確認）。直接 push は GH013 で拒否（管理者の資格情報でも bypass が空なら拒否）。`brw publish` で PR を作成し、PR 経由の rebase マージ・merge commit は 405 で拒否、squash は成功。`brw check --ruleset` は分岐元 ok・作業経路 drift（管理権限あり）で、Ruleset の実効と一致。publish の出力は PR の URL・取り込み先・「GitHub 上で squash マージ」の案内のみで本文・資格情報は出ない。後始末済み（Ruleset 0・open PR 0・`verify/` ブランチ 0、使い捨てブランチも削除済み）。未実測（正直な限界）: (a) 非管理の資格情報が無く、通常作業の認証での拒否・squash 成功・作業経路 ok は未確認。 (b) rebase・merge commit の 405 はリポジトリ設定（allow_*_merge=false）と重なり、Ruleset の `allowed_merge_methods` 単独の効果は分離できていない。 (c) 必須チェック・レビューを要求する構成は未検証。 (d) 管理者のみの環境では `brw setup` が適用成功でも作業経路 drift で終了コード 1・「導入を完了できませんでした」と表示する（文言の見直し候補）。
