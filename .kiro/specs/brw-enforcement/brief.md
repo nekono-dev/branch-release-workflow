@@ -19,13 +19,13 @@ BRW を導入したリポジトリで、Claude Code と Codex のどちらを使
 | 作業完了時 | その作業の変更を push する。保護対象の分岐元への取り込みでは PR を追加確認なしで作成する。同じリポジトリで head と base が一致するオープンな PR があれば再利用し、URL を報告する。 |
 | 開発ブランチから別の開発ブランチへのマージ | 依存する変更の取り込みなど、作業に必要な場合は追加確認なしで実行できる。取り込み元と取り込み先が、どちらも宣言上の開発ブランチであることを検証し、PR を作らずにローカルで取り込む。 |
 | 開発ブランチから分岐元・保護ブランチ・その他のブランチへのマージ | 保護対象の分岐元ではエージェントは PR の作成または再利用まで進め、利用者が GitHub 上で squash マージする。その他の宣言外のブランチへの変更は拒否する。 |
-| GitHub 上の分岐元の更新 | 有効なブランチ Ruleset で PR を必須とし、マージ方式を squash に限定する。通常の作業権限では直接 push や非 squash のマージを拒否する。適用後の更新から強制する。 |
+| GitHub 上の分岐元の更新（既定 off の任意の追加事項） | 管理者が導入時に求めたときだけ、有効なブランチ Ruleset で PR を必須とし、マージ方式を squash に限定する。通常の作業権限では直接 push や非 squash のマージを拒否する。適用後の更新から強制する。 |
 
 「分岐元」は、`baseBranch` などリポジトリで恒常的な分岐元として宣言したブランチを指す。依存関係のため一時的に `--base` に指定した開発ブランチには、分岐元用 Ruleset を適用しない。恒常的な分岐元・保護対象と開発ブランチの指定が重なる場合は、保護を優先し、導入時に重複を案内する。
 
 ## 採用方針（Approach）
 
-両エージェントのフックから BRW の共通判定を呼び、分岐元への反映は GitHub のブランチ Ruleset でも強制する。利用者が選択した「エージェントフック＋GitHub Ruleset」案。フックで開発中の操作や完了処理を制御し、GitHub がどのクライアントからの更新にも分岐元のルールを適用する。
+両エージェントのフックから BRW の共通判定を呼び、分岐元への反映は GitHub のブランチ Ruleset でも強制する。当初は「エージェントフック＋GitHub Ruleset」案を採ったが、2026-11-21 に利用者が方針を改め、GitHub 側の強制は既定 off の導入の追加事項とした（本分はエージェントに作業ブランチを機械的に切らせること。Ruleset は管理者が求めたときだけ、エージェントが `brw setup --ruleset on` で設定する。求めがなければ GitHub への書き込み・認証要求は行わない）。フックで開発中の操作や完了処理を制御し、GitHub がどのクライアントからの更新にも分岐元のルールを適用する。
 
 - Claude Code の既存フックを拡張し、Codex は `PreToolUse` で拒否する。通常の操作で Codex が許可を要求する場合は、対応する実行環境の `PermissionRequest` で対象を確認して許可する。承認応答は各エージェントの仕様に合わせる。 [Claude Code Hooks](https://code.claude.com/docs/en/hooks#pretooluse) · [Codex Hooks](https://learn.chatgpt.com/docs/hooks#permissionrequest)
 - 作業完了時は、BRW が実行する push と PR 作成を再試行可能にし、終了時フックで実行漏れを検出する。確認・調査の返答、検証に失敗して途中で止まった作業、途中の push でもエージェントは応答を終了できるため、作業完了は BRW が確認できる状態で表す。完了状態を記録する条件は設計で詰める。 [Claude Code の Stop](https://code.claude.com/docs/en/hooks#stop) · [Codex の Stop](https://learn.chatgpt.com/docs/hooks#stop)
@@ -40,7 +40,7 @@ BRW を導入したリポジトリで、Claude Code と Codex のどちらを使
 
 - **BRW の判定・操作**　宣言と実際のリポジトリ・ref を照合する。確認省略はリポジトリと操作対象を特定できる場合に限る。強制 push、削除、送り先が不明な操作、自動マージの予約には別途判定を行う。開発ブランチ間は BRW がローカルで取り込み、保護対象へのマージは利用者が GitHub 上で行う。
 - **エージェントのフック**　ライフサイクルに応じて判定を呼び出し、対応する経路で拒否・許可・終了時の継続を返す。シェル、GitHub API、MCP の書き込み経路を確認し、エージェントからの GitHub マージ・自動マージ予約は対応する経路で拒否する。未対応の経路やフックの未導入は導入時の検査で報告する。 [Codex のフック対象](https://learn.chatgpt.com/docs/hooks#tool-coverage) · [GitHub の PR マージ API](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
-- **GitHub の強制**　対象 ref に PR 必須・squash 限定の有効な Ruleset を適用する。リポジトリのレビュー・必須チェック・マージ権限と併用する。利用者の GitHub 上でのマージは GitHub の権限と取り込み条件に従う。
+- **GitHub の強制（既定 off の任意の追加事項）**　管理者が求めたときだけ、対象 ref に PR 必須・squash 限定の有効な Ruleset を適用する。リポジトリのレビュー・必須チェック・マージ権限と併用する。利用者の GitHub 上でのマージは GitHub の権限と取り込み条件に従う。
 
 ## 対象外の責務（Out of Boundary）
 

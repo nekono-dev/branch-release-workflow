@@ -121,8 +121,11 @@ const describeTarget = (t) => `${t.host}/${t.owner}/${t.repository}`;
 // ---- 導入の選択 ----
 
 /**
- * 導入の採否を決める。戻り値: { enabled, keepId } か、保留の { pending: 理由 }。
- * 指定（--ruleset）→ 保存済みの選択（同じ対象）→ 対話の既定（導入する）の順。非対話で採否が無ければ保留する。
+ * 導入の採否を決める。戻り値: { enabled, keepId, record? } か、保留の { pending: 理由 }。
+ * 指定（--ruleset）→ 保存済みの選択（同じ対象）→ 既定（導入しない）の順。Ruleset は既定 off の任意の追加事項。
+ * - 非対話で選択が未設定なら「見送り」（record: false＝記録も書き込みもしない。後から --ruleset on で導入できる）。
+ * - 対話の既定は N（Enter で見送り）。y と答えたときだけ導入する。
+ * - 対象変更・ID 食い違い・記録破損など、過去の選択が読み取れない場合は推測せず保留する（適用はしない）。
  */
 async function decideChoice(d, root, target, refs, explicit) {
   const saved = resolveChoice(root, { ...target, refs });
@@ -130,13 +133,16 @@ async function decideChoice(d, root, target, refs, explicit) {
   if (explicit !== undefined) return { enabled: explicit === "on", keepId: saved.status === "selected" ? saved.repositoryId : null };
   if (saved.status === "selected") return { enabled: true, keepId: saved.repositoryId };
   if (saved.status === "skipped") return { enabled: false, keepId: null };
-  if (!d.stdinIsTTY) return { pending: saved.reason ?? "導入の選択が未設定です。" };
+  if (!d.stdinIsTTY) {
+    if (saved.unset) return { enabled: false, keepId: null, record: false };
+    return { pending: saved.reason ?? "導入の選択が読み取れません。" };
+  }
   d.io.out(`Ruleset の導入（対象: ${describeTarget(target)}）`);
   d.io.out(`  対象の分岐元: ${refs.join(", ")}（宣言の baseBranch と baseBranches）`);
   d.io.out("  効果: 上の分岐元への変更は PR 経由に限られ、マージは squash のみになります。通常の作業権限による直接 push は GitHub 側で拒否されます。既存のレビュー・必須チェックは変更しません。");
   d.io.out(`  導入には管理権限のある認証が必要です（${ADMIN_TOKEN_ENV}、未設定なら gh の保存済みログイン）。`);
-  const answer = String(await d.ask("導入する [Y/n]: ")).trim();
-  return { enabled: answer === "" || /^(y|yes|はい)$/i.test(answer), keepId: null };
+  const answer = String(await d.ask("導入しますか [y/N]: ")).trim();
+  return { enabled: /^(y|yes|はい)$/i.test(answer), keepId: null };
 }
 
 /** 作業経路の確認に使う接続。BRW_WORK_GH_TOKEN が無ければ作業経路は指定しない（確認不能になる）。 */
@@ -206,8 +212,13 @@ async function installRuleset(d, root, t, explicit, state = {}) {
   const dec = await decideChoice(d, root, target, t.refs, explicit);
   if (dec.pending !== undefined) {
     d.io.err(`Ruleset: 導入の採否が決まらないため適用を保留します（フックの導入は続けます）。理由: ${dec.pending}`);
-    d.io.err("採否を指定して再実行してください: brw setup --ruleset on（導入する）または --ruleset off（見送る）");
+    d.io.err("過去の選択を確認してから再実行してください: brw setup --ruleset on（導入する）または --ruleset off（見送る）。指定がなければ適用しません。");
     return 3;
+  }
+  if (!dec.enabled && dec.record === false) {
+    // 既定の見送り（利用者の要求なし）。選択は記録せず、GitHub への認証・通信・書き込みも行わない
+    d.io.out("Ruleset: 既定どおり導入しません（GitHub の認証・設定変更なし）。必要なら管理者が brw setup --ruleset on で後から導入できます。");
+    return 0;
   }
   if (!dec.enabled) {
     const rec = recordChoice(root, { ...base, enabled: false });
@@ -435,6 +446,11 @@ async function checkRuleset(d, root) {
   }
   if (saved.status === "skipped") {
     d.io.out("  見送り（Ruleset は適用しない。GitHub の認証は不要）");
+    return 0;
+  }
+  if (saved.unset) {
+    // 既定は導入しない。未選択は問題としない
+    d.io.out("  未選択（既定は適用しない。GitHub の認証は不要）。導入したい場合は管理者が brw setup --ruleset on を実行する。");
     return 0;
   }
   if (saved.status !== "selected") {

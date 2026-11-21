@@ -225,7 +225,7 @@ export function markVerified(cwd, input, { lockWaitMs } = {}) {
  * 対象の選択を読む。
  * - { status: "selected" }: 導入を選んだ同じ対象。appliedRulesetIds に同じ分岐元の適用済み ID を返す。
  * - { status: "skipped" }: 見送りを選んだ同じ対象。GitHub の認証は不要。
- * - { status: "pending", reason, knownRulesetIds }: 選択が無い・対象が変わった・ID が食い違う・記録が壊れている。
+ * - { status: "pending", reason, knownRulesetIds }: 選択が無い（unset: true。既定は導入しない）・対象が変わった・ID が食い違う・記録が壊れている。
  *   knownRulesetIds は同じリポジトリで過去に記録した適用済み ID（変更後の対象へ報告するため）。
  */
 export function resolveChoice(cwd, input) {
@@ -242,7 +242,8 @@ export function resolveChoice(cwd, input) {
     const idOf = entry ? (entry.choice.repositoryId ?? target.repositoryId) : null;
     const sameRepoApplied = (a) => idOf !== null && a.repositoryId === idOf;
     const known = entry ? [...new Set(entry.applied.filter(sameRepoApplied).map((a) => a.rulesetId))].sort((a, b) => a - b) : [];
-    if (!entry) return { ok: true, status: "pending", reason: "導入の選択が未設定です。", knownRulesetIds: known };
+    // unset: 記録がまったく無い（既定の「導入しない」として扱える）。対象変更・ID 食い違い・破損は unset にしない
+    if (!entry) return { ok: true, status: "pending", unset: true, reason: "導入の選択が未設定です。", knownRulesetIds: known };
     if (!sameList(entry.choice.refs, target.refs)) {
       return { ok: true, status: "pending", reason: "対象の分岐元が保存済みの選択と異なります。選択を取り直してください。", knownRulesetIds: known };
     }
