@@ -5,6 +5,13 @@
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
+//   work start                 変更作業を始め、作業 ID を 1 つ出力する（調査だけの依頼では使わない）
+//   work resume --work <id>    中断した作業を明示して再開する（作業 ID を 1 つ出力する）
+//   work restrict --work <id> --no-push|--no-pr   作業で push・PR 作成を禁止する（追加のみ。外せない）
+//   work ready --work <id> --completion <申告> --verification <要約> [--failed] [--target <取り込み先>]   完了を申告して公開の準備を確定する
+//   work plan --work <id>      公開の計画を作り、計画 ID を出力する（読み取りと記録だけ。遠隔は書き換えない）
+//   publish --work <id> --plan <計画 ID> [--title <t> --body-file <path>]   計画どおりに push し、保護対象は PR を作成・再利用する（--confirmed は利用者が自分の端末で実行するときだけ有効）
+//   pause --work <id> --reason <理由>   作業の次の公開を保留する（再開は work resume）
 //   url [ブランチ]             プレビューURLを表示
 //   check                      宣言・workflow・provider 設定の整合検査
 //   gen-workflow [preview|deploy] [--write]  preview（provider）または deploy（配備先）の workflow 雛形を出力（--write で .github/workflows/<種類>.yaml へ）
@@ -22,6 +29,7 @@ import {
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
+import { runPause, runPublish, runWork } from "./publish-cli.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
 
@@ -681,7 +689,13 @@ function guard(args) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  const cmds = { guard, hook, create, finish, resume, merge, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler };
+  const cmds = {
+    guard, hook, create, finish, resume, merge, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler,
+    // 完了公開（7.2）。終了コードは各関数が返す
+    work: async (a) => { process.exitCode = await runWork(a); },
+    publish: async (a) => { process.exitCode = await runPublish(a); },
+    pause: async (a) => { process.exitCode = await runPause(a); },
+  };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);
 }

@@ -378,7 +378,8 @@ function recordWorkStart(input) {
     const w = state.works[cur];
     if (!w || w.pausedReason || w.status === "published") return;
     if (call.kind === "start" && w.status !== "inProgress") return;
-    attachSession(call.dir, cur, session);
+    // 開始の関連付けは、別のセッションが関連付け済みの作業を上書きしない（再開は明示の再開として置き換える）
+    attachSession(call.dir, cur, session, { onlyIfUnset: call.kind === "start" });
   } catch {
     // 関連付けに失敗しても、ホストの処理は止めない（記録されないだけ）
   }

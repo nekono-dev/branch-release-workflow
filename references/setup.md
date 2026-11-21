@@ -86,8 +86,10 @@ claude --plugin-dir <このリポジトリの clone>
 
 ```sh
 git clone https://github.com/nekono-dev/branch-release-workflow.git ~/.local/share/branch-release-workflow
-node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs
+node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs --repo /path/to/repo
 ```
+
+`--repo` で導入先リポジトリの `.codex/hooks.json` に BRW のフックを登録する（既存の定義は保持し、同じ登録の再実行は変更なしで終わる）。登録後、Codex で `/hooks` から信頼を承認する。登録元や衝突を解決できなければ対象の箇所を表示して止まる。
 
 更新は `git -C ~/.local/share/branch-release-workflow pull --ff-only`。検証済みの版に固定する運用では、そのコミットを fetch / checkout する。リンク先は同じ clone なので、コピーし直す必要はない。プロジェクト単位なら `--skills-dir /path/to/project/.agents/skills` を指定し、生成されたリンクを .gitignore に入れる。別の導入先が既にある場合は上書きしない。
 

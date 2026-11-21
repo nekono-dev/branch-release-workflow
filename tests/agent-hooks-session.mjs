@@ -137,7 +137,8 @@ export const runAgentHookSessionChecks = async (eq) => {
       publish.pauseWork(r.dir, id1, "再度中断");
       const id2 = publish.startWork(r.dir, {}).work.workId;
       postOf("claude", r.dir, RESUME(id1), ok(`作業を再開しました: ${id1}`), "claude-s3");
-      eq("enforcement/2.2 --work と現在の作業が食い違う再開は関連付けない", [workOf(r.dir, id1).sessionId, workOf(r.dir, id2).sessionId], [OTHER, undefined]);
+      // 中断（7.2）で関連付けは解除済み。食い違う再開で claude-s3 が付かないことを確かめる
+      eq("enforcement/2.2 --work と現在の作業が食い違う再開は関連付けない", [workOf(r.dir, id1).sessionId, workOf(r.dir, id2).sessionId], [undefined, undefined]);
       postOf("claude", r.dir, RESUME(id2), ok(`作業を再開しました: ${id1}`), "claude-s4");
       eq("enforcement/2.2 出力の ID が --work と食い違う再開は関連付けない", workOf(r.dir, id2).sessionId, undefined);
     } finally {

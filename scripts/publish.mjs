@@ -174,7 +174,8 @@ export function update(cwd, fn, { lockWaitMs = 3000, allowCorrupt = false } = {}
 }
 
 export const now = () => new Date().toISOString();
-const pauseRecord = (w, reason) => { w.pausedReason = redact(reason); w.updatedAt = now(); };
+// 中断は次の副作用を保留するため、セッションの関連付けも外す（終了時の案内の対象から外れる。再開時にホストが付け直す）
+const pauseRecord = (w, reason) => { w.pausedReason = redact(reason); delete w.sessionId; w.updatedAt = now(); };
 export const idError = (id) => (typeof id === "string" && WORK_ID.test(id) ? null : fail("invalidInput", "作業 ID の形式が正しくありません。"));
 const sessionError = (s) => (s === undefined || (typeof s === "string" && SESSION_ID.test(s)) ? null : fail("invalidInput", "セッション ID の形式が正しくありません。"));
 
@@ -252,8 +253,9 @@ export function resumeWork(cwd, workId, { sessionId, lockWaitMs } = {}) {
 /**
  * 作業をホストのセッションに関連付ける（PostToolUse から呼ぶ）。現在の作業で、公開済みでない場合だけ書き込む。
  * 作業が現在の作業でなければ（別の作業・中断中・記録なし）関連付けず conflict を返す。
+ * onlyIfUnset が真なら、別のセッションが関連付け済みの作業を上書きしない（work start の関連付けに使う）。
  */
-export function attachSession(cwd, workId, sessionId, { lockWaitMs } = {}) {
+export function attachSession(cwd, workId, sessionId, { lockWaitMs, onlyIfUnset = false } = {}) {
   const bad = idError(workId) ?? (typeof sessionId === "string" && SESSION_ID.test(sessionId) ? null : fail("invalidInput", "セッション ID の形式が正しくありません。"));
   if (bad) return bad;
   return update(cwd, (state) => {
@@ -261,6 +263,7 @@ export function attachSession(cwd, workId, sessionId, { lockWaitMs } = {}) {
     if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
     if (state.current !== workId) return fail("conflict", `作業 ${workId} は現在の作業ではないため、セッションに関連付けません。`);
     if (w.status === "published") return fail("conflict", "公開済みの作業は関連付けません。");
+    if (onlyIfUnset && w.sessionId !== undefined && w.sessionId !== sessionId) return fail("conflict", "作業は別のセッションに関連付け済みのため、関連付けを変えません。");
     w.sessionId = sessionId;
     w.updatedAt = now();
     return { ok: true, work: w };
@@ -314,7 +317,10 @@ export function setStatus(cwd, workId, status, { lockWaitMs } = {}) {
     if (!TRANSITIONS[w.status].includes(status)) return fail("conflict", `作業の状態を ${w.status} から ${status} へは変更できません。`);
     w.status = status;
     w.updatedAt = now();
-    if (status === "published" && state.current === workId) state.current = null;
+    if (status === "published") {
+      delete w.sessionId;
+      if (state.current === workId) state.current = null;
+    }
     return { ok: true, work: w };
   }, { lockWaitMs });
 }

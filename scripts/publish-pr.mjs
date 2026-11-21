@@ -85,9 +85,10 @@ function setPrResult(w, outcome, code, url) {
   w.results.pr = r;
 }
 
-/** 作業を公開済みにする。公開済みになった作業は現在の作業から外す。 */
+/** 作業を公開済みにする。公開済みになった作業は現在の作業から外し、セッションの関連付けも外す。 */
 function completeWork(state, w, workId) {
   w.status = "published";
+  delete w.sessionId;
   w.updatedAt = now();
   if (state.current === workId) state.current = null;
 }
@@ -124,11 +125,11 @@ async function listHeads(session, target, branch) {
 }
 
 /**
- * GitHub の読み取りで既存 PR の状態を決める。
+ * GitHub の読み取りで既存 PR の状態を決める（読み取りのみ。CLI の準備・計画でも同じ判定を使う）。
  * 結果: none（無い）・reuse（同じ head・base・OID・URL で、draft ではない）・blocked（成功扱いにできない理由の code）。
  * 同じ head で別の取り込み先の PR があれば base-conflict、draft は再利用しない（pr-draft）。
  */
-async function existingPr(session, target, { branch, base, head }) {
+export async function existingPr(session, target, { branch, base, head }) {
   const listed = await listHeads(session, target, branch);
   if (!listed.ok) return { state: "blocked", code: codeOfFailure(listed.failure) };
   const { heads } = listed;
