@@ -1,7 +1,9 @@
-// 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）: 作業 ID の発行、同一 worktree の別作業の区別、
-// 中断と明示再開、操作別の結果と作業の禁止の保存、完了申告と取り込み先の確定（markReady）を扱う。
-// 公開計画（4.3）、push の実行（4.4）、PR の作成（4.5）、フック接続（6.x）には踏み込まない。
-// GitHub へは通信しない。既存 PR の検索結果と対象リポジトリ ID は、呼び出し側が GitHub クライアントで確認済みの値を受け取る。
+// 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）・公開計画の発行と検証（4.3）:
+// 作業 ID の発行、同一 worktree の別作業の区別、中断と明示再開、操作別の結果と作業の禁止の保存、
+// 完了申告と取り込み先の確定（markReady）、許可された書き込みだけの計画（issuePlan・checkPlan）を扱う。
+// push の実行（4.4）、PR の作成（4.5）、フック接続（6.x）には踏み込まない。
+// GitHub へは通信しない（計画の発行も読み取りと状態の記録だけ）。既存 PR の検索結果と対象リポジトリ ID は、
+// 呼び出し側が GitHub クライアントで確認済みの値を受け取る。
 // 外部依存なし（Node 標準ライブラリのみ）。
 //
 // 状態は worktree ごとに 1 つのファイルへ保存する（Git の共通ディレクトリ配下 brw/work/<worktree の識別子>.json）。
@@ -11,7 +13,9 @@
 import { randomBytes, createHash } from "node:crypto";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { classifyBranch, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
+import { classifyBranch, configMatchesHead, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
+import { classifyCommand } from "./operation-policy.mjs";
+import { evaluateAll } from "./operation-decision.mjs";
 
 /** 作業の状態。準備済み以降の遷移は 4.2〜4.5 が使う。 */
 export const WORK_STATUSES = ["inProgress", "ready", "pushed", "published"];
@@ -311,6 +315,9 @@ export function githubRepoOf(url) {
   return m ? { owner: m[1], name: m[2] } : null;
 }
 
+/** 作業ブランチの push 先リモート名（pushRemote → remote.pushDefault → 追跡先 → origin の順）。 */
+const remoteNameOf = (cwd, branch) => git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
+
 /** 完了申告・検証・対象リポジトリの入力を検査する。Git の状態は見ない（作業の状態とともに後で確認する）。 */
 function readyInputError(input) {
   if (typeof input?.completion !== "string" || !redact(input.completion)) return failC("invalidInput", "completion-missing", "完了申告（依頼の完了条件を満たした旨）を文字列で指定してください。");
@@ -361,7 +368,7 @@ export function markReady(cwd, workId, input = {}, { lockWaitMs } = {}) {
     if (!head || git(cwd, "rev-parse", "--verify", `refs/heads/${branch}`) !== head) return failC("conflict", "head-unknown", "HEAD のコミットを作業ブランチと照合できません。");
 
     // push 先: push 用のリモート（無ければ既定のリモート）の URL が、指定の GitHub リポジトリを指していることを確認する
-    const remote = git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
+    const remote = remoteNameOf(cwd, branch);
     const repo = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
     if (!repo) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
     const want = input.repository;
@@ -404,6 +411,172 @@ export function markReady(cwd, workId, input = {}, { lockWaitMs } = {}) {
     w.updatedAt = at;
     return { ok: true, work: w, ready: w.ready };
   }, { lockWaitMs });
+}
+
+// ---- 公開計画（4.3） ----
+
+// 名前を安全に扱えるかの検査。シェルに渡す前の確認で、先頭に "-"（オプションとして解釈される）は認めない
+const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+/** 版の比べ方。計画を保存するときと検証するときに同じ入力から同じ値になる。 */
+const digestOf = (v) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+
+/**
+ * 計画の前提となる版（宣言・禁止・準備の記録・push 先）を現在の状態から求める。
+ * 値は要約（ハッシュ）だけで、URL・資格情報・PR 本文は計画にも状態にも残さない。
+ */
+function versionsOf(cwd, root, w) {
+  const { config, error } = loadConfig(root);
+  return {
+    declaration: error || !config ? null : digestOf({ config, registered: configMatchesHead(root) }),
+    restrictions: digestOf(restrictionsOf(w)),
+    ready: digestOf(w.ready ?? null),
+    destination: digestOf(git(cwd, "remote", "get-url", "--push", remoteNameOf(cwd, w.branch)) ?? null),
+  };
+}
+
+/**
+ * 計画の前提（作業の状態・worktree・ブランチ・HEAD・作業ツリー）を照合する。読み取りのみ。
+ * 問題があれば失敗の結果、なければ確認した値（ok・branch・head・root）を返す。
+ */
+function workGitState(cwd, state, w) {
+  if (w.worktreeId !== state.worktreeId) return failC("conflict", "work-worktree-mismatch", "作業の記録と worktree が一致しません。");
+  if (w.status !== "ready" && w.status !== "pushed") return failC("conflict", "work-status", `作業の状態が ${w.status} のため、計画は扱えません。`);
+  if (w.pausedReason) return failC("conflict", "work-paused", "中断中の作業は計画できません。`brw work resume` で再開してください。");
+  if (!w.ready) return failC("conflict", "work-not-ready", "準備済みの記録がありません。先に公開の準備を確定してください。");
+  const branch = currentBranch(cwd);
+  if (branch !== w.branch) return failC("conflict", "work-branch-mismatch", `作業のブランチ ${w.branch} と現在のブランチ（${branch ?? "なし"}）が一致しません。`);
+  const head = git(cwd, "rev-parse", "--verify", "HEAD");
+  if (!head || head !== w.ready.headOid) return failC("conflict", "head-changed", "準備時の commit と現在の HEAD が一致しません。公開の準備をし直してください。");
+  const dirty = git(cwd, "status", "--porcelain");
+  if (dirty === null) return failC("conflict", "git-state-unknown", "作業ツリーの状態を確認できません。");
+  if (dirty !== "") return failC("conflict", "uncommitted", "未コミットの変更があるため、計画は扱えません。");
+  const root = repoRoot(cwd);
+  if (!root) return failC("invalidInput", "declaration-invalid", "Git リポジトリの外です。");
+  return { ok: true, branch, head, root };
+}
+
+/**
+ * 公開計画を発行する。準備済み（または push 成功後の途中）の作業について、許可された書き込みだけを計画として保存する。
+ * 照合: 作業 ID・worktree・状態・ブランチ・HEAD（準備時の head OID）・未コミットの有無・対象リポジトリ ID・push 先の GitHub 対象・
+ *       登録済みの宣言・取り込み先の分類と公開方法。
+ * 既存 PR は呼び出し側が findOpenPull の結果として渡す（existing）。保護対象への公開で必須。
+ *   同じ head・base の PR があれば再利用として PR は計画しない。head・base が違えば成功扱いせず止める。
+ * push と PR は共通判定（evaluateAll）で個別に判定し、確認省略の対象だけを writes に入れる。
+ *   禁止・通常確認待ち・既に成功した push は writes に入れず、excluded で理由を返す（計画に残さない）。
+ *   PR は push が計画されている（または成功済み）場合にだけ計画する。push が禁止・未確認なら PR も計画しない。
+ * 通信も遠隔の書き換えもしない（ローカルの Git 照会と状態の記録だけ）。
+ * @param {{id: number, owner: string, name: string}} repository 呼び出し側が確定した対象リポジトリ
+ * @param {object} [existing] findOpenPull の結果（{ok, pull}）
+ * @returns {{ok: true, plan: object, excluded: object[], reuse: object|null} | {ok: false, error: object}}
+ */
+export function issuePlan(cwd, workId, { repository, existing, lockWaitMs } = {}) {
+  const bad = idError(workId);
+  if (bad) return bad;
+  if (!repository || typeof repository !== "object" || !Number.isSafeInteger(repository.id) || repository.id <= 0 || !NAME_PART.test(repository.owner ?? "") || !NAME_PART.test(repository.name ?? ""))
+    return failC("invalidInput", "repository-invalid", "対象リポジトリの ID（正の整数）・所有者・名前を指定してください。");
+  return update(cwd, (state) => {
+    const w = state.works[workId];
+    if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
+    const g = workGitState(cwd, state, w);
+    if (!g.ok) return g;
+    const loaded = loadConfig(g.root);
+    if (loaded.error || !loaded.config) return failC("conflict", "declaration-invalid", loaded.error ?? "宣言ファイルがありません。規則を確認できないため計画しません。");
+    const config = loaded.config;
+    const ready = w.ready;
+    if (ready.repositoryId !== repository.id) return failC("invalidInput", "destination-mismatch", "準備時の対象リポジトリ ID と一致しません。");
+
+    // push 先: GitHub の同じリポジトリを指していることを確認する（読み取りのみ）
+    const remote = remoteNameOf(cwd, g.branch);
+    const dest = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
+    if (!dest || !SAFE_REMOTE_NAME.test(remote)) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+    if (dest.owner.toLowerCase() !== repository.owner.toLowerCase() || dest.name.toLowerCase() !== repository.name.toLowerCase())
+      return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
+
+    // 分類: 準備時の取り込み先・公開方法が、現在の宣言と食い違っていないこと
+    const base = ready.integration.ref;
+    if (classifyBranch(config, g.branch) !== "development") return failC("conflict", "branch-not-development", `'${g.branch}' は開発ブランチではないため、計画できません。`);
+    const kind = classifyBranch(config, base);
+    const publication = kind === "development" ? "push" : "pr";
+    if (kind !== ready.integration.kind || publication !== ready.publication) return failC("conflict", "integration-changed", "準備時の取り込み先の分類が現在の宣言と一致しません。公開の準備をし直してください。");
+    if (!SAFE_BRANCH.test(g.branch) || !SAFE_BRANCH.test(base)) return failC("invalidInput", "name-unsafe", "ブランチ名を安全に確認できないため、計画しません。");
+
+    // 既存 PR: 保護対象への公開では必須。同じ head・base なら再利用（PR は計画しない）、食い違えば止める
+    let reuse = null;
+    if (publication === "pr") {
+      if (existing?.ok !== true) return failC("conflict", "pr-unconfirmed", "既存 PR の検索が確定できないため、PR の計画は立てません。");
+      if (existing.pull) {
+        if (typeof existing.pull.headOid !== "string" || existing.pull.headOid.toLowerCase() !== g.head.toLowerCase())
+          return failC("conflict", "pr-head-differs", "既存 PR の head が準備時の commit と一致しません。再確認してください。");
+        if (existing.pull.baseRef !== base) return failC("conflict", "base-conflict", `既存 PR の取り込み先（${existing.pull.baseRef}）が準備時の取り込み先（${base}）と一致しません。`);
+        reuse = { number: Number.isSafeInteger(existing.pull.number) ? existing.pull.number : null, url: safeUrl(existing.pull.url) };
+      }
+    }
+
+    // 判定: push と PR を個別に判定する。確認省略の対象だけを writes に入れる
+    const restrictions = restrictionsOf(w);
+    const writes = [];
+    const excluded = [];
+    let pushAvailable = false;
+    if (w.results?.push?.outcome === "success") {
+      // 既に成功した push は再度の書き込みに入れない（同じ OID の確認は 4.4 が行う）
+      excluded.push({ operation: "push", code: "already-pushed", approval: "notApplicable" });
+      pushAvailable = true;
+    } else {
+      const d = evaluateAll(classifyCommand(`git push ${remote} ${g.branch}`, cwd), restrictions);
+      if (d.verdict === "eligibleForApproval") {
+        writes.push({ operation: "push", remote, ref: ready.pushRef, oid: g.head });
+        pushAvailable = true;
+      } else excluded.push({ operation: "push", code: d.code, approval: d.approval });
+    }
+    if (publication === "pr" && reuse === null) {
+      if (!pushAvailable) excluded.push({ operation: "pr", code: "push-not-planned", approval: "notApplicable" });
+      else {
+        const d = evaluateAll(classifyCommand(`gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${g.branch} --title brw`, cwd), restrictions);
+        if (d.verdict === "eligibleForApproval") writes.push({ operation: "pr", base, head: g.branch, repositoryId: repository.id });
+        else excluded.push({ operation: "pr", code: d.code, approval: d.approval });
+      }
+    }
+
+    const at = now();
+    const plan = {
+      planId: `p-${randomBytes(8).toString("hex")}`,
+      issuedAt: at,
+      headOid: g.head,
+      repositoryId: repository.id,
+      versions: versionsOf(cwd, g.root, w),
+      writes,
+    };
+    w.plan = plan;
+    w.updatedAt = at;
+    return { ok: true, plan, excluded, reuse };
+  }, { lockWaitMs });
+}
+
+/**
+ * 発行済みの計画が今も有効かを確認する（読み取りのみ）。副作用の前に呼ぶ（実行は 4.4・4.5）。
+ * 作業の状態・HEAD・作業ツリー・宣言・禁止・準備の記録・push 先のいずれかが計画の発行時と変わっていれば失効とし、書き込みを止める。
+ * 別の計画 ID や、再発行された後の古い計画 ID も失効扱い（plan-not-found）になる。
+ */
+export function checkPlan(cwd, workId, planId) {
+  const bad = idError(workId);
+  if (bad) return bad;
+  const file = stateFileOf(cwd);
+  if (!file) return fail("invalidInput", "Git リポジトリの中で実行してください。");
+  const { state, error } = load(file);
+  if (error) return fail("conflict", error);
+  const w = state.works[workId];
+  if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
+  if (!w.plan || typeof planId !== "string" || w.plan.planId !== planId)
+    return failC("conflict", "plan-not-found", "この作業の有効な計画ではありません。公開の計画をし直してください。");
+  const g = workGitState(cwd, state, w);
+  if (!g.ok) return g;
+  const current = versionsOf(cwd, g.root, w);
+  const stored = w.plan.versions ?? {};
+  for (const k of ["declaration", "restrictions", "ready", "destination"]) {
+    if (current[k] !== stored[k]) return failC("conflict", `${k}-changed`, `計画の発行後に${({ declaration: "宣言", restrictions: "作業の禁止", ready: "公開の準備", destination: "push 先" })[k]}が変わったため、計画は失効しました。計画をし直してください。`);
+  }
+  return { ok: true, plan: w.plan };
 }
 
 /** 作業 1 件を読む。 */
