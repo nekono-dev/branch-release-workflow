@@ -447,5 +447,38 @@ const ck = deployCf.check(ckRepo, normalizeConfig(ckCfg));
 eq("deploy/AC-10 保護ブランチに無い配備先のブランチを警告", ck.some((f) => f.level === "warn" && f.message.includes("'staging'")), true);
 eq("deploy/AC-10 git に登録された生成先を警告", ck.some((f) => f.level === "warn" && f.message.includes("登録")), true);
 
+// ---- 宣言の互換読み込みとブランチ分類（brw-enforcement 1.1） ----
+import * as lib from "../scripts/lib.mjs";
+{
+  const base = { workBranches: ["dev/*", "release/*"], protectedBranches: ["main"], baseBranch: "develop" };
+  const cls = (c, b) => (lib.classifyBranch ? lib.classifyBranch(lib.normalizeConfig(c), b) : "未実装");
+  // 要件 1.1, 1.3: ルート宣言を優先し、旧パスだけでも既存の書式で読む
+  const both = mkRepo("dev/foo", base);
+  writeFileSync(join(both, ".branch-release-workflow.json"), JSON.stringify({ ...base, baseBranch: "root-base" }));
+  eq("enforcement/6.3 ルート宣言と旧宣言が両方あればルートを優先する", [lib.loadConfig(both).config.baseBranch, lib.loadConfig(both).legacy], ["root-base", false]);
+  const legacyOnly = mkRepo("dev/foo", base);
+  eq("enforcement/6.3 旧パスだけの宣言も既存の書式で読み込む", [lib.loadConfig(legacyOnly).config.baseBranch, lib.loadConfig(legacyOnly).legacy], ["develop", true]);
+  // 要件 2.1, 6.3: 恒常的な分岐元は baseBranch と固定名の baseBranches から解決する
+  eq("enforcement/1.3 恒常的な分岐元は baseBranch と baseBranches の重複なしの和", lib.normalizeConfig({ ...base, baseBranches: ["staging", "develop"] }).permanentBases, ["develop", "staging"]);
+  eq("enforcement/1.3 baseBranches にパターンや空文字は書けない", [validateConfig({ ...base, baseBranches: ["rel/*"] }).length, validateConfig({ ...base, baseBranches: [""] }).length, validateConfig({ ...base, baseBranches: "x" }).length, validateConfig({ ...base, baseBranches: ["staging"] }).length], [1, 1, 1, 0]);
+  // 要件 1.3, 2.1: 保護対象を開発指定より優先し、分岐元は開発から除く
+  const dup = { ...base, workBranches: ["dev/*", "main", "develop", "staging", "feature/x"], baseBranches: ["staging"] };
+  eq("enforcement/1.3 保護指定は開発指定より優先する", cls(dup, "main"), "protected");
+  eq("enforcement/1.3 恒常的な分岐元は開発指定と重複しても開発ではない", [cls(dup, "develop"), cls(dup, "staging")], ["base", "base"]);
+  eq("enforcement/1.3 開発ブランチ・宣言外の分類", [cls(dup, "feature/x"), cls(dup, "dev/a"), cls(dup, "other/z"), cls(dup, null)], ["development", "development", "undeclared", "undeclared"]);
+  eq("enforcement/1.3 命名規則に合わない開発指定は宣言外扱い", cls({ ...base, namePattern: "^dev/[a-z]+$" }, "dev/A1"), "undeclared");
+  eq("enforcement/1.3 一時的な brwBase は分岐元の集合に入らない", lib.normalizeConfig(base).permanentBases, ["develop"]);
+  // 要件 4.1, 6.4: 個別の分岐元は公開と片付けで共用する
+  const br = mkRepo("dev/foo", base);
+  eq("enforcement/6.4 個別の分岐元が無ければ宣言の baseBranch", lib.branchBase ? lib.branchBase(br, lib.normalizeConfig(base), "dev/foo") : "未実装", "develop");
+  g(br, "config", "branch.dev/foo.brwBase", "dev/parent");
+  eq("enforcement/6.4 記録済みの brwBase を優先する", lib.branchBase ? lib.branchBase(br, lib.normalizeConfig(base), "dev/foo") : "未実装", "dev/parent");
+  // 要件 2.1, 2.6: 登録済み宣言で項目ごとの既定値、明示 false は維持
+  const aa = (a, reg) => (lib.autoApproveOf ? lib.autoApproveOf(lib.normalizeConfig(a === undefined ? base : { ...base, autoApprove: a }), reg) : "未実装");
+  eq("enforcement/2.1 登録済み宣言で未指定の項目は既定で有効", [aa(undefined, true), aa({}, true), aa({ push: true }, true)], [{ push: true, pullRequest: true }, { push: true, pullRequest: true }, { push: true, pullRequest: true }]);
+  eq("enforcement/2.6 明示的な false は維持し、他の項目だけ既定を適用", [aa({ push: false }, true), aa({ pullRequest: false }, true)], [{ push: false, pullRequest: true }, { push: true, pullRequest: false }]);
+  eq("enforcement/2.1 未登録・編集中の宣言は既定を適用しない", aa({ push: true }, false), { push: false, pullRequest: false });
+}
+
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

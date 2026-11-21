@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_REL, configRel, checkName, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, configRel, branchBase, checkName, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
@@ -390,7 +390,7 @@ function create(args) {
 }
 
 // 作業ブランチの切り出し元。create が記録したもの、無ければ宣言の baseBranch
-const baseOf = (repo, config, branch) => git(repo, "config", `branch.${branch}.brwBase`) || config.baseBranch;
+const baseOf = branchBase;
 
 // 作業ブランチが片付けてよい状態か。切り出し元へ取り込まれた、または保護ブランチへの PR がある、のどれかを満たすと done。
 // 取り込みは commit の祖先関係のほか、squash merge を見込んで「ブランチで変えたファイルが切り出し元で同じ内容」でも判定する
