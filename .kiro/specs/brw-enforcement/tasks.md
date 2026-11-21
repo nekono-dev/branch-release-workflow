@@ -36,7 +36,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.6, 2.8, 3.1, 3.2, 3.3_
 
 - [ ] 3. GitHub の読み取りと限定した書き込みを実装する
-- [ ] 3.1 (P) 対象リポジトリと認証を固定する
+- [x] 3.1 (P) 対象リポジトリと認証を固定する
   - 対象ホスト・リポジトリ ID を照合し、設定用の認証を同一の導入処理で固定する。
   - 認証、権限、不明な入力、通信エラーを区別し、資格情報を表示せずに呼び出し先と結果を検証できる。
   - ホストや対象の食い違いで書き込みに進まないことを契約テストで確認する。
@@ -218,3 +218,4 @@
 - 2.1: 操作の分類は scripts/operation-policy.mjs の `classifyCommand(command, cwd)`（結果を返すだけで brw.mjs へは未接続。既存の tokenize/splitCommand とは別の字句解析を持つため、2.3 か 6.x で統合を検討する）。確定できない・判定不能な変更は安全側（unresolved/unparseable）に倒す。残る限界: 別スクリプトや node/python/make 経由で git を呼ぶ場合は検出できない（導入診断で明示する）。READ_ONLY 扱いの reset・update-ref・symbolic-ref などローカルの ref を動かすサブコマンドは照会扱いのまま（2.3 以降で要判断）。`-c` の危険設定と引数に展開・ワイルドカードを含む fetch は過検出になりうる。
 - 2.2: GitHub 書き込みの識別は scripts/github-operations.mjs と operation-policy.mjs の `classifyCommand`・`classifyMcpCall(toolName, toolInput, cwd)`。新しい操作の種類は pr-create（head・base を持つ）・github-merge（ローカルの merge とは別）・auto-merge・unsupported-write（area・action・refWrite を持つ）。2.3 はこの名前に合わせる。GraphQL は対象を常に確定不能として返す。`other-mcp`（GitHub か判断できない MCP）は操作が空で通過するため、6.4 の導入検査が scope を見て強制範囲外と報告する。curl・wget は URL に github を含み書き込みオプションがあるものだけ識別する（GHES で URL に github を含まない場合は検出できない。導入診断で明示する）。`gh -R` で別リポジトリを指す場合、cwd が未導入だと通過する（git の -C と同じ扱い）。`GH_HOST` だけ指定した場合のホスト照合は 2.3 で注意する。
 - 2.3: 共通判定は scripts/operation-decision.mjs の `evaluate(op, ctx)`・`contextFor(op, restrictions)`・`evaluateAll(classified, restrictions)`・`decisionSignature(d)`。結果は verdict（deny/pass/eligibleForApproval）・compliance（適合）・approval（確認省略）が別項目で、host は結果に影響しない。作業の禁止は `context.restrictions={noPush,noPr}` で受け取り、保存と読み出しは 4.1/4.3。保護・分岐元への切り替えは「適合・確認省略なし」、開発ブランチ上の `git merge main` は拒否。申し送り: (a) 6.1 は evaluateAll の確認省略が classify の認識した操作だけの結果である点を受け、認識外コマンドが混ざる複合コマンドでは確認省略を返さない。(b) 4.4 は push 先 URL が宣言のリポジトリと一致することを確かめる（`git push up dev/foo` は origin 以外のリモートでも開発ブランチなら確認省略になる）。(c) policy が照会扱いにする `update-ref`・`branch -D`・`reset --hard`・`symbolic-ref`・`tag` など、ローカルの参照を動かす操作は通過する。2.2 の分類の見直しか 6.1 で扱う。MCP の `update_pull_request`（base 変更）は範囲外・通常承認になる。
+- 3.1: GitHub クライアントは scripts/github-client.mjs の `createGitHubSession({host, token, transport})`（ホストと資格情報を固定）。`confirmTarget` が応答のリポジトリ ID と照合し、`request(target, method, path, body)` の書き込みは `POST /repos/{o}/{r}/pulls` と `POST /repos/{o}/{r}/rulesets` だけを許可リストで許す（3.2・3.3 が他の書き込みを足すときだけ広げる）。結果は auth/permission/unknown-input/server/network/refused/target-mismatch。偽 GitHub は transport 関数で注入し、meta.host を記録する。申し送り: (a) 書き込みの 5xx に `outcomeUnknown:true` が付かない。3.2 の冒頭で直す。(b) 429・408・3xx が unknown-input になる（429 は server か専用区分が望ましい）。(c) `badPath` は `%2e%2e`・`%2f`・`{}` を拒否しない（読み取りのみで実害は小さいが拒否が堅い）。(d) 403 のレート制限は permission と区別しない。(e) 3.1 はテストより先に実装を書いたが、テストは振る舞いを個別に検証していて実装を壊すと失敗する。

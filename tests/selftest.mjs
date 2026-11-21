@@ -15,6 +15,7 @@ import { runSupportChecks } from "./support/selftest-support.mjs";
 import { runEnforcementChecks } from "./enforcement.mjs";
 import { runDecisionChecks } from "./decision.mjs";
 import { runGithubWriteChecks } from "./github-write.mjs";
+import { runGithubClientChecks } from "./github-client.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -493,6 +494,9 @@ await runGithubWriteChecks(eq);
 
 // ---- 操作可否の共通判定（brw-enforcement 2.3） ----
 await runDecisionChecks(eq);
+
+// ---- GitHub クライアントの土台（brw-enforcement 3.1） ----
+await runGithubClientChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

@@ -15,10 +15,11 @@ export const createFakeGitHub = ({ scenario = "success", routes = {} } = {}) => 
     applied,
     /** 書き込み（GET・HEAD 以外）の要求回数。拒否された要求も数える。 */
     get writeCount() { return requests.filter((q) => !["GET", "HEAD"].includes(q.method)).length; },
-    async request(method, path, body) {
+    async request(method, path, body, meta = {}) {
       const m = method.toUpperCase();
       // 資格情報の値は受け取らず、記録にも含めない
-      requests.push({ method: m, path, body });
+      // 呼び出し先のホストは記録する（資格情報は受け取らない）
+      requests.push({ method: m, path, body, ...(meta.host ? { host: meta.host } : {}) });
       const write = !["GET", "HEAD"].includes(m);
       if (scenario === "auth") return { status: 401, body: { message: "Bad credentials" } };
       if (write && scenario === "permission") return { status: 403, body: { message: "Resource not accessible" } };
