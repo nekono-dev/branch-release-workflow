@@ -18,6 +18,7 @@ import { runGithubWriteChecks } from "./github-write.mjs";
 import { runGithubClientChecks } from "./github-client.mjs";
 import { runGithubRulesetChecks } from "./github-ruleset.mjs";
 import { runWorkStateChecks } from "./work-state.mjs";
+import { runReadyChecks } from "./ready.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -503,6 +504,9 @@ await runGithubRulesetChecks(eq);
 
 // ---- 作業 ID と中断・再開の記録（brw-enforcement 4.1） ----
 await runWorkStateChecks(eq);
+
+// ---- 完了申告と公開準備の確定（brw-enforcement 4.2） ----
+await runReadyChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

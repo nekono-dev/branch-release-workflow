@@ -1,6 +1,7 @@
-// 完了公開の作業状態（brw-enforcement 4.1）: 作業 ID の発行、同一 worktree の別作業の区別、中断と明示再開、
-// 操作別の結果と作業の禁止の保存を扱う。
-// 完了申告・公開準備（4.2）、公開計画（4.3）、push の実行（4.4）、PR の作成（4.5）、フック接続（6.x）には踏み込まない。
+// 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）: 作業 ID の発行、同一 worktree の別作業の区別、
+// 中断と明示再開、操作別の結果と作業の禁止の保存、完了申告と取り込み先の確定（markReady）を扱う。
+// 公開計画（4.3）、push の実行（4.4）、PR の作成（4.5）、フック接続（6.x）には踏み込まない。
+// GitHub へは通信しない。既存 PR の検索結果と対象リポジトリ ID は、呼び出し側が GitHub クライアントで確認済みの値を受け取る。
 // 外部依存なし（Node 標準ライブラリのみ）。
 //
 // 状態は worktree ごとに 1 つのファイルへ保存する（Git の共通ディレクトリ配下 brw/work/<worktree の識別子>.json）。
@@ -10,7 +11,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { currentBranch, git, repoRoot } from "./lib.mjs";
+import { classifyBranch, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
 
 /** 作業の状態。準備済み以降の遷移は 4.2〜4.5 が使う。 */
 export const WORK_STATUSES = ["inProgress", "ready", "pushed", "published"];
@@ -292,6 +293,116 @@ export function setStatus(cwd, workId, status, { lockWaitMs } = {}) {
     w.updatedAt = now();
     if (status === "published" && state.current === workId) state.current = null;
     return { ok: true, work: w };
+  }, { lockWaitMs });
+}
+
+// ---- 完了申告と公開準備（4.2） ----
+
+/** 判別用の code を持つ失敗の結果。kind は invalidInput（入力・宛先の不備）か conflict（状態・Git の状態との食い違い）。 */
+const failC = (kind, code, message) => ({ ok: false, error: { kind, code, message } });
+
+// GitHub のリポジトリを指す push 先の URL（https・ssh・scp 形式）。認証情報付きの URL は読まない（宛先不明）
+const GITHUB_REPO = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
+const NAME_PART = /^[A-Za-z0-9_.-]{1,100}$/;
+
+/** リモートの URL から GitHub の所有者・リポジトリ名を読む。読めなければ null（宛先不明として扱う）。 */
+export function githubRepoOf(url) {
+  const m = typeof url === "string" ? url.trim().match(GITHUB_REPO) : null;
+  return m ? { owner: m[1], name: m[2] } : null;
+}
+
+/** 完了申告・検証・対象リポジトリの入力を検査する。Git の状態は見ない（作業の状態とともに後で確認する）。 */
+function readyInputError(input) {
+  if (typeof input?.completion !== "string" || !redact(input.completion)) return failC("invalidInput", "completion-missing", "完了申告（依頼の完了条件を満たした旨）を文字列で指定してください。");
+  const v = input.verification;
+  if (!v || typeof v !== "object" || typeof v.passed !== "boolean" || typeof v.summary !== "string" || !redact(v.summary)) return failC("invalidInput", "verification-missing", "検証の結果（passed と要約）を指定してください。");
+  if (v.passed !== true) return failC("conflict", "verification-failed", "検証が成功していないため、公開の準備はしません。");
+  const r = input.repository;
+  if (!r || typeof r !== "object" || !Number.isSafeInteger(r.id) || r.id <= 0 || !NAME_PART.test(r.owner ?? "") || !NAME_PART.test(r.name ?? ""))
+    return failC("invalidInput", "repository-invalid", "対象リポジトリの ID（正の整数）・所有者・名前を指定してください。");
+  if (input.target !== undefined && typeof input.target !== "string") return failC("invalidInput", "integration-invalid", "取り込み先は文字列のブランチ名で指定してください。");
+  return null;
+}
+
+/**
+ * 完了申告と取り込み先から、公開の準備を確定する（状態を ready にし、準備の記録を書く）。
+ * 確定するもの: 作業 ID・worktree・開発ブランチ・head OID（HEAD が作業ブランチの先端と一致）・push 先（GitHub のリポジトリと refs/heads/<ブランチ>）・取り込み先・完了申告・検証の要約・禁止の固定。
+ * 取り込み先は、呼び出し側の明示指定（target）→ 記録済みの brwBase → 宣言の baseBranch の順に決め、既存 PR（existing: findOpenPull の結果）の取り込み先と食い違えば明示指定を求めて止める。
+ * 取り込み先が開発ブランチなら publication は push（PR は作らない）、保護対象・分岐元なら pr（PR を伴う公開）。
+ * 未コミットの変更、検証の失敗、宛先・取り込み先が確定できない場合は準備済みにしない。PR 本文・資格情報は受け取らず記録しない。
+ * @param {{completion: string, verification: {passed: boolean, summary: string}, repository: {id: number, owner: string, name: string}, target?: string, existing?: object}} input
+ */
+export function markReady(cwd, workId, input = {}, { lockWaitMs } = {}) {
+  const bad = idError(workId);
+  if (bad) return bad;
+  const inputBad = readyInputError(input);
+  if (inputBad) return inputBad;
+  return update(cwd, (state) => {
+    const w = state.works[workId];
+    if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
+    if (w.worktreeId !== state.worktreeId) return failC("conflict", "work-worktree-mismatch", "作業の記録と worktree が一致しません。");
+    if (w.status !== "inProgress") return failC("conflict", "work-status", `作業の状態が ${w.status} のため、公開の準備はできません。`);
+    if (w.pausedReason) return failC("conflict", "work-paused", "中断中の作業は準備できません。`brw work resume` で再開してください。");
+
+    const branch = currentBranch(cwd);
+    if (branch !== w.branch) return failC("conflict", "work-branch-mismatch", `作業のブランチ ${w.branch} と現在のブランチ（${branch ?? "なし"}）が一致しません。`);
+    const root = repoRoot(cwd);
+    const loaded = root ? loadConfig(root) : { config: null, error: "Git リポジトリの外です。" };
+    if (loaded.error || !loaded.config) return failC("conflict", "declaration-invalid", loaded.error ?? "宣言ファイルがありません。規則を確認できないため準備しません。");
+    const config = loaded.config;
+    const cls = classifyBranch(config, branch);
+    if (cls !== "development") return failC("conflict", "branch-not-development", `'${branch}' は開発ブランチではない（${cls}）ため、公開の準備はできません。`);
+
+    // 公開する内容は、コミット済みで作業ブランチの先端と一致している HEAD に限る
+    const dirty = git(cwd, "status", "--porcelain");
+    if (dirty === null) return failC("conflict", "git-state-unknown", "作業ツリーの状態を確認できません。");
+    if (dirty !== "") return failC("conflict", "uncommitted", "未コミットの変更があるため、公開の準備はしません。commit してから再実行してください。");
+    const head = git(cwd, "rev-parse", "--verify", "HEAD");
+    if (!head || git(cwd, "rev-parse", "--verify", `refs/heads/${branch}`) !== head) return failC("conflict", "head-unknown", "HEAD のコミットを作業ブランチと照合できません。");
+
+    // push 先: push 用のリモート（無ければ既定のリモート）の URL が、指定の GitHub リポジトリを指していることを確認する
+    const remote = git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
+    const repo = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
+    if (!repo) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+    const want = input.repository;
+    if (repo.owner.toLowerCase() !== want.owner.toLowerCase() || repo.name.toLowerCase() !== want.name.toLowerCase())
+      return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
+
+    // 既存 PR の検索結果（findOpenPull）。確定できないなら取り込み先を決められないため止める
+    const ex = input.existing;
+    if (ex !== undefined && ex?.ok !== true) return failC("conflict", "pr-unconfirmed", "既存 PR の検索が確定できないため、取り込み先を決められません。");
+    const pullBase = ex?.pull ? ex.pull.baseRef : null;
+    if (ex?.pull && typeof pullBase !== "string") return failC("conflict", "pr-unconfirmed", "既存 PR の取り込み先を読み取れないため、取り込み先を決められません。");
+
+    // 取り込み先: 明示指定 → 記録済みの brwBase → 宣言の既定値。記録・既定値と既存 PR が食い違えば明示指定を求める
+    const recorded = git(cwd, "config", `branch.${branch}.brwBase`) || null;
+    let ref;
+    let source;
+    if (input.target !== undefined) { ref = input.target; source = "explicit"; }
+    else if (recorded) { ref = recorded; source = "recorded"; }
+    else { ref = config.baseBranch; source = "declared"; }
+    if (git(cwd, "check-ref-format", "--branch", ref) === null) return failC("invalidInput", "integration-invalid", `取り込み先の名前 ${ref} が正しくありません。`);
+    if (ref === branch) return failC("invalidInput", "integration-self", "作業のブランチ自身は取り込み先にできません。");
+    const kind = classifyBranch(config, ref);
+    if (kind === "undeclared") return failC("invalidInput", "integration-undeclared", `取り込み先 '${ref}' は宣言に無いブランチです。取り込み先を明示指定してください。`);
+    if (source !== "explicit" && pullBase != null && pullBase !== ref)
+      return failC("conflict", "base-conflict", `既存 PR の取り込み先（${pullBase}）と${source === "recorded" ? "記録済みの分岐元" : "宣言の既定値"}（${ref}）が食い違います。取り込み先を明示指定してください。`);
+
+    const at = now();
+    w.ready = {
+      headOid: head,
+      repositoryId: want.id,
+      pushRef: `refs/heads/${branch}`,
+      integration: { repositoryId: want.id, ref, kind, source },
+      publication: kind === "development" ? "push" : "pr",
+      completion: redact(input.completion),
+      verification: { passed: true, summary: redact(input.verification.summary) },
+      restrictions: restrictionsOf(w),
+      readyAt: at,
+    };
+    w.status = "ready";
+    w.updatedAt = at;
+    return { ok: true, work: w, ready: w.ready };
   }, { lockWaitMs });
 }
 
