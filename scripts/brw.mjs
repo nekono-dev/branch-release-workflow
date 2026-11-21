@@ -3,7 +3,8 @@
 //   hook                       PreToolUse フック（標準入力の JSON を判定して deny/ask を返す）
 //   create <名前> [--base b] [--branch-only]   作業ブランチ（と worktree）を命名規則に従って作成
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
-//   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートから worktree を作り直す）
+//   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
+//   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
 //   url [ブランチ]             プレビューURLを表示
 //   check                      宣言・workflow・provider 設定の整合検査
 //   gen-workflow [preview|deploy] [--write]  preview（provider）または deploy（配備先）の workflow 雛形を出力（--write で .github/workflows/<種類>.yaml へ）
@@ -15,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_REL, configRel, branchBase, checkName, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, configRel, branchBase, checkName, classifyBranch, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
@@ -327,6 +328,9 @@ async function hook() {
 
 // ---- 各サブコマンド -------------------------------------------------------------
 
+// 共通判定（classifyBranch）の分類の表示名。判定の理由に使う
+const CLASS_LABEL = { protected: "保護ブランチ", base: "恒常的な分岐元", undeclared: "宣言外のブランチ", development: "開発ブランチ" };
+
 function need(root) {
   const { config, error } = loadConfig(root);
   if (error) fail(error);
@@ -358,9 +362,14 @@ function create(args) {
   if (!name) fail("使い方: create <名前> [--base <ブランチ>] [--branch-only]", 2);
   const prefix = branchPrefix(config);
   const branch = matchesAny(config.workBranches, name) ? name : prefix ? prefix + name : fail(`workBranches（${config.workBranches.join(", ")}）に新規作成できるパターン（xxx/*）がありません。`);
-  if (matchesAny(config.protectedBranches ?? [], branch)) fail(`'${branch}' は保護ブランチです。`);
-  const bad = checkName(config, branch);
-  if (bad) fail(`${bad}\n  namePattern: ${config.namePattern ?? "(なし)"} / 最大 ${config.maxNameLength} 文字`);
+  // 作れるのは共通判定で開発ブランチと分類されるものだけ（保護・分岐元・命名規則違反は拒否）
+  const cls = classifyBranch(config, branch);
+  if (cls === "protected") fail(`'${branch}' は保護ブランチです。`);
+  if (cls === "base") fail(`'${branch}' は恒常的な分岐元のため、作業ブランチとして作れません。`);
+  if (cls !== "development") {
+    const bad = checkName(config, branch) ?? `'${branch}' は workBranches（${config.workBranches.join(", ")}）に一致しません。`;
+    fail(`${bad}\n  namePattern: ${config.namePattern ?? "(なし)"} / 最大 ${config.maxNameLength} 文字`);
+  }
   if (git(root, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) !== null || git(root, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`) !== null)
     fail(`ブランチ ${branch} は既に存在します。`);
   if (git(root, "fetch", "origin", base, "--quiet") === null) console.error(`警告: origin/${base} を取得できませんでした。ローカルの ${base} を使います。`);
@@ -394,9 +403,21 @@ const baseOf = branchBase;
 
 // 作業ブランチが片付けてよい状態か。切り出し元へ取り込まれた、または保護ブランチへの PR がある、のどれかを満たすと done。
 // 取り込みは commit の祖先関係のほか、squash merge を見込んで「ブランチで変えたファイルが切り出し元で同じ内容」でも判定する
+// 取り込み先の ref（origin の追跡ブランチがあればそれ、無ければローカル）
+const targetOf = (repo, base) => (git(repo, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`) !== null ? `origin/${base}` : base);
+
+// 遠隔の同名ブランチの状態。present（存在し、追跡ブランチを更新済み）・absent（存在しない）・unknown（確かめられない）
+function remoteState(cwd, branch) {
+  const r = spawnSync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (r.status === 2) return { state: "absent" };
+  if (r.status !== 0) return { state: "unknown", why: "リモートへの照会が失敗しました" };
+  if (git(cwd, "fetch", "origin", branch, "--quiet") === null) return { state: "unknown", why: "リモートからの取得が失敗しました" };
+  return { state: "present" };
+}
+
 function landedState(repo, config, branch, base) {
   git(repo, "fetch", "origin", base, "--quiet");
-  const target = git(repo, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`) !== null ? `origin/${base}` : base;
+  const target = targetOf(repo, base);
   if (git(repo, "merge-base", "--is-ancestor", `refs/heads/${branch}`, target) !== null) return { done: true, how: `${target} に取り込まれています` };
   const mb = git(repo, "merge-base", `refs/heads/${branch}`, target);
   const files = mb ? (git(repo, "diff", "--name-only", mb, `refs/heads/${branch}`) ?? "").split("\n").filter(Boolean) : [];
@@ -418,17 +439,20 @@ function landedState(repo, config, branch, base) {
 
 // 片付けの可否を確かめる。片付けられないときは理由を返す
 function finishBlocker(main, others, config, branch, base) {
-  if (!matchesAny(config.workBranches, branch) || matchesAny(config.protectedBranches ?? [], branch)) return `'${branch}' は作業ブランチではありません。`;
+  if (classifyBranch(config, branch) !== "development") return `'${branch}' は作業ブランチではありません。`;
   if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) === null) return `ローカルに ${branch} がありません。`;
   const wt = others.find((w) => w.branch === branch);
   if (wt && git(wt.path, "status", "--porcelain") !== "") return `worktree ${wt.path} に commit していない変更があります。`;
   if (main.branch === branch) return `本体の作業ツリーが ${branch} を使っています。`;
   const landed = landedState(main.path, config, branch, base);
   if (!landed.done) return landed.how;
-  // 取り込み後に積んだ commit が手元にしか無ければ消さない
-  const remote = git(main.path, "fetch", "origin", branch, "--quiet") !== null;
-  const ahead = remote ? git(main.path, "rev-list", "--count", `origin/${branch}..refs/heads/${branch}`) : null;
-  if (remote && ahead !== "0") return `${branch} に push していない commit があります（${ahead ?? "不明"} 件）。`;
+  // 取り込み後に積んだ commit が手元にしか無ければ消さない。遠隔の状態を確かめられないときも残す
+  const rs = remoteState(main.path, branch);
+  if (rs.state === "unknown") return `遠隔（origin）の状態を確認できないため残します（${rs.why}）。`;
+  // 遠隔に無いのは、squash マージ後にリモートのブランチが削除された場合にも起きる。取り込みの判定（landed）は上で満たしているので片付けてよい
+  if (rs.state === "absent") return null;
+  const ahead = git(main.path, "rev-list", "--count", `origin/${branch}..refs/heads/${branch}`);
+  if (ahead !== "0") return `${branch} に push していない commit があります（${ahead ?? "不明"} 件）。`;
   return null;
 }
 
@@ -450,7 +474,7 @@ function finish(args) {
   const baseArg = args.includes("--base") ? args[args.indexOf("--base") + 1] ?? fail("--base に値が必要です。", 2) : null;
   if (args.includes("--merged")) {
     const branches = (git(main.path, "for-each-ref", "--format=%(refname:short)", "refs/heads") ?? "").split("\n")
-      .filter((b) => b && matchesAny(config.workBranches, b) && !matchesAny(config.protectedBranches ?? [], b));
+      .filter((b) => b && classifyBranch(config, b) === "development");
     let n = 0;
     for (const b of branches) {
       const why = finishBlocker(main, others, config, b, baseArg ?? baseOf(main.path, config, b));
@@ -473,6 +497,41 @@ function finish(args) {
   console.log(`同じブランチで続けるときは \`brw resume ${branch}\`、新しい作業は \`brw create <名前>\` で、リモートから取得し直して作ります。`);
 }
 
+// 開発ブランチ同士の取り込み。取り込み元は、確かめた時点のローカルの commit（OID）に固定してマージする。
+// PR は作らず、GitHub（gh）にも接続しない。競合は自動解決せず、中断している旨と解決方法を示す。
+function merge(args) {
+  const cwd = process.cwd();
+  const root = repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
+  const config = need(root);
+  const pos = args.filter((a) => !a.startsWith("--"));
+  if (args.length !== 1 || pos.length !== 1) fail("使い方: merge <取り込み元の開発ブランチ>（取り込み先は現在の worktree のブランチ）", 2);
+  const source = pos[0];
+  const target = currentBranch(root) ?? fail("detached HEAD のため、取り込み先のブランチを確定できません。");
+  // 共通判定: 取り込み元・先がともに宣言上の開発ブランチであること
+  const tCls = classifyBranch(config, target);
+  if (tCls !== "development") fail(`取り込み先 '${target}' は${CLASS_LABEL[tCls]}のため、ローカルマージできません。マージ先は開発ブランチだけです。`);
+  const sCls = classifyBranch(config, source);
+  if (sCls !== "development") fail(`取り込み元 '${source}' は${CLASS_LABEL[sCls]}のため、ローカルマージできません。開発ブランチ間の取り込みだけが対象です。`);
+  if (source === target) fail(`取り込み元と取り込み先が同じブランチ（${target}）です。`);
+  if (git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD") !== null) fail("前の取り込みが終わっていません。競合を解決して commit するか、`git merge --abort` で取り消してから再実行してください。");
+  const status = git(root, "status", "--porcelain");
+  if (status === null || status !== "") fail("未コミットの変更があるため取り込みません。commit するか退避してから再実行してください。");
+  // 取り込み元はローカルのブランチの現在の commit に固定する（リモートの状態は見ない）
+  const oid = git(root, "rev-parse", "--verify", "--quiet", `refs/heads/${source}`);
+  if (!oid) fail(`取り込み元 '${source}' がローカルにありません。`);
+  const r = spawnSync("git", ["merge", "--no-edit", "-m", `Merge branch '${source}' into ${target}`, oid], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  process.stdout.write(r.stdout ?? "");
+  process.stderr.write(r.stderr ?? "");
+  if (r.status === 0) return console.log(`取り込みました: ${source}（${oid.slice(0, 12)}）→ ${target}。PR は作成していません。`);
+  if (git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD") !== null) {
+    const files = (git(root, "diff", "--name-only", "--diff-filter=U") ?? "").split("\n").filter(Boolean);
+    console.log(`競合が起きたため、取り込みを中断しています（自動解決はしていません）。\n競合ファイル:\n${files.map((f) => `  - ${f}`).join("\n")}`);
+    console.log("解決する場合は競合を手で直して commit してください。取り消す場合は `git merge --abort` を実行してください。");
+    process.exit(1);
+  }
+  fail(`取り込みに失敗しました（${source} → ${target}）。取り込みは行われていません。`);
+}
+
 // 作業ブランチの続きを始める。ローカルに無ければリモートから取得し直して worktree を作り、
 // 残っていればリモートの更新（別の環境からの push など）を取り込んでから使う
 function resume(args) {
@@ -481,11 +540,26 @@ function resume(args) {
   const [main, ...others] = worktrees(cwd);
   const config = need(main.path);
   const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: resume <ブランチ>", 2);
-  if (!matchesAny(config.workBranches, branch) || matchesAny(config.protectedBranches ?? [], branch)) fail(`'${branch}' は作業ブランチではありません。`);
+  // 共通判定: 再開できるのは開発ブランチだけ（保護・分岐元・宣言外は拒否）
+  const cls = classifyBranch(config, branch);
+  if (cls !== "development") fail(`'${branch}' は${CLASS_LABEL[cls]}のため、作業ブランチとして再開できません。`);
   const remote = git(main.path, "fetch", "origin", branch, "--quiet") !== null;
   if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) !== null) {
     const wt = others.find((w) => w.branch === branch);
-    if (!wt) fail(`ローカルに ${branch} がありますが worktree がありません。\`git worktree add .claude/worktrees/${aliasOf(branch)} ${branch}\` で作ってください。`);
+    if (!wt) {
+      // ローカルにだけあるブランチ（リモートにあるならそれと同じ線上にあること）から worktree を作る
+      if (main.branch === branch) fail(`${branch} は本体の作業ツリーで使用中のため、worktree を作れません。`);
+      if (remote && git(main.path, "merge-base", "--is-ancestor", `refs/heads/${branch}`, `refs/remotes/origin/${branch}`) === null
+        && git(main.path, "merge-base", "--is-ancestor", `refs/remotes/origin/${branch}`, `refs/heads/${branch}`) === null)
+        fail(`${branch} がリモートと分岐しています（rebase された可能性があります）。差分を確かめてから取り込んでください。worktree は作っていません。`);
+      const newWt = join(main.path, ".claude/worktrees", aliasOf(branch));
+      mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
+      execFileSync("git", ["worktree", "add", newWt, branch], { cwd: main.path, stdio: "inherit" });
+      if (remote && git(newWt, "merge", "--ff-only", "--quiet", `origin/${branch}`) === null)
+        fail(`${branch} の worktree を作りましたが、リモートの更新を取り込めませんでした: ${newWt}`);
+      console.log(`ローカルのブランチから worktree を作りました${remote ? "（リモートの更新を取り込みました）" : "（リモートにはまだありません）"}: ${branch}\n  worktree: ${newWt}`);
+      return;
+    }
     if (remote) {
       if (git(wt.path, "status", "--porcelain") !== "") fail(`worktree ${wt.path} に commit していない変更があるため、リモートの更新を取り込めません。`);
       if (git(wt.path, "merge", "--ff-only", "--quiet", `origin/${branch}`) === null)
@@ -607,7 +681,7 @@ function guard(args) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
-  const cmds = { guard, hook, create, finish, resume, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler };
+  const cmds = { guard, hook, create, finish, resume, merge, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);
 }

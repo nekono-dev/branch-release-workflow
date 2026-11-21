@@ -30,6 +30,7 @@ import { runAgentHookChecks } from "./agent-hooks.mjs";
 import { runAgentHookSessionChecks } from "./agent-hooks-session.mjs";
 import { runHookInstallChecks } from "./hook-install.mjs";
 import { runHookDiagnoseChecks } from "./hook-diagnose.mjs";
+import { runBranchOpsChecks } from "./branch-ops.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -551,6 +552,9 @@ await runHookInstallChecks(eq);
 
 // ---- フックの稼働と対応経路の診断（brw-enforcement 6.4） ----
 await runHookDiagnoseChecks(eq);
+
+// ---- CLI のブランチ操作と共通判定、開発間のローカル取り込み、片付け条件（brw-enforcement 7.1） ----
+await runBranchOpsChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
