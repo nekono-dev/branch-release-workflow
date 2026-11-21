@@ -190,7 +190,8 @@ const writeMayHaveApplied = (status) => status >= 500 || status === 408;
  */
 export const ghEnv = (host, token, base = process.env) => {
   const env = { ...base };
-  for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_REPO", "GH_HOST"]) delete env[k];
+  // 導入用の認証（BRW_SETUP_GH_TOKEN・BRW_WORK_GH_TOKEN）も子プロセスへ継承させない。渡すのは引数の token だけ
+  for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_REPO", "GH_HOST", "BRW_SETUP_GH_TOKEN", "BRW_WORK_GH_TOKEN"]) delete env[k];
   env.GH_HOST = host;
   env.GH_PROMPT_DISABLED = "1";
   if (token) env[host === "github.com" ? "GH_TOKEN" : "GH_ENTERPRISE_TOKEN"] = token;

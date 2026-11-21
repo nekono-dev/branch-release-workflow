@@ -13,7 +13,11 @@
 //   publish --work <id> --plan <計画 ID> [--title <t> --body-file <path>]   計画どおりに push し、保護対象は PR を作成・再利用する（--confirmed は利用者が自分の端末で実行するときだけ有効）
 //   pause --work <id> --reason <理由>   作業の次の公開を保留する（再開は work resume）
 //   url [ブランチ]             プレビューURLを表示
-//   check                      宣言・workflow・provider 設定の整合検査
+//   check [--branches-only] [--ruleset]  宣言・workflow・provider 設定の整合検査。続けてフックの稼働を経路ごとに表示し、--ruleset で Ruleset の状態を読み取りで検査する
+//                              終了コード: 0 問題なし、1 宣言・整合の誤りや Ruleset のずれ、3 Ruleset の確認不能・選択待ち（フックの状態は終了コードに含めない）
+//   setup [--ruleset on|off]   導入: 対象候補を表示し、Ruleset の採否を決めて適用し（対話は「導入する」が既定）、フックを登録する
+//                              非対話で採否が無ければ Ruleset の適用を保留する（フックは進める）。終了コード: 0 完了、1 誤り、2 使い方、3 保留
+//   setup --migrate [--keep-confirm push|pullRequest|all]   旧パス .claude/branch-release-workflow.json の宣言を新しいパスへ移行する（明示時のみ書き込み。旧パスは残す）
 //   gen-workflow [preview|deploy] [--write]  preview（provider）または deploy（配備先）の workflow 雛形を出力（--write で .github/workflows/<種類>.yaml へ）
 //   cleanup <ブランチ> [--execute]  provider 固有の後始末（既定は表示のみ）
 //   wrangler-config [ファイル] [--write]  独自ドメインの有効状況と配信方式に応じて wrangler 設定の workers_dev / preview_urls を設定（配備先を宣言しない構成）
@@ -30,6 +34,7 @@ import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
+import { runSetup, runStateCheck } from "./setup-cli.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
 
@@ -596,8 +601,10 @@ function url(args) {
   if (missing.length) console.error(`注意: 変数 ${missing.join(", ")} を解決できませんでした（環境変数か GitHub Variables を設定してください）。`);
 }
 
-function check(args = []) {
-  if (args.some((arg) => arg !== "--branches-only")) fail("使い方: check [--branches-only]", 2);
+// 終了コードを返す（既存の宣言・workflow の誤りは 1）。フックと Ruleset の状態は setup-cli の追加節で表示する（7.3）
+async function check(args = []) {
+  if (args.some((arg) => !["--branches-only", "--ruleset"].includes(arg))) fail("使い方: check [--branches-only] [--ruleset]", 2);
+  if (args.includes("--branches-only") && args.includes("--ruleset")) fail("--branches-only と --ruleset は同時に使えません（--branches-only は宣言と分岐の整合だけを見ます）。", 2);
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
   const findings = [];
@@ -611,8 +618,11 @@ function check(args = []) {
   }
   for (const f of findings) console.log(`${f.level === "error" ? "ERROR" : "WARN "} ${f.message}`);
   console.log("\n注意: workflow が本番向けかどうか（wrangler deploy か preview か等）と、リポジトリ外の設定（Pages の本番ブランチ等）は機械判定できません。");
-  if (findings.some((f) => f.level === "error")) process.exit(1);
+  const configFailed = findings.some((f) => f.level === "error");
   if (!findings.length) console.log("整合性の問題は見つかりませんでした。");
+  if (args.includes("--branches-only")) return configFailed ? 1 : 0;
+  const state = await runStateCheck(root, { ruleset: args.includes("--ruleset") });
+  return configFailed ? 1 : state;
 }
 
 function genWorkflow(args) {
@@ -690,7 +700,10 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSyn
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
   const cmds = {
-    guard, hook, create, finish, resume, merge, url, check, "gen-workflow": genWorkflow, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler,
+    guard, hook, create, finish, resume, merge, url, "gen-workflow": genWorkflow,
+    // 導入・移行と状態検査（7.3）。終了コードは各関数が返す
+    check: async (a) => { process.exitCode = await check(a); },
+    setup: async (a) => { process.exitCode = await runSetup(a); }, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler,
     // 完了公開（7.2）。終了コードは各関数が返す
     work: async (a) => { process.exitCode = await runWork(a); },
     publish: async (a) => { process.exitCode = await runPublish(a); },

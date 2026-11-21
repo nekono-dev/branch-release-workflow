@@ -15,6 +15,8 @@
 
 リポジトリ単位での有効化、CI（GitHub Actions・`claude -p --plugin-dir`）での利用、宣言ファイルの作り方は [references/setup.md](references/setup.md)。要件: Node.js 22 以上と git。外部パッケージは使わない。
 
+導入の仕上げは `brw setup`（GitHub の Ruleset の採否と適用、フックの登録）で行い、`brw check` で状態を確かめる。旧パスの宣言は `brw setup --migrate` で移行する（[導入手順](references/setup.md#4-ruleset-とフックを導入する-brw-setup)）。
+
 Codex での導入は Git clone と `node scripts/install-codex.mjs --repo <導入先リポジトリ>`（導入先の `.codex/hooks.json` へ BRW のフックを登録する。詳細は [導入手順](references/setup.md#codex)）。更新は clone の `git pull --ff-only` で行う。Claude 専用のフックを Codex に自動適用するものではない。
 
 ## 構成

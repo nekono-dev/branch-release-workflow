@@ -415,6 +415,15 @@ export const runPublishCliChecks = async (eq) => {
       const x = await publishCmd(r.dir, ["--work", id, "--plan", pid, "--title", "変更"], gh);
       eq("enforcement/7.2 中断中の作業は公開せず、書き込みもしない", [x.code, gh.fake.writeCount, workOf(r.dir, id).status], [1, 0, "ready"]);
     });
+    // ---- 非対話の brw publish --confirmed（本番の既定の TTY 判定を通す spawn）。実在の作業 ID と計画 ID を使う（7.2 申し送り a） ----
+    await withRepo({ config: { ...CONFIG, autoApprove: { push: false } } }, async (r) => {
+      const id = startId(r.dir);
+      const gh = github({ routes: { [POST]: { status: 201, body: PR(gitOut(r.dir, "rev-parse", "HEAD")) } } });
+      const pid = await readyAndPlan(r.dir, id, gh);
+      const s = spawnSync("node", [BRW, "publish", "--work", id, "--plan", pid, "--confirmed"], { cwd: r.dir, encoding: "utf8", env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+      const remoteHas = gitOut(r.dir, "ls-remote", "origin", "refs/heads/dev/foo").length > 0;
+      eq("enforcement/7.2 非 TTY の spawn による --confirmed は終了コード 1・遠隔に ref なし・作業は ready のまま（本番の既定の判定）", [typeof pid, s.status, remoteHas, workOf(r.dir, id).status, gh.fake.writeCount], ["string", 1, false, "ready", 0]);
+    });
   } finally {
     for (const [k, v] of [["GIT_SSH_COMMAND", saved.cmd], ["GIT_SSH_VARIANT", saved.variant], ["BRW_TEST_BARE", saved.bare]]) {
       if (v === undefined) delete process.env[k];

@@ -9,7 +9,7 @@
 | `baseBranch` | 作業ブランチの分岐元。既定は `develop` |
 | `namePattern` | 作業ブランチ名（接頭辞を含むブランチ名全体）の正規表現 |
 | `maxNameLength` | 作業ブランチ名の最大文字数。既定は 54（プレビューのホスト名が DNS ラベルの 63 文字に収まるように） |
-| `autoApprove` | 省略可。`{ "push": true, "pullRequest": true }` のように、確認を省く作業ブランチ運用の操作を指定する（下の「作業ブランチ運用の操作の確認の省略」） |
+| `autoApprove` | 省略可。確認を省く作業ブランチ運用の操作。省略した項目は有効、明示的な `false` だけが無効（下の「作業ブランチ運用の操作の確認の省略」） |
 | `preview.provider` | `none` / `url-template` / `cloudflare-previews`。省略時は `urlTemplate` があれば `url-template`、無ければ `none` |
 | `preview.urlTemplate` | プレビューURLの雛形。`{alias}`（ブランチ名の `/` を `-` にしたもの）を含める。`{branch}` と `${変数}` も使える。ホスト名が `.workers.dev` で終われば workers.dev 配信、それ以外は独自ドメイン配信と判定する |
 | `preview.target` | `deploy` があり provider が `cloudflare-previews` なら必須。プレビューを作る配備先（`deploy.targets` の名前） |
@@ -62,7 +62,7 @@ Worker を分けない構成でテンプレートから生成したいときは�
 
 `brw create` が新しいブランチに付ける接頭辞は、`workBranches` のうち最初の `xxx/*` 形式のもの（例: `dev/*` → `dev/`）。
 
-旧 `.claude/branch-release-workflow.json` だけの構成も利用できる。両方が存在すればルートの正本を優先する。旧版と併用する場合は旧パスを正本へのシンボリックリンクにして値を共有する。
+旧 `.claude/branch-release-workflow.json` だけの構成も利用できる。両方が存在すればルートの正本を優先する。旧版と併用する場合は旧パスを正本へのシンボリックリンクにして値を共有する。新しいパスへ移すには `brw setup --migrate` を使う（旧パスの内容と明示した値を保ち、旧パスは残す）。
 
 ## provider
 
@@ -93,6 +93,8 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 ```json
 "autoApprove": { "push": true, "pullRequest": true }
 ```
+
+既定値は有効である。`autoApprove` を省くか、キーを省いた項目は確認を省く（上の例の `"autoApprove": { "push": true, "pullRequest": true }` は省略できる同じ既定値を明示したもの）。確認を求めたい項目だけ `false` を明示する（例: `"autoApprove": { "push": false }`）。無効化を取り消すには、その `false` を削除して commit する。旧版（旧パスの宣言）は未指定を確認が必要と扱っていたため、旧パスの宣言を移行するときは `brw setup --migrate` が変更点を表示する（[導入手順の移行](setup.md#6-旧パスの宣言を移行する)）。
 
 | キー | 対象 |
 | --- | --- |
