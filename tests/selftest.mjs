@@ -34,6 +34,7 @@ import { runBranchOpsChecks } from "./branch-ops.mjs";
 import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
+import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -567,6 +568,9 @@ await runSetupCliChecks(eq);
 
 // ---- Git 操作と完了公開の統合・回帰（brw-enforcement 8.1） ----
 await runIntegrationPublishChecks(eq);
+
+// ---- Ruleset の導入・検査の契約（brw-enforcement 8.2） ----
+await runIntegrationRulesetChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

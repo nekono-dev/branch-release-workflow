@@ -164,12 +164,23 @@ function reportInspect(d, ins, label) {
 function reportApply(d, res) {
   const ids = res.rulesetId !== undefined ? `（ID ${res.rulesetId}）` : "";
   switch (res.status) {
-    case "applied": d.io.out(`Ruleset を追加しました${ids}。対象: ${(res.includedRefs ?? []).join(", ")}`); break;
+    case "applied":
+      // 応答が届かず一覧で照合して記録したもの。今回の送信で作られたか別の管理者が作ったかは区別できないため、追加とは断定しない
+      if (res.reconciled) d.io.out(`既存の同条件の Ruleset を確認して記録しました${ids}。応答が届かなかったため一覧で照合し、追加の要求は再送していません（今回の要求で作られたか別の管理者が作ったかは応答からは判別できません）。対象: ${(res.includedRefs ?? []).join(", ")}`);
+      else d.io.out(`Ruleset を追加しました${ids}。対象: ${(res.includedRefs ?? []).join(", ")}`);
+      break;
     case "reused": d.io.out(`既存の Ruleset を再利用しました（書き込みなし）。ID: ${Object.values(res.reusedRulesetIds ?? {}).flat().join(", ")}`); break;
     case "skipped": d.io.out("Ruleset は見送りのため適用しません。"); break;
     case "blocked":
-      d.io.err(`事前検査が通らないため Ruleset を変更していません（${res.branch ?? ""}）。`);
-      for (const c of res.checks ?? []) d.io.err(`  ${c.id}: ${c.status}（${c.reason}）${c.remedy ? ` → ${c.remedy}` : ""}`);
+    case "unknown":
+      // 事前検査の項目（ng・unknown）ごとに、理由と再試行の対応を表示する（要件 5.2）
+      if (res.checks) {
+        d.io.err(`事前検査が通らないため Ruleset を変更していません（${res.branch ?? ""}）${res.status === "unknown" ? "。確認できない項目があります" : ""}。`);
+        for (const c of res.checks) d.io.err(`  ${c.id}: ${c.status}（${c.reason}）${c.remedy ? ` → ${c.remedy}` : ""}`);
+      } else {
+        d.io.err(res.reason ?? `Ruleset の適用を完了できませんでした（${res.status}）。`);
+        if (res.remedy) d.io.err(`  ${res.remedy}`);
+      }
       break;
     case "conflict":
       d.io.err(`${res.reason}${res.candidateIds ? `（候補 ID: ${res.candidateIds.join(", ")}）` : ""}`);
