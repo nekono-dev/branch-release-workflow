@@ -28,7 +28,7 @@
   - 未対応経路をフックで遮断できるか、導入検査向けに識別できる形にする。
   - _Boundary: 操作判定_
   - _Requirements: 1.1, 1.4, 2.6, 3.2, 3.3, 6.1_
-- [ ] 2.3 開発・保護・宣言外の操作可否を共通化する
+- [x] 2.3 開発・保護・宣言外の操作可否を共通化する
   - 正規の作成・再開、保護対象への直接変更、開発ブランチ間のマージ、保護対象への PR 作成を区別する。
   - 対応経路で曖昧な変更、開発間・宣言外への直接の PR 作成、GitHub マージと予約を拒否する。
   - 適合判定と確認省略を別に判定し、登録済み宣言と作業の禁止を照合する。同じ操作の判定理由をホスト間で比較できる。
@@ -217,3 +217,4 @@
 - 1.2: テスト補助は tests/support/ にある（git-fixture・hook-fixtures・fake-github）。偽 GitHub は `request(method, path, body)` 形式で routes は完全一致のみ。3.x でクライアントの注入点を決めるとき、必要ならアダプタや可変パス対応を足す。Codex のフック入力形は想定の fixture で、実機の形との一致は 8.4 で確認する。既存の自己テストは /tmp/brw-* を実行ごとに残す（既存の挙動で、1.2 の補助は残さない）。
 - 2.1: 操作の分類は scripts/operation-policy.mjs の `classifyCommand(command, cwd)`（結果を返すだけで brw.mjs へは未接続。既存の tokenize/splitCommand とは別の字句解析を持つため、2.3 か 6.x で統合を検討する）。確定できない・判定不能な変更は安全側（unresolved/unparseable）に倒す。残る限界: 別スクリプトや node/python/make 経由で git を呼ぶ場合は検出できない（導入診断で明示する）。READ_ONLY 扱いの reset・update-ref・symbolic-ref などローカルの ref を動かすサブコマンドは照会扱いのまま（2.3 以降で要判断）。`-c` の危険設定と引数に展開・ワイルドカードを含む fetch は過検出になりうる。
 - 2.2: GitHub 書き込みの識別は scripts/github-operations.mjs と operation-policy.mjs の `classifyCommand`・`classifyMcpCall(toolName, toolInput, cwd)`。新しい操作の種類は pr-create（head・base を持つ）・github-merge（ローカルの merge とは別）・auto-merge・unsupported-write（area・action・refWrite を持つ）。2.3 はこの名前に合わせる。GraphQL は対象を常に確定不能として返す。`other-mcp`（GitHub か判断できない MCP）は操作が空で通過するため、6.4 の導入検査が scope を見て強制範囲外と報告する。curl・wget は URL に github を含み書き込みオプションがあるものだけ識別する（GHES で URL に github を含まない場合は検出できない。導入診断で明示する）。`gh -R` で別リポジトリを指す場合、cwd が未導入だと通過する（git の -C と同じ扱い）。`GH_HOST` だけ指定した場合のホスト照合は 2.3 で注意する。
+- 2.3: 共通判定は scripts/operation-decision.mjs の `evaluate(op, ctx)`・`contextFor(op, restrictions)`・`evaluateAll(classified, restrictions)`・`decisionSignature(d)`。結果は verdict（deny/pass/eligibleForApproval）・compliance（適合）・approval（確認省略）が別項目で、host は結果に影響しない。作業の禁止は `context.restrictions={noPush,noPr}` で受け取り、保存と読み出しは 4.1/4.3。保護・分岐元への切り替えは「適合・確認省略なし」、開発ブランチ上の `git merge main` は拒否。申し送り: (a) 6.1 は evaluateAll の確認省略が classify の認識した操作だけの結果である点を受け、認識外コマンドが混ざる複合コマンドでは確認省略を返さない。(b) 4.4 は push 先 URL が宣言のリポジトリと一致することを確かめる（`git push up dev/foo` は origin 以外のリモートでも開発ブランチなら確認省略になる）。(c) policy が照会扱いにする `update-ref`・`branch -D`・`reset --hard`・`symbolic-ref`・`tag` など、ローカルの参照を動かす操作は通過する。2.2 の分類の見直しか 6.1 で扱う。MCP の `update_pull_request`（base 変更）は範囲外・通常承認になる。
