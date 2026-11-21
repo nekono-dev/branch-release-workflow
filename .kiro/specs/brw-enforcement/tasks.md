@@ -7,7 +7,7 @@
   - 登録済み宣言で項目ごとの既定値を適用し、明示的な `false` は維持する。旧・新宣言と重複指定のテストで結果を確認できる。
   - _Boundary: 宣言・Git_
   - _Requirements: 1.1, 1.3, 2.1, 2.6, 4.1, 6.3, 6.4_
-- [ ] 1.2 ローカルで再現できる契約テストを準備する
+- [x] 1.2 ローカルで再現できる契約テストを準備する
   - Node.js 22、Git の一時リポジトリと bare remote、両ホストのフック入力例を用意する。
   - GitHub 応答を差し替え、要求先と書き込み件数を記録する。実際の GitHub 認証なしで、成功・権限不足・応答喪失を再現できる。
   - 既存の自己テストを回帰基準として実行できる状態にする。
@@ -214,3 +214,4 @@
 ## Implementation Notes
 
 - 1.1: `classifyBranch`・`autoApproveOf`・`permanentBases` は lib.mjs に追加済みだが、既存の `judgeBranch` とフックの `autoApprovable` へは未配線。操作判定（2.3）とフック接続（6.1）で配線する。命名規則に合わない開発指定は宣言外として扱う。
+- 1.2: テスト補助は tests/support/ にある（git-fixture・hook-fixtures・fake-github）。偽 GitHub は `request(method, path, body)` 形式で routes は完全一致のみ。3.x でクライアントの注入点を決めるとき、必要ならアダプタや可変パス対応を足す。Codex のフック入力形は想定の fixture で、実機の形との一致は 8.4 で確認する。既存の自己テストは /tmp/brw-* を実行ごとに残す（既存の挙動で、1.2 の補助は残さない）。

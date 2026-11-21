@@ -11,6 +11,7 @@ import { deliveryOf, globToRegExp, loadConfig, normalizeConfig, parsePushBranche
 import * as deployCf from "../scripts/deploy/cloudflare-workers.mjs";
 import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
+import { runSupportChecks } from "./support/selftest-support.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -479,6 +480,9 @@ import * as lib from "../scripts/lib.mjs";
   eq("enforcement/2.6 明示的な false は維持し、他の項目だけ既定を適用", [aa({ push: false }, true), aa({ pullRequest: false }, true)], [{ push: false, pullRequest: true }, { push: true, pullRequest: false }]);
   eq("enforcement/2.1 未登録・編集中の宣言は既定を適用しない", aa({ push: true }, false), { push: false, pullRequest: false });
 }
+
+// ---- テスト補助の動作確認（brw-enforcement 1.2） ----
+await runSupportChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
