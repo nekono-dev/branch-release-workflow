@@ -1,7 +1,7 @@
 // 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）・公開計画の発行と検証（4.3）・push の実行と照合（4.4）:
 // 作業 ID の発行、同一 worktree の別作業の区別、中断と明示再開、操作別の結果と作業の禁止の保存、
 // 完了申告と取り込み先の確定（markReady）、許可された書き込みだけの計画（issuePlan・checkPlan）、
-// 計画どおりの push（runPush）を扱う。PR の作成（4.5）・フック接続（6.x）には踏み込まない。
+// 計画どおりの push（runPush）を扱う。PR の作成・再利用（4.5、publish-pr.mjs）・フック接続（6.x）には踏み込まない。
 // GitHub の API へは通信しない（計画の発行は読み取りと状態の記録だけ。push と遠隔 ref の読み取りは git の通信で行う）。
 // 既存 PR の検索結果と対象リポジトリ ID は、呼び出し側が GitHub クライアントで確認済みの値を受け取る。
 // 外部依存なし（Node 標準ライブラリのみ）。
@@ -38,13 +38,13 @@ const CODE = /^[a-z][a-z0-9-]{0,39}$/;
 const TEXT_MAX = 200;
 const LOCK_STALE_MS = 60_000;
 
-const fail = (kind, message) => ({ ok: false, error: { kind, message } });
+export const fail = (kind, message) => ({ ok: false, error: { kind, message } });
 
 /**
  * 記録してよい URL を `origin + pathname` に正規化して返す。https 以外、認証情報・クエリ・フラグメント付き、長すぎるものは null。
  * 秘密情報が URL から状態ファイルへ入らないようにする。
  */
-function safeUrl(text) {
+export function safeUrl(text) {
   if (typeof text !== "string" || text.length > 500 || /[\s"'<>]/.test(text) || /[?#]/.test(text)) return null;
   let u;
   try { u = new URL(text); } catch { return null; }
@@ -76,7 +76,7 @@ export function stateFileOf(cwd) {
 const worktreeIdOf = (file) => file.slice(file.lastIndexOf("/") + 1, -".json".length);
 
 /** 状態を読む。ファイルが無ければ空の状態、壊れていれば error。 */
-function load(file) {
+export function load(file) {
   let text;
   try {
     text = readFileSync(file, "utf8");
@@ -121,7 +121,7 @@ const isStale = (file) => {
 };
 
 /** ロックを取る。取れなければ待ち、期限内に取れなければ null。持ち主がいなくなった古いロックは外す。 */
-function acquire(lockFile, waitMs) {
+export function acquire(lockFile, waitMs) {
   const until = Date.now() + waitMs;
   for (;;) {
     try {
@@ -154,7 +154,7 @@ function acquire(lockFile, waitMs) {
  * 状態をロックの中で読み、`fn(state)` で更新する。`fn` が結果（ok:false なら保存しない）を返す。
  * 壊れた状態には書かない（上書きして禁止を失わないため）。
  */
-function update(cwd, fn, { lockWaitMs = 3000, allowCorrupt = false } = {}) {
+export function update(cwd, fn, { lockWaitMs = 3000, allowCorrupt = false } = {}) {
   const file = stateFileOf(cwd);
   if (!file) return fail("invalidInput", "Git リポジトリの中で実行してください。");
   mkdirSync(dirname(file), { recursive: true });
@@ -173,9 +173,9 @@ function update(cwd, fn, { lockWaitMs = 3000, allowCorrupt = false } = {}) {
   }
 }
 
-const now = () => new Date().toISOString();
+export const now = () => new Date().toISOString();
 const pauseRecord = (w, reason) => { w.pausedReason = redact(reason); w.updatedAt = now(); };
-const idError = (id) => (typeof id === "string" && WORK_ID.test(id) ? null : fail("invalidInput", "作業 ID の形式が正しくありません。"));
+export const idError = (id) => (typeof id === "string" && WORK_ID.test(id) ? null : fail("invalidInput", "作業 ID の形式が正しくありません。"));
 const sessionError = (s) => (s === undefined || (typeof s === "string" && SESSION_ID.test(s)) ? null : fail("invalidInput", "セッション ID の形式が正しくありません。"));
 
 /** 現在の作業が別の作業なら、その作業を中断として記録する（公開済みは対象外）。 */
@@ -304,7 +304,7 @@ export function setStatus(cwd, workId, status, { lockWaitMs } = {}) {
 // ---- 完了申告と公開準備（4.2） ----
 
 /** 判別用の code を持つ失敗の結果。kind は invalidInput（入力・宛先の不備）か conflict（状態・Git の状態との食い違い）。 */
-const failC = (kind, code, message) => ({ ok: false, error: { kind, code, message } });
+export const failC = (kind, code, message) => ({ ok: false, error: { kind, code, message } });
 
 // GitHub のリポジトリを指す push 先の URL（https・ssh・scp 形式）。認証情報付きの URL は読まない（宛先不明）
 const GITHUB_REPO = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
@@ -317,7 +317,7 @@ export function githubRepoOf(url) {
 }
 
 /** 作業ブランチの push 先リモート名（pushRemote → remote.pushDefault → 追跡先 → origin の順）。 */
-const remoteNameOf = (cwd, branch) => git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
+export const remoteNameOf = (cwd, branch) => git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
 
 /** 完了申告・検証・対象リポジトリの入力を検査する。Git の状態は見ない（作業の状態とともに後で確認する）。 */
 function readyInputError(input) {
@@ -417,7 +417,7 @@ export function markReady(cwd, workId, input = {}, { lockWaitMs } = {}) {
 // ---- 公開計画（4.3） ----
 
 // 名前を安全に扱えるかの検査。シェルに渡す前の確認で、先頭に "-"（オプションとして解釈される）は認めない
-const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+export const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 /** 版の比べ方。計画を保存するときと検証するときに同じ入力から同じ値になる。 */
 const digestOf = (v) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
@@ -574,7 +574,7 @@ export function checkPlan(cwd, workId, planId) {
  * 読み込み済みの状態に対して計画の有効性を確認する（読み取りのみ）。checkPlan と runPush が共通で使う。
  * 成功時は作業（w）・Git 上の確認値（g: branch・head・root）・計画（plan）を返す。
  */
-function verifyPlan(cwd, state, workId, planId) {
+export function verifyPlan(cwd, state, workId, planId) {
   const w = state.works[workId];
   if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
   if (!w.plan || typeof planId !== "string" || w.plan.planId !== planId)
@@ -611,7 +611,7 @@ const pushEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" }
  * 遠隔の対象ブランチの OID を読む（読み取りのみ）。通信できなければ error、ref が無ければ oid: null。
  * 資格情報や URL は読まず返さない（リモート名だけで照会する）。
  */
-function remoteOidOf(cwd, remote, branch) {
+export function remoteOidOf(cwd, remote, branch) {
   const r = spawnSync("git", ["ls-remote", remote, `refs/heads/${branch}`], { cwd, encoding: "utf8", env: pushEnv(), stdio: ["ignore", "pipe", "ignore"], timeout: 120_000 });
   if (r.error || r.status !== 0) return { error: true, oid: null };
   const hit = String(r.stdout ?? "").split("\n").map((l) => l.trim().split(/\s+/)).find((p) => p[1] === `refs/heads/${branch}`);
@@ -622,7 +622,7 @@ function remoteOidOf(cwd, remote, branch) {
  * push の前の確認（読み取りのみ）。対象リポジトリ・push 先の GitHub リポジトリ・登録済み宣言・開発ブランチの分類を見る。
  * 成功時は push に使うリモート名を返す。
  */
-function pushPreflight(cwd, g, w, repository) {
+export function pushPreflight(cwd, g, w, repository) {
   const remote = remoteNameOf(cwd, g.branch);
   if (!SAFE_REMOTE_NAME.test(remote) || !SAFE_BRANCH.test(g.branch))
     return failC("invalidInput", "name-unsafe", "リモート名またはブランチ名を安全に確認できないため、push しません。");
@@ -818,7 +818,7 @@ export function getRestrictions(cwd, workId) {
 }
 
 /** 作業の禁止を取り出す。項目が無い・形が違う場合は禁止ありとして扱う（安全側）。 */
-function restrictionsOf(work) {
+export function restrictionsOf(work) {
   const r = work?.restrictions;
   if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.noPush !== "boolean" || typeof r.noPr !== "boolean") return { noPush: true, noPr: true };
   return { noPush: r.noPush, noPr: r.noPr };

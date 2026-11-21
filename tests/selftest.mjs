@@ -21,6 +21,7 @@ import { runWorkStateChecks } from "./work-state.mjs";
 import { runReadyChecks } from "./ready.mjs";
 import { runPublishPlanChecks } from "./publish-plan.mjs";
 import { runPublishPushChecks } from "./publish-push.mjs";
+import { runPublishPrChecks } from "./publish-pr.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -515,6 +516,9 @@ await runPublishPlanChecks(eq);
 
 // ---- 公開の push 実行と照合（brw-enforcement 4.4） ----
 await runPublishPushChecks(eq);
+
+// ---- 完了公開の PR 再利用・作成（brw-enforcement 4.5） ----
+await runPublishPrChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
