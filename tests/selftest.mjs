@@ -27,6 +27,7 @@ import { runRulesetPreflightChecks } from "./ruleset-preflight.mjs";
 import { runRulesetApplyChecks } from "./ruleset-apply.mjs";
 import { runRulesetInspectChecks } from "./ruleset-inspect.mjs";
 import { runAgentHookChecks } from "./agent-hooks.mjs";
+import { runAgentHookSessionChecks } from "./agent-hooks-session.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -539,6 +540,9 @@ await runRulesetInspectChecks(eq);
 
 // ---- フックの応答と公開計画の照合（brw-enforcement 6.1） ----
 await runAgentHookChecks(eq);
+
+// ---- 作業 ID の関連付けと終了時の案内（brw-enforcement 6.2） ----
+await runAgentHookSessionChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

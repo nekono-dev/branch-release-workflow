@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code と Codex のフック応答（brw-enforcement 6.1）: ホストの入力を操作判定へ渡し、ホストの応答の形に変換する。
 // 操作の分類は operation-policy.mjs、可否は operation-decision.mjs が決める。ここはホストの入出力の形と、確認省略の条件だけを扱う。
-// 6.2（PostToolUse・Stop）と 6.3（フックの登録）には踏み込まない。外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
+// 6.2（PostToolUse・Stop）では、作業 ID の関連付けと終了時の案内を扱う。6.3（フックの登録）には踏み込まない。外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
 //
 // 内部の判定 verdict と、ホストへの応答:
 //   deny   拒否。PreToolUse（両ホスト）と PermissionRequest（Codex）で拒否を返す。
@@ -9,6 +9,8 @@
 //   allow  確認を省略する。Claude の PreToolUse と、Codex の PermissionRequest だけが返す。Codex の PreToolUse は返さない。
 //   pass   応答を返さない（ホストの通常の承認に任せる）。
 // 確認省略は、単独の操作で、判定が適合かつ確認省略の対象のときに限る。信頼済み BRW の publish は計画の書き込みに限る。
+// PostToolUse は応答を返さず、成功した信頼済みの `brw work start|resume` の作業 ID をセッションに関連付ける（書き込みはここだけ）。
+// Stop は読み取りだけで、準備済みで未公開の作業があるときに、同じ作業 ID での再試行か中断を block の応答で案内する。
 //
 // 実行ファイルとしても使える: `node scripts/agent-hooks.mjs <claude|codex> <イベント名>` が標準入力の JSON を読み、応答を標準出力へ書く。
 import { realpathSync, statSync } from "node:fs";
@@ -17,11 +19,11 @@ import { fileURLToPath } from "node:url";
 import { git } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
-import { checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
+import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
 
 const PREFIX = "[branch-release-workflow] ";
-/** ホストごとに扱うイベント。PostToolUse・Stop は 6.2 で扱う。 */
-export const HOST_EVENTS = { claude: ["PreToolUse"], codex: ["PreToolUse", "PermissionRequest"] };
+/** ホストごとに扱うイベント。PostToolUse（関連付け）と Stop（案内）は 6.2 で扱う。 */
+export const HOST_EVENTS = { claude: ["PreToolUse", "PostToolUse", "Stop"], codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop"] };
 const BRW_CLI = join(dirname(fileURLToPath(import.meta.url)), "brw.mjs");
 // 信頼済み BRW の CLI の実体（シンボリックリンクを解決した絶対パス）。読めなければ信頼できる呼び出しは無い
 const BRW_CLI_REAL = (() => { try { return realpathSync(BRW_CLI); } catch { return null; } })();
@@ -313,8 +315,136 @@ export function responseOf(host, event, d) {
   return null;
 }
 
+// ---- 作業 ID の関連付け（PostToolUse）と終了時の案内（Stop）（6.2） ----
+
+const WORK_ID_ONE = /^w-[a-z0-9]+-[0-9a-f]{8}$/;
+const WORK_ID_IN_TEXT = /w-[a-z0-9]+-[0-9a-f]{8}/g;
+const SESSION_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+
+/** 入力をオブジェクトにする。オブジェクトでなければ null。 */
+const eventOf = (input) => {
+  let ev = input;
+  if (typeof input === "string") {
+    try { ev = JSON.parse(input); } catch { return null; }
+  }
+  return ev && typeof ev === "object" && !Array.isArray(ev) ? ev : null;
+};
+const cwdOf = (ev) => (typeof ev.cwd === "string" && ev.cwd !== "" ? ev.cwd : null);
+const sessionOf = (ev) => (typeof ev.session_id === "string" && SESSION_RE.test(ev.session_id) ? ev.session_id : null);
+
+/**
+ * 信頼済み BRW の作業コマンドか。`node <brw.mjs の実体> work start` と `node <brw.mjs の実体> work resume --work <id>` の形だけ認める。
+ * 戻り値: null（作業コマンドではない・信頼できない）| { dir, kind: "start"|"resume", workId? }
+ */
+function workCallOf(command, cwd) {
+  const cd = stripCd(command);
+  if (!cd.ok) return null;
+  const w = scanWords(cd.rest);
+  if (!w || w[0] !== "node" || w[2] !== "work") return null;
+  const dir = cd.dir === null ? cwd : resolve(cwd, cd.dir);
+  if (w[1] === undefined || !isTrustedCli(resolve(dir, w[1]))) return null;
+  if (w.length === 4 && w[3] === "start") return { dir, kind: "start" };
+  if (w.length === 6 && w[3] === "resume" && w[4] === "--work" && WORK_ID_ONE.test(w[5])) return { dir, kind: "resume", workId: w[5] };
+  return null;
+}
+
+/** 成功した実行か。終了コードが 0 と明示され、中断されていないものだけ。判定できなければ失敗扱い（安全側）。 */
+const succeeded = (tr) => !!tr && typeof tr === "object" && !Array.isArray(tr) && tr.exit_code === 0 && tr.interrupted !== true;
+
+/**
+ * PostToolUse: 成功した `brw work start|resume` の作業 ID を、ホストのセッションに関連付ける。
+ * 出力は作業 ID の探索にだけ使い、採用は状態ファイルで決める（現在の作業で、中断中でなく、公開済みでないこと）。
+ * 条件を満たさない・判定できない場合は何も書かない。応答は返さない。
+ */
+function recordWorkStart(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.tool_name !== "Bash" || typeof ev.tool_input?.command !== "string") return;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return;
+    const call = workCallOf(ev.tool_input.command, cwd);
+    if (!call || !succeeded(ev.tool_response)) return;
+    const tr = ev.tool_response;
+    const out = [tr.stdout, tr.output].filter((s) => typeof s === "string").join("\n");
+    const ids = [...new Set(out.match(WORK_ID_IN_TEXT) ?? [])];
+    const file = stateFileOf(call.dir);
+    if (!file) return;
+    const { state, error } = load(file);
+    if (error) return;
+    const cur = state.current;
+    if (typeof cur !== "string" || !ids.includes(cur)) return;
+    if (call.workId !== undefined && call.workId !== cur) return;
+    const w = state.works[cur];
+    if (!w || w.pausedReason || w.status === "published") return;
+    if (call.kind === "start" && w.status !== "inProgress") return;
+    attachSession(call.dir, cur, session);
+  } catch {
+    // 関連付けに失敗しても、ホストの処理は止めない（記録されないだけ）
+  }
+}
+
+/**
+ * 作業が終了時の案内の対象か。準備済み（ready）で push が残る作業、または push 済みで PR が残る作業。
+ * 明示禁止で残りの操作が無い作業、中断済み、公開済みは対象外。準備の後に HEAD が変わった作業は "stale"。
+ */
+function pendingOf(w, head) {
+  if (!w || typeof w !== "object" || w.status === "published" || w.pausedReason) return null;
+  const r = restrictionsOf(w);
+  const publication = w.ready?.publication;
+  if (w.status === "ready") {
+    if (r.noPush) return null;
+    return w.ready?.headOid === head ? "ready" : "stale";
+  }
+  if (w.status === "pushed") {
+    if (publication === "pr" && r.noPr) return null;
+    return "pushed";
+  }
+  return null;
+}
+
+/**
+ * Stop: 当該セッションに結び付いた、準備済みで未公開の作業だけを案内する。読み取りだけを行い、状態を書き換えない。
+ * stop_hook_active が真なら案内せず終了させる（案内の繰り返しによる無限ループを防ぐ）。判定できなければ案内しない。
+ */
+function stopGuidance(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.stop_hook_active === true) return null;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return null;
+    const file = stateFileOf(cwd);
+    if (!file) return null;
+    const { state, error } = load(file);
+    if (error) return null;
+    const head = git(cwd, "rev-parse", "--verify", "HEAD");
+    if (!head) return null;
+    const lines = [];
+    for (const w of Object.values(state.works)) {
+      if (!w || w.sessionId !== session) continue;
+      const kind = pendingOf(w, head);
+      if (kind === null) continue;
+      const id = w.workId;
+      if (kind === "stale") lines.push(`- 作業 ${id}: 準備の後に HEAD が変わりました。\`brw work resume --work ${id}\` で再開して準備をやり直すか、\`brw pause --work ${id} --reason "<理由>"\` で中断してください。`);
+      else lines.push(`- 作業 ${id}: 公開を続けるには、\`brw work plan --work ${id}\` で計画 ID を取得し、\`brw publish --work ${id} --plan <計画 ID>\` を実行してください。中断するなら \`brw pause --work ${id} --reason "<理由>"\` を実行してください。`);
+    }
+    if (lines.length === 0) return null;
+    return { decision: "block", reason: `${PREFIX}準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}` };
+  } catch {
+    return null;
+  }
+}
+
 /** ホストのイベントを処理し、応答（オブジェクトまたは null）を返す。 */
 export function handleHook(host, event, input) {
+  if (!HOST_EVENTS[host]?.includes(event)) return null;
+  // PostToolUse は関連付けだけを行い、応答は返さない。Stop は Claude・Codex とも block の形で案内する
+  if (event === "PostToolUse") {
+    recordWorkStart(input);
+    return null;
+  }
+  if (event === "Stop") return stopGuidance(input);
   return responseOf(host, event, decideHook(host, event, input));
 }
 

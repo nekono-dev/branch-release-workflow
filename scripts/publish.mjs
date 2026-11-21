@@ -249,6 +249,24 @@ export function resumeWork(cwd, workId, { sessionId, lockWaitMs } = {}) {
   }, { lockWaitMs });
 }
 
+/**
+ * 作業をホストのセッションに関連付ける（PostToolUse から呼ぶ）。現在の作業で、公開済みでない場合だけ書き込む。
+ * 作業が現在の作業でなければ（別の作業・中断中・記録なし）関連付けず conflict を返す。
+ */
+export function attachSession(cwd, workId, sessionId, { lockWaitMs } = {}) {
+  const bad = idError(workId) ?? (typeof sessionId === "string" && SESSION_ID.test(sessionId) ? null : fail("invalidInput", "セッション ID の形式が正しくありません。"));
+  if (bad) return bad;
+  return update(cwd, (state) => {
+    const w = state.works[workId];
+    if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
+    if (state.current !== workId) return fail("conflict", `作業 ${workId} は現在の作業ではないため、セッションに関連付けません。`);
+    if (w.status === "published") return fail("conflict", "公開済みの作業は関連付けません。");
+    w.sessionId = sessionId;
+    w.updatedAt = now();
+    return { ok: true, work: w };
+  }, { lockWaitMs });
+}
+
 /** 作業の禁止（push・PR 作成）を追加する。外すことはできない（追加指示は厳しくする方向だけ）。 */
 export function setRestrictions(cwd, workId, restrictions, { lockWaitMs } = {}) {
   const bad = idError(workId);
