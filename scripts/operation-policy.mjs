@@ -1,15 +1,20 @@
-// 操作判定（タスク 2.1）: シェルの文字列から Git の操作を取り出し、操作の種類と変更対象を確定する。
-// 可否の判断（許可・拒否）はここでは行わない（2.3）。GitHub の書き込み経路も扱わない（2.2）。
+// 操作判定（タスク 2.1・2.2）: シェルの文字列と MCP ツールの入力から、Git と GitHub の操作を取り出し、操作の種類と変更対象を確定する。
+// 可否の判断（許可・拒否）はここでは行わない（2.3）。フックとの接続も行わない（6.x）。
+// GitHub の書き込み経路（gh・MCP）の識別は github-operations.mjs にあり、ここから呼ぶ。
 // 外部依存なし（Node 標準ライブラリのみ）。lib.mjs より上位、フック変換より下位のモジュール。
 //
 // 戻り値 classifyCommand(command, cwd):
-//   operations   取り出した Git 操作（kind: create | commit | push | merge | query | unparseable）
+//   operations   取り出した操作。kind は次のとおり
+//                  Git: create | commit | push | merge | query | unparseable
+//                  GitHub（gh・MCP）: pr-create | github-merge | auto-merge | unsupported-write（kind の意味は github-operations.mjs）
 //   compound     照会以外の操作が 2 つ以上あるか
 //   needsJudgment 共通判定（2.3）に回す操作（導入済み・不明なリポジトリの、照会以外）
 //   undetermined needsJudgment のうち、対象を確定できなかった操作（理由は op.unresolved）
 //   passes       needsJudgment が空（通常の照会・未導入のリポジトリ・リポジトリ外）
+// classifyMcpCall(toolName, toolInput, cwd) は MCP ツールの呼び出しを同じ形（加えて scope・server・tool）で返す。
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { GH_TARGET_ENV, ghOperations, httpClientOperations, isGh, mcpOperations } from "./github-operations.mjs";
 import { enabledInRepo, git, loadConfig, repoRoot } from "./lib.mjs";
 
 const HOME = () => process.env.HOME ?? "/";
@@ -228,7 +233,9 @@ const SKIP_STARTS = new Set(["for", "case", "select", "fi", "done", "esac", "in"
 const FILE_READ_LIMIT = 1 << 20;
 const isGit = (v) => v === "git" || v.endsWith("/git");
 // 変更操作を示す語（コマンド名が展開で決まる場合に、git の変更とみなす目印）
-const MUTATING_WORDS = new Set(["push", "commit", "merge", "pull", "switch", "checkout", "branch", "rebase", "worktree", "cherry-pick"]);
+const MUTATING_WORDS = new Set(["push", "commit", "merge", "pull", "switch", "checkout", "branch", "rebase", "worktree", "cherry-pick", "api", "pr"]);
+// git・gh を含むスクリプトの手がかり
+const TOOLS_RE = /\b(git|gh)\b/;
 
 const READ_ONLY = new Set([
   "status", "log", "diff", "show", "blame", "grep", "ls-files", "ls-tree", "ls-remote", "rev-parse", "rev-list", "describe", "shortlog", "cat-file",
@@ -508,6 +515,7 @@ function classifyNested(script, ctx, depth, ops, withCwd = false) {
   classifyScript(script, inner, depth + 1, ops);
   ctx.dirty = ctx.dirty || inner.dirty;
   ctx.envTainted = ctx.envTainted || inner.envTainted;
+  ctx.ghTainted = ctx.ghTainted || inner.ghTainted;
   if (withCwd) ctx.cwd = inner.cwd;
 }
 
@@ -573,6 +581,7 @@ function handleCommand(words, ctx, depth, ops, info) {
   const assigns = [];
   while (k < words.length && !words[k].dyn && ASSIGN.test(words[k].v)) assigns.push(words[k++].v);
   if (assigns.some((a) => GIT_TARGET_ENV.test(a)) && k === words.length) ctx.envTainted = true;
+  if (assigns.some((a) => GH_TARGET_ENV.test(a)) && k === words.length) ctx.ghTainted = true;
   const rest = words.slice(k);
   if (!rest.length) return;
   const head = rest[0];
@@ -593,19 +602,29 @@ function handleCommand(words, ctx, depth, ops, info) {
   if (name === "popd") { ctx.cwd = null; return; }
   if (["export", "declare", "typeset", "readonly", "set", "unset"].includes(name)) {
     if (rest.slice(1).some((w) => GIT_TARGET_ENV.test(w.v) || /^(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR)$/.test(w.v))) ctx.envTainted = true;
+    if (rest.slice(1).some((w) => GH_TARGET_ENV.test(w.v) || /^(GH_REPO|GH_HOST)$/.test(w.v))) ctx.ghTainted = true;
     return;
   }
   if (isGit(name)) {
     ops.push(gitOp(rest.slice(1), ctx, assigns, envTarget));
     return;
   }
+  if (isGh(name)) {
+    pushGh(rest.slice(1), ctx, assigns, ops);
+    return;
+  }
+  if (["curl", "wget"].includes(basename(name))) {
+    const h = httpClientOperations(basename(name), rest.slice(1));
+    if (h) for (const o of h) ops.push(finishOp(o, ctx.cwd));
+    return;
+  }
   const unparse = (why) => ops.push(makeOp("unparseable", ctx.cwd, [why], {}));
-  const gitLike = (text) => /\bgit\b/.test(text);
+  const gitLike = (text) => TOOLS_RE.test(text);
   if (SHELLS.has(name)) {
     const cIdx = rest.findIndex((w, i) => i > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w.v));
     if (cIdx > 0 && rest[cIdx + 1]) {
       const script = rest[cIdx + 1];
-      if (script.dyn || depth >= MAX_DEPTH) { if (/\bgit\b/.test(script.v) || script.dyn) unparse("シェルに渡すスクリプトが展開で決まり、解釈できません。"); return; }
+      if (script.dyn || depth >= MAX_DEPTH) { if (TOOLS_RE.test(script.v) || script.dyn) unparse("シェルに渡すスクリプトが展開で決まり、解釈できません。"); return; }
       classifyNested(script.v, ctx, depth, ops);
       return;
     }
@@ -645,29 +664,47 @@ function handleCommand(words, ctx, depth, ops, info) {
     return;
   }
   if (name === "eval") {
-    if (rest.slice(1).some((w) => w.dyn) || depth >= MAX_DEPTH) { if (rest.slice(1).some((w) => w.dyn || /\bgit\b/.test(w.v))) unparse("eval の引数が展開で決まり、解釈できません。"); return; }
+    if (rest.slice(1).some((w) => w.dyn) || depth >= MAX_DEPTH) { if (rest.slice(1).some((w) => w.dyn || TOOLS_RE.test(w.v))) unparse("eval の引数が展開で決まり、解釈できません。"); return; }
     classifyNested(rest.slice(1).map((w) => w.v).join(" "), ctx, depth, ops, true);
     return;
   }
   if (WRAPPERS.has(name)) {
-    const gi = rest.findIndex((w, i) => i > 0 && isGit(w.v));
+    const gi = rest.findIndex((w, i) => i > 0 && (isGit(w.v) || isGh(w.v)));
     if (gi < 0) return;
+    const viaGh = isGh(rest[gi].v);
     const between = rest.slice(1, gi);
     if (name === "env" && between.some((w) => ["-C", "--chdir", "-S", "--split-string"].includes(w.v))) {
       ops.push(makeOp("unparseable", ctx.cwd, ["env が作業ディレクトリを変えるため、対象を確定できません。"], {}));
       return;
     }
     if (between.some((w) => !(w.v.startsWith("-") || /^\d+(\.\d+)?[smhd]?$/.test(w.v) || ASSIGN.test(w.v)))) {
-      ops.push(makeOp("unparseable", ctx.cwd, [`'${name}' 経由の git で、実行内容を確定できません。`], {}));
+      ops.push(makeOp("unparseable", ctx.cwd, [`'${name}' 経由の ${viaGh ? "gh" : "git"} で、実行内容を確定できません。`], {}));
       return;
     }
     const extra = between.filter((w) => ASSIGN.test(w.v)).map((w) => w.v);
+    if (viaGh) {
+      pushGh(rest.slice(gi + 1), ctx, [...assigns, ...extra], ops);
+      return;
+    }
     ops.push(gitOp(rest.slice(gi + 1), ctx, [...assigns, ...extra], envTarget || extra.some((a) => GIT_TARGET_ENV.test(a))));
     return;
   }
-  if (EXECUTORS.has(name) && rest.some((w, i) => i > 0 && isGit(w.v))) {
-    ops.push(makeOp("unparseable", ctx.cwd, [`'${name}' 経由の git は、対象を確定できません。`], {}));
+  if (EXECUTORS.has(name) && rest.some((w, i) => i > 0 && (isGit(w.v) || isGh(w.v)))) {
+    ops.push(makeOp("unparseable", ctx.cwd, [`'${name}' 経由の git・gh は、対象を確定できません。`], {}));
   }
+}
+
+// gh の操作を取り出して追加する
+function pushGh(args, ctx, assigns, ops) {
+  const c = { dir: ctx.cwd, assigns, tainted: !!ctx.ghTainted, markDirty: () => { ctx.dirty = true; }, markTainted: () => { ctx.ghTainted = true; } };
+  for (const o of ghOperations(args, c)) ops.push(finishOp(o, ctx.cwd));
+}
+
+// github-operations.mjs の結果を操作オブジェクトにする。作業ディレクトリが使えない書き込みは対象を確定できない
+function finishOp(o, dir) {
+  const un = [...o.unresolved];
+  if (o.kind !== "query" && usableDir(dir) === null) un.push(dir === null ? "作業ディレクトリを確定できません（cd や -C の先が展開・直前のディレクトリなど）。" : `作業ディレクトリ ${dir} が存在せず、対象を確定できません。`);
+  return makeOp(o.kind, dir, un, o.fields);
 }
 
 // 操作オブジェクトを作る。unresolved は対象を確定できなかった理由
@@ -821,7 +858,23 @@ export function classifyCommand(command, cwd) {
   const operations = [];
   if (typeof command !== "string" || typeof cwd !== "string") {
     operations.push(makeOp("unparseable", null, ["コマンドまたは作業ディレクトリが文字列ではなく、解釈できません。"], {}));
-  } else classifyScript(command, { cwd: resolve(cwd), dirty: false, envTainted: false }, 0, operations);
+  } else classifyScript(command, { cwd: resolve(cwd), dirty: false, envTainted: false, ghTainted: false }, 0, operations);
+  return summarize(operations);
+}
+
+/**
+ * MCP ツールの呼び出しを分類する（GitHub・Git 系の MCP の書き込みを識別する）。
+ * scope: github（GitHub・Git 系）| other-mcp（識別できない MCP）| not-mcp（MCP 以外）。
+ * other-mcp の操作は空で passes は真になる。導入検査（6.4）は scope から強制範囲外を報告できる。
+ */
+export function classifyMcpCall(toolName, toolInput, cwd) {
+  const dir = typeof cwd === "string" ? resolve(cwd) : null;
+  const r = mcpOperations(toolName, toolInput, dir);
+  const operations = r.operations.map((o) => finishOp(o, dir));
+  return { surface: "mcp", scope: r.scope, server: r.server, tool: r.tool, ...summarize(operations) };
+}
+
+function summarize(operations) {
   const changing = operations.filter((o) => o.kind !== "query");
   const needsJudgment = operations.filter((o) => o.kind !== "query" && !["outside", "unmanaged"].includes(o.repoState));
   const undetermined = needsJudgment.filter((o) => o.unresolved.length > 0);

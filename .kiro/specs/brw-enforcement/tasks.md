@@ -22,7 +22,7 @@
   - _Boundary: 操作判定_
   - _Depends: 1.1, 1.2_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.8_
-- [ ] 2.2 GitHub への書き込み経路を操作に変換する
+- [x] 2.2 GitHub への書き込み経路を操作に変換する
   - 対応する `gh` と MCP の書き込み入力から、対象ホスト・リポジトリと操作を識別する。
   - PR 作成の head・base と、マージ・自動マージ予約を区別する。対象不明、必須入力欠落、未対応の書き込みを判定に渡せる。
   - 未対応経路をフックで遮断できるか、導入検査向けに識別できる形にする。
@@ -216,3 +216,4 @@
 - 1.1: `classifyBranch`・`autoApproveOf`・`permanentBases` は lib.mjs に追加済みだが、既存の `judgeBranch` とフックの `autoApprovable` へは未配線。操作判定（2.3）とフック接続（6.1）で配線する。命名規則に合わない開発指定は宣言外として扱う。
 - 1.2: テスト補助は tests/support/ にある（git-fixture・hook-fixtures・fake-github）。偽 GitHub は `request(method, path, body)` 形式で routes は完全一致のみ。3.x でクライアントの注入点を決めるとき、必要ならアダプタや可変パス対応を足す。Codex のフック入力形は想定の fixture で、実機の形との一致は 8.4 で確認する。既存の自己テストは /tmp/brw-* を実行ごとに残す（既存の挙動で、1.2 の補助は残さない）。
 - 2.1: 操作の分類は scripts/operation-policy.mjs の `classifyCommand(command, cwd)`（結果を返すだけで brw.mjs へは未接続。既存の tokenize/splitCommand とは別の字句解析を持つため、2.3 か 6.x で統合を検討する）。確定できない・判定不能な変更は安全側（unresolved/unparseable）に倒す。残る限界: 別スクリプトや node/python/make 経由で git を呼ぶ場合は検出できない（導入診断で明示する）。READ_ONLY 扱いの reset・update-ref・symbolic-ref などローカルの ref を動かすサブコマンドは照会扱いのまま（2.3 以降で要判断）。`-c` の危険設定と引数に展開・ワイルドカードを含む fetch は過検出になりうる。
+- 2.2: GitHub 書き込みの識別は scripts/github-operations.mjs と operation-policy.mjs の `classifyCommand`・`classifyMcpCall(toolName, toolInput, cwd)`。新しい操作の種類は pr-create（head・base を持つ）・github-merge（ローカルの merge とは別）・auto-merge・unsupported-write（area・action・refWrite を持つ）。2.3 はこの名前に合わせる。GraphQL は対象を常に確定不能として返す。`other-mcp`（GitHub か判断できない MCP）は操作が空で通過するため、6.4 の導入検査が scope を見て強制範囲外と報告する。curl・wget は URL に github を含み書き込みオプションがあるものだけ識別する（GHES で URL に github を含まない場合は検出できない。導入診断で明示する）。`gh -R` で別リポジトリを指す場合、cwd が未導入だと通過する（git の -C と同じ扱い）。`GH_HOST` だけ指定した場合のホスト照合は 2.3 で注意する。
