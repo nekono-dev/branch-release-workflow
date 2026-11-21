@@ -1,9 +1,9 @@
-// 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）・公開計画の発行と検証（4.3）:
+// 完了公開の作業状態（brw-enforcement 4.1）と公開準備の確定（4.2）・公開計画の発行と検証（4.3）・push の実行と照合（4.4）:
 // 作業 ID の発行、同一 worktree の別作業の区別、中断と明示再開、操作別の結果と作業の禁止の保存、
-// 完了申告と取り込み先の確定（markReady）、許可された書き込みだけの計画（issuePlan・checkPlan）を扱う。
-// push の実行（4.4）、PR の作成（4.5）、フック接続（6.x）には踏み込まない。
-// GitHub へは通信しない（計画の発行も読み取りと状態の記録だけ）。既存 PR の検索結果と対象リポジトリ ID は、
-// 呼び出し側が GitHub クライアントで確認済みの値を受け取る。
+// 完了申告と取り込み先の確定（markReady）、許可された書き込みだけの計画（issuePlan・checkPlan）、
+// 計画どおりの push（runPush）を扱う。PR の作成（4.5）・フック接続（6.x）には踏み込まない。
+// GitHub の API へは通信しない（計画の発行は読み取りと状態の記録だけ。push と遠隔 ref の読み取りは git の通信で行う）。
+// 既存 PR の検索結果と対象リポジトリ ID は、呼び出し側が GitHub クライアントで確認済みの値を受け取る。
 // 外部依存なし（Node 標準ライブラリのみ）。
 //
 // 状態は worktree ごとに 1 つのファイルへ保存する（Git の共通ディレクトリ配下 brw/work/<worktree の識別子>.json）。
@@ -11,6 +11,7 @@
 // 同時に更新された・壊れている・読めない場合は安全側に倒す（新しい作業は始めず、禁止は維持されたものとして扱う）。
 // PR 本文・資格情報は保存しない。保存するのは決まった項目だけで、自由文は秘密らしい値を伏せて長さを制限する。
 import { randomBytes, createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { classifyBranch, configMatchesHead, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
@@ -565,6 +566,15 @@ export function checkPlan(cwd, workId, planId) {
   if (!file) return fail("invalidInput", "Git リポジトリの中で実行してください。");
   const { state, error } = load(file);
   if (error) return fail("conflict", error);
+  const v = verifyPlan(cwd, state, workId, planId);
+  return v.ok ? { ok: true, plan: v.plan } : v;
+}
+
+/**
+ * 読み込み済みの状態に対して計画の有効性を確認する（読み取りのみ）。checkPlan と runPush が共通で使う。
+ * 成功時は作業（w）・Git 上の確認値（g: branch・head・root）・計画（plan）を返す。
+ */
+function verifyPlan(cwd, state, workId, planId) {
   const w = state.works[workId];
   if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
   if (!w.plan || typeof planId !== "string" || w.plan.planId !== planId)
@@ -576,7 +586,203 @@ export function checkPlan(cwd, workId, planId) {
   for (const k of ["declaration", "restrictions", "ready", "destination"]) {
     if (current[k] !== stored[k]) return failC("conflict", `${k}-changed`, `計画の発行後に${({ declaration: "宣言", restrictions: "作業の禁止", ready: "公開の準備", destination: "push 先" })[k]}が変わったため、計画は失効しました。計画をし直してください。`);
   }
-  return { ok: true, plan: w.plan };
+  return { ok: true, w, g, plan: w.plan };
+}
+
+// ---- push の実行と照合（4.4） ----
+
+// 操作の結果を記録・返す際の文言。資格情報・URL・git の出力そのものは含めない
+const PUSH_MESSAGES = {
+  "work-restriction": "この作業では push が禁止されているため、push していません。",
+  "normal-approval": "push には通常の承認が必要なため、push していません。利用者の確認を経て個別に実行してください。",
+  "push-denied": "共通判定が push を拒否したため、push していません。",
+  "remote-unreadable": "遠隔の状態を読めないため、push していません。通信を確認して再実行してください。",
+  "push-rejected": "遠隔に別の commit があり push が拒否されました（non-fast-forward）。取り込みの状況を確認してください。",
+  "remote-rejected": "遠隔（フックやルールセット）が push を拒否しました。遠隔側の設定を確認してください。",
+  "push-failed": "push に失敗しました。",
+  "remote-mismatch": "push の後、遠隔の ref が準備時の OID と一致しません。",
+  "already-published": "同じ OID が遠隔に公開済みのため、push せず成功扱いにしました。",
+};
+
+/** git の子プロセスに渡す環境変数。資格情報の対話入力で止まらないようにし、git の出力言語を固定して拒否の判定文字列を安定させる。 */
+const pushEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" });
+
+/**
+ * 遠隔の対象ブランチの OID を読む（読み取りのみ）。通信できなければ error、ref が無ければ oid: null。
+ * 資格情報や URL は読まず返さない（リモート名だけで照会する）。
+ */
+function remoteOidOf(cwd, remote, branch) {
+  const r = spawnSync("git", ["ls-remote", remote, `refs/heads/${branch}`], { cwd, encoding: "utf8", env: pushEnv(), stdio: ["ignore", "pipe", "ignore"], timeout: 120_000 });
+  if (r.error || r.status !== 0) return { error: true, oid: null };
+  const hit = String(r.stdout ?? "").split("\n").map((l) => l.trim().split(/\s+/)).find((p) => p[1] === `refs/heads/${branch}`);
+  return { error: false, oid: hit ? hit[0].toLowerCase() : null };
+}
+
+/**
+ * push の前の確認（読み取りのみ）。対象リポジトリ・push 先の GitHub リポジトリ・登録済み宣言・開発ブランチの分類を見る。
+ * 成功時は push に使うリモート名を返す。
+ */
+function pushPreflight(cwd, g, w, repository) {
+  const remote = remoteNameOf(cwd, g.branch);
+  if (!SAFE_REMOTE_NAME.test(remote) || !SAFE_BRANCH.test(g.branch))
+    return failC("invalidInput", "name-unsafe", "リモート名またはブランチ名を安全に確認できないため、push しません。");
+  if (w.ready.repositoryId !== repository.id) return failC("invalidInput", "destination-mismatch", "準備時の対象リポジトリ ID と一致しません。");
+  // push 先は Git が実際に使う URL（insteadOf の展開後）で確認する
+  const dest = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
+  if (!dest) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+  if (dest.owner.toLowerCase() !== repository.owner.toLowerCase() || dest.name.toLowerCase() !== repository.name.toLowerCase())
+    return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
+  const loaded = loadConfig(g.root);
+  if (loaded.error || !loaded.config) return failC("conflict", "declaration-invalid", loaded.error ?? "宣言ファイルがありません。規則を確認できないため push しません。");
+  if (classifyBranch(loaded.config, g.branch) !== "development") return failC("conflict", "branch-not-development", `'${g.branch}' は開発ブランチではないため、push しません。`);
+  return { ok: true, remote };
+}
+
+/**
+ * push の可否を判定する（読み取りのみ）。
+ * 禁止（作業の制限）・判定の拒否・通常確認待ち・実行（確認省略による自動 / 通常確認を経た個別）のどれかを返す。
+ * push は固定の形（<OID>:refs/heads/<ブランチ>）のコマンドとして共通判定に渡し、実行するものと同じ内容を判定する。
+ */
+function decidePush(cwd, w, g, remote, confirmed) {
+  const restrictions = restrictionsOf(w);
+  if (restrictions.noPush) return { kind: "prohibited" };
+  const d = evaluateAll(classifyCommand(`git push ${remote} ${g.head}:refs/heads/${g.branch}`, cwd), restrictions);
+  if (d.approval === "prohibited") return { kind: "prohibited" };
+  if (d.verdict === "deny" || d.compliance !== "compliant") return { kind: "denied", code: CODE.test(d.code) ? d.code : "push-denied" };
+  if (d.verdict === "eligibleForApproval") return { kind: "proceed", execution: "auto" };
+  if (confirmed) return { kind: "proceed", execution: "confirmed" };
+  return { kind: "needsApproval" };
+}
+
+/** 確認省略で push するときは、計画にその push（リモート・ref・OID）が含まれていなければならない。計画に無い書き込みは行わない。 */
+const plannedPush = (plan, g, w, remote) => (plan.writes ?? []).some((x) => x.operation === "push" && x.remote === remote && x.ref === w.ready.pushRef && x.oid === g.head);
+
+/** 判定の結果を、記録する操作別の結果（outcome・code）に写す。 */
+const outcomeOf = (d) => {
+  if (d.kind === "prohibited") return { outcome: "prohibited", code: "work-restriction" };
+  if (d.kind === "needsApproval") return { outcome: "needsApproval", code: "normal-approval" };
+  return { outcome: "failed", code: d.code };
+};
+
+/** 呼び出し側へ返す結果。failed だけ ok:false（error に判別の code と文言）。 */
+function pushResult(outcome, code) {
+  if (outcome === "failed") return { ok: false, outcome, error: { kind: "conflict", code, message: PUSH_MESSAGES[code] ?? "push を行えませんでした。" } };
+  return { ok: true, outcome, code };
+}
+
+/** 操作の結果を記録してから返す（記録は状態ロックを取る recordResult で行う）。記録に失敗したら、その失敗を返す。 */
+function finish(cwd, workId, { outcome, code, lockWaitMs }) {
+  const rec = recordResult(cwd, workId, "push", { outcome, code }, { lockWaitMs });
+  if (!rec.ok) return rec;
+  return pushResult(outcome, code);
+}
+
+/** 成功（遠隔の ref が準備時の OID を指す）を記録し、作業を pushed にする。記録できなかった場合は recorded: false で知らせる。 */
+function finishSuccess(cwd, workId, { execution, oid, lockWaitMs }) {
+  const code = execution === "auto" ? null : execution;
+  // 結果の記録と「準備済み → pushed」の遷移を 1 回の状態ロックで行い、片方だけ残らないようにする
+  const rec = update(cwd, (state) => {
+    const w = state.works[workId];
+    if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
+    w.results = w.results && typeof w.results === "object" ? w.results : {};
+    w.results.push = { outcome: "success", code };
+    if (w.status === "ready") w.status = "pushed";
+    w.updatedAt = now();
+    return { ok: true, work: w };
+  }, { lockWaitMs });
+  return { ok: true, outcome: "success", execution, oid, recorded: rec.ok };
+}
+
+/**
+ * 計画どおりに push を行い、遠隔の ref が準備時の OID になったことを読み取りで確かめる。
+ * 順序: (1) 計画・対象・宣言の確認（副作用なし） → (2) 判定と遠隔の現在の OID（既に同じ OID なら push せず成功扱い）
+ *       → (3) 状態ロック内で計画・制限・判定を取り直し、操作の開始を記録 → (4) 通常 push（OID を明示）→ (5) 遠隔の ref を読んで照合。
+ * 同じ worktree の公開は runPush の外側のロックで直列化する。通信中は状態ロックを保持しない。
+ * 強制 push・削除・ref の glob は使わない（refspec は <OID>:refs/heads/<ブランチ> の 1 つだけ）。
+ * @param {{planId: string, repository: {id: number, owner: string, name: string}, confirmed?: boolean, lockWaitMs?: number}} opts
+ *   confirmed は、利用者が通常の承認を与えたときだけ true（判定が通常確認待ちの push を個別に実行する）。
+ * @returns 成功・禁止による省略・通常確認待ち・失敗を outcome で返す。計画・対象の不一致など副作用の前の拒否は ok:false（記録しない）。
+ */
+export function runPush(cwd, workId, { planId, repository, confirmed = false, lockWaitMs } = {}) {
+  const bad = idError(workId);
+  if (bad) return bad;
+  if (typeof confirmed !== "boolean") return failC("invalidInput", "confirmed-invalid", "通常確認の有無は真偽値で指定してください。");
+  if (!repository || typeof repository !== "object" || !Number.isSafeInteger(repository.id) || repository.id <= 0 || !NAME_PART.test(repository.owner ?? "") || !NAME_PART.test(repository.name ?? ""))
+    return failC("invalidInput", "repository-invalid", "対象リポジトリの ID（正の整数）・所有者・名前を指定してください。");
+  const file = stateFileOf(cwd);
+  if (!file) return fail("invalidInput", "Git リポジトリの中で実行してください。");
+  mkdirSync(dirname(file), { recursive: true });
+  // 同じ worktree の公開を 1 つずつにする。状態ロックは短く保ち、push の通信中もこのロックだけは保持する
+  const runLock = `${file}.run.lock`;
+  if (!acquire(runLock, lockWaitMs ?? 3000)) return failC("conflict", "publish-busy", "この worktree で別の公開が実行中です。終わってからやり直してください。");
+  try {
+    return pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWaitMs });
+  } finally {
+    rmSync(runLock, { force: true });
+  }
+}
+
+function pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWaitMs }) {
+  // (1)(2) 副作用の前の確認（読み取りのみ）
+  const loaded = load(file);
+  if (loaded.error) return fail("conflict", loaded.error);
+  const v = verifyPlan(cwd, loaded.state, workId, planId);
+  if (!v.ok) return v;
+  const pre = pushPreflight(cwd, v.g, v.w, repository);
+  if (!pre.ok) return pre;
+  const d = decidePush(cwd, v.w, v.g, pre.remote, confirmed);
+  if (d.kind === "denied") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
+
+  const { head, branch } = v.g;
+  const before = remoteOidOf(cwd, pre.remote, branch);
+  // 既に同じ OID が遠隔にあれば push は要らない（禁止の作業でも、PR 側の処理は進めてよい）
+  if (!before.error && before.oid === head) return finishSuccess(cwd, workId, { execution: "already-published", oid: head, lockWaitMs });
+  if (d.kind === "prohibited") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
+  if (d.kind === "needsApproval") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
+  if (before.error) return finish(cwd, workId, { outcome: "failed", code: "remote-unreadable", lockWaitMs });
+  if (d.execution === "auto" && !plannedPush(v.plan, v.g, v.w, pre.remote))
+    return failC("conflict", "plan-push-missing", "計画に push が含まれていないため、push していません。公開の計画をし直してください。");
+
+  // (3) 操作の開始を状態ロック内で記録する。直前に計画・制限・判定を取り直し、変わっていれば実行しない（開始後は取り消せない）
+  const started = update(cwd, (state) => {
+    const v2 = verifyPlan(cwd, state, workId, planId);
+    if (!v2.ok) return v2;
+    const pre2 = pushPreflight(cwd, v2.g, v2.w, repository);
+    if (!pre2.ok) return pre2;
+    const d2 = decidePush(cwd, v2.w, v2.g, pre2.remote, confirmed);
+    if (d2.kind !== "proceed") {
+      const stop = outcomeOf(d2);
+      v2.w.results = v2.w.results && typeof v2.w.results === "object" ? v2.w.results : {};
+      v2.w.results.push = { outcome: stop.outcome, code: stop.code };
+      v2.w.updatedAt = now();
+      return { ok: true, stop };
+    }
+    if (d2.execution === "auto" && !plannedPush(v2.plan, v2.g, v2.w, pre2.remote))
+      return failC("conflict", "plan-push-missing", "計画に push が含まれていないため、push していません。公開の計画をし直してください。");
+    const prior = v2.w.started && typeof v2.w.started === "object" ? v2.w.started : {};
+    v2.w.started = { ...prior, push: { at: now(), oid: v2.g.head, execution: d2.execution } };
+    v2.w.updatedAt = now();
+    return { ok: true, proceed: d2, remote: pre2.remote, head: v2.g.head };
+  }, { lockWaitMs });
+  if (!started.ok) return started;
+  if (started.stop) return pushResult(started.stop.outcome, started.stop.code);
+
+  // (4) 通常の push。OID は状態ロック内で確認した値（started.head）を使い、refspec は 1 つだけ（強制・削除・glob は使わない）。
+  // タグ・サブモジュールは対象外にして、この push の範囲を明示の ref に限る
+  const pushHead = started.head;
+  const p = spawnSync("git", ["push", "--no-follow-tags", "--no-recurse-submodules", started.remote, `${pushHead}:refs/heads/${branch}`], { cwd, encoding: "utf8", env: pushEnv(), stdio: ["ignore", "ignore", "pipe"], timeout: 600_000 });
+
+  // (5) 遠隔の ref を読んで照合する（応答が無くても、遠隔が同じ OID なら成功として扱う）
+  const after = remoteOidOf(cwd, started.remote, branch);
+  if (!after.error && after.oid === pushHead) return finishSuccess(cwd, workId, { execution: started.proceed.execution, oid: pushHead, lockWaitMs });
+  // 分岐（non-fast-forward・fetch first）と、遠隔のフック・ルールセットによる拒否を区別する
+  const text = String(p.stderr ?? "");
+  const code = after.error ? "remote-unreadable"
+    : p.status === 0 ? "remote-mismatch"
+      : /non-fast-forward|fetch first/.test(text) ? "push-rejected"
+        : /remote rejected|hook declined|pre-receive|update hook/.test(text) ? "remote-rejected"
+          : "push-failed";
+  return finish(cwd, workId, { outcome: "failed", code, lockWaitMs });
 }
 
 /** 作業 1 件を読む。 */
