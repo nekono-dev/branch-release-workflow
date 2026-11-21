@@ -208,6 +208,22 @@ export const parseGhInclude = (text) => {
   return { status: Number(m[1]), body: raw ? body : undefined };
 };
 
+/** 応答から結果に残すヘッダーの許可リスト。トークン種別の判別（classic・OAuth は x-oauth-scopes を返す）に使う項目だけ。 */
+const KEPT_HEADERS = ["x-oauth-scopes"];
+/** `gh api --include` の出力から許可リストのヘッダーだけを取り出す（小文字の名前）。資格情報は含まれない。 */
+export const pickHeaders = (text) => {
+  const split = text.search(/\r?\n\r?\n/);
+  const head = split < 0 ? text : text.slice(0, split);
+  const out = {};
+  for (const line of head.split(/\r?\n/).slice(1)) {
+    const i = line.indexOf(":");
+    if (i <= 0) continue;
+    const name = line.slice(0, i).trim().toLowerCase();
+    if (KEPT_HEADERS.includes(name)) out[name] = line.slice(i + 1).trim();
+  }
+  return out;
+};
+
 /** 既定の通信層。`gh api` を呼ぶ。テストでは偽の層を渡す。 */
 export const ghTransport = ({ ghPath = "gh", timeoutMs = 30000, baseEnv } = {}) => ({ method, path, body, host, credential }) => new Promise((resolve, reject) => {
   const args = ["api", "--include", "--method", method, "--hostname", host, "-H", "Accept: application/vnd.github+json", path];
@@ -223,7 +239,7 @@ export const ghTransport = ({ ghPath = "gh", timeoutMs = 30000, baseEnv } = {}) 
   child.on("error", (e) => finish(reject, Object.assign(new Error(`gh を実行できない: ${e.code ?? e.message}`), { code: e.code ?? "ESPAWN" })));
   child.on("close", () => {
     const parsed = parseGhInclude(out);
-    if (parsed) finish(resolve, parsed);
+    if (parsed) finish(resolve, { ...parsed, headers: pickHeaders(out) });
     else finish(reject, Object.assign(new Error(`gh の応答を解釈できない: ${err.trim().split("\n")[0] ?? ""}`), { code: "EGHPARSE" }));
   });
   child.stdin.on("error", () => {});
@@ -255,7 +271,7 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     if (!res || !Number.isInteger(res.status)) return { ok: false, kind: "server", reason: "応答の形式が不正", calledTo: called, outcomeUnknown: !READ_METHODS.includes(method) };
     const kind = classify(res.status);
     if (kind) return { ok: false, kind, status: res.status, reason: redact(res.body?.message ?? `HTTP ${res.status}`), calledTo: called, ...(!READ_METHODS.includes(method) && writeMayHaveApplied(res.status) ? { outcomeUnknown: true } : {}) };
-    return { ok: true, status: res.status, body: res.body, calledTo: called };
+    return { ok: true, status: res.status, body: res.body, headers: res.headers ?? {}, calledTo: called };
   };
 
   let request;
@@ -265,7 +281,11 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     /** 認証が通るかを読み取りだけで確認する（トークンの値は返さない）。 */
     async checkAuth() {
       const r = await send("GET", "/user", undefined, { host: pinnedHost, method: "GET", path: "/user" });
-      return r.ok ? { ok: true, status: r.status, login: typeof r.body?.login === "string" ? r.body.login : null, calledTo: r.calledTo } : r;
+      if (!r.ok) return r;
+      // x-oauth-scopes は classic・OAuth のトークンだけが返す。ヘッダーがなければ null（fine-grained・App など）
+      const raw = r.headers?.["x-oauth-scopes"];
+      const scopes = typeof raw === "string" ? raw.split(",").map((x) => x.trim()).filter(Boolean) : null;
+      return { ok: true, status: r.status, login: typeof r.body?.login === "string" ? r.body.login : null, scopes, calledTo: r.calledTo };
     },
 
     /**

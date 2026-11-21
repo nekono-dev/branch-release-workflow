@@ -27,7 +27,7 @@ export const createFakeGitHub = ({ scenario = "success", routes = {} } = {}) => 
       if (!route) return { status: 404, body: { message: "Not Found" } };
       if (write) applied.push({ method: m, path, body });
       if (write && scenario === "lost") throw Object.assign(new Error("応答が途中で切れた"), { code: "ECONNRESET" });
-      return { status: route.status, body: route.body };
+      return { status: route.status, body: route.body, headers: route.headers ?? {} };
     },
   };
   return fake;

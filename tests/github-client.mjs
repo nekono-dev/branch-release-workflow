@@ -2,7 +2,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createGitHubSession, ghEnv, ghTransport, parseGhInclude } from "../scripts/github-client.mjs";
+import { createGitHubSession, ghEnv, ghTransport, parseGhInclude, pickHeaders } from "../scripts/github-client.mjs";
 import { createFakeGitHub } from "./support/fake-github.mjs";
 
 const TOKEN = "ghp_SECRETSECRETSECRET1234567890";
@@ -283,6 +283,10 @@ export const runGithubClientChecks = async (eq) => {
     [e2.GH_HOST, e2.GH_ENTERPRISE_TOKEN, e2.GH_TOKEN],
     [e3.GH_HOST, e3.GH_TOKEN, e3.GITHUB_TOKEN],
   ], [["github.com", TOKEN, undefined, undefined, undefined, "/h"], ["ghe.example.com", TOKEN, undefined], ["github.com", undefined, undefined]]);
+  eq("client/3.1 応答ヘッダーは許可リスト（x-oauth-scopes）だけを残す", pickHeaders("HTTP/2.0 200 OK\r\nX-OAuth-Scopes: repo, workflow\r\nSet-Cookie: a=b\r\n\r\n{}"), { "x-oauth-scopes": "repo, workflow" });
+  const scopesFake = createGitHubSession({ host: "github.com", token: TOKEN, transport: viaFake(createFakeGitHub({ routes: { "GET /user": { status: 200, body: { login: "u" }, headers: { "x-oauth-scopes": "public_repo" } } } })) });
+  const sc = await scopesFake.checkAuth();
+  eq("client/3.1 認証確認はスコープのヘッダーを載せ、ヘッダーがなければ null にする", [sc.scopes, JSON.stringify(sc).includes(TOKEN)], [["public_repo"], false]);
   eq("client/3.1 gh api の出力から状態と本文を取り出す", [
     parseGhInclude('HTTP/2.0 201 Created\r\nContent-Type: application/json\r\n\r\n{"number":3}\n'),
     parseGhInclude("HTTP/2.0 204 No Content\r\nX: y\r\n\r\n"),
