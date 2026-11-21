@@ -1,7 +1,7 @@
 // GitHub クライアントの土台（brw-enforcement 3.1）。
 // 対象のホスト・リポジトリ ID を GitHub の応答で照合し、設定用の認証を導入処理の間だけ固定する。
 // 認証の失敗・権限不足・不明な入力・通信エラーを区別し、資格情報（トークン）は結果にもエラーにも出さない。
-// PR の検索・取得・作成（3.2）はこの土台の `request` の上に実装する。Ruleset の照会（3.3）は別タスクで足す。
+// PR の検索・取得・作成（3.2）と、Ruleset・実効ルールの照会と追加（3.3）はこの土台の上に実装する。
 // 外部依存なし（Node 標準ライブラリのみ）。
 import { spawn } from "node:child_process";
 
@@ -17,11 +17,14 @@ const normHost = (h) => {
 };
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
 
-/** 書き込みを許す経路。マージ・自動マージ・ref 更新など、これ以外の書き込みはクライアントが拒否する。 */
+/** 公開の `request` で書き込みを許す経路。マージ・自動マージ・ref 更新など、これ以外の書き込みはクライアントが拒否する。 */
 const WRITE_ROUTES = [
   { method: "POST", re: /^\/repos\/[^/?]+\/[^/?]+\/pulls$/ },
-  { method: "POST", re: /^\/repos\/[^/?]+\/[^/?]+\/rulesets$/ },
 ];
+/** Ruleset の追加は本文を検証する専用の関数（createRuleset）だけが送れる。公開の `request` では送れない。 */
+const RULESET_CREATE_ROUTE = { method: "POST", re: /^\/repos\/[^/?]+\/[^/?]+\/rulesets$/ };
+/** ref 名を %2F にした実効ルールの読み取り経路。この形に限り、専用の関数だけが % を含むパスを送れる。 */
+const BRANCH_RULES_PATH = /^\/repos\/[^/?]+\/[^/?]+\/rules\/branches\/[A-Za-z0-9_][A-Za-z0-9._-]*(?:%2F[A-Za-z0-9_][A-Za-z0-9._-]*)*\?per_page=100&page=[1-9]\d{0,2}$/;
 const READ_METHODS = ["GET", "HEAD"];
 // 認証確認だけは対象リポジトリに紐づかない読み取りを許す
 const TARGETLESS_READS = ["/user"];
@@ -57,6 +60,70 @@ const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 /** ブランチ名として安全な形か。クエリや本文にそのまま入れても意味が変わらない文字だけを許す。 */
 const okRef = (r) => typeof r === "string" && r.length <= 200 && REF.test(r) && !r.startsWith("/") && !r.startsWith("-") && !r.endsWith("/") && !r.endsWith(".lock") && !r.includes("//") && !r.includes("..");
 const okNumber = (n) => Number.isSafeInteger(n) && n > 0;
+/** ブランチ名（refs/ を含まない）として安全か。% エンコード後も別のパスに解釈されない形に限る。 */
+const okBranch = (r) => okRef(r) && !r.startsWith("refs/") && r.split("/").every((seg) => /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(seg));
+
+const PAGE_SIZE = 100;
+const MAX_PAGES = 50;
+const RULE_TYPE = /^[a-z_]+$/;
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const strOrNull = (v) => (typeof v === "string" ? v : null);
+
+/** 追加する Ruleset の本文を検査する。バイパスなし・有効・完全な ref 指定のものだけを通す。通れば null、だめなら理由。 */
+const badRulesetBody = (b) => {
+  if (!isObj(b)) return "Ruleset の本文が JSON オブジェクトではない";
+  const extra = Object.keys(b).filter((k) => !["name", "target", "enforcement", "bypass_actors", "conditions", "rules"].includes(k));
+  if (extra.length) return `Ruleset の本文に未対応の項目がある: ${extra.join(",")}`;
+  if (typeof b.name !== "string" || b.name.trim() === "" || b.name.length > 100 || /[\u0000-\u001f\u007f]/.test(b.name)) return "Ruleset の名前が不正";
+  if (b.target !== "branch") return "Ruleset の target は branch に限る";
+  if (b.enforcement !== "active") return "Ruleset の enforcement は active に限る";
+  if (!Array.isArray(b.bypass_actors) || b.bypass_actors.length !== 0) return "bypass_actors は空の配列に限る（バイパスを許さない）";
+  const c = b.conditions;
+  if (!isObj(c) || Object.keys(c).some((k) => k !== "ref_name") || !isObj(c.ref_name)) return "conditions は ref_name だけを持つ必要がある";
+  if (Object.keys(c.ref_name).some((k) => !["include", "exclude"].includes(k))) return "ref_name に未対応の項目がある";
+  const inc = c.ref_name.include;
+  if (!Array.isArray(inc) || inc.length === 0 || inc.some((x) => typeof x !== "string" || !x.startsWith("refs/heads/") || !okBranch(x.slice("refs/heads/".length)))) return "ref_name.include は完全な refs/heads/<ブランチ名> に限る（ワイルドカード・全ブランチは不可）";
+  if (c.ref_name.exclude !== undefined && !(Array.isArray(c.ref_name.exclude) && c.ref_name.exclude.length === 0)) return "ref_name.exclude は空に限る";
+  if (!Array.isArray(b.rules) || b.rules.length === 0) return "rules が空";
+  for (const r of b.rules) {
+    if (!isObj(r) || typeof r.type !== "string" || !RULE_TYPE.test(r.type) || Object.keys(r).some((k) => !["type", "parameters"].includes(k)) || (r.parameters !== undefined && !isObj(r.parameters))) return "rules の項目が不正";
+  }
+  return null;
+};
+
+/** 応答の Ruleset を内部表現にそろえる。バイパス情報がない場合は bypassActors を null（確認不能）にする。 */
+const parseRuleset = (b) => ({
+  id: b.id,
+  name: strOrNull(b.name),
+  target: strOrNull(b.target),
+  enforcement: strOrNull(b.enforcement),
+  sourceType: strOrNull(b.source_type),
+  source: strOrNull(b.source),
+  conditions: isObj(b.conditions) ? b.conditions : null,
+  rules: Array.isArray(b.rules) ? b.rules : null,
+  bypassActors: Array.isArray(b.bypass_actors) ? b.bypass_actors : null,
+  bypassInfo: Array.isArray(b.bypass_actors) ? "present" : "missing",
+});
+
+/** 作成された Ruleset が要求と一致するか。差異の項目名を返す（空なら一致）。 */
+const rulesetDifferences = (r, sent, ctx) => {
+  const d = [];
+  if (r.name !== sent.name) d.push("名前が異なる");
+  if (r.target !== "branch") d.push("target が branch ではない");
+  if (r.enforcement !== "active") d.push("enforcement が active ではない");
+  if (r.sourceType !== null && r.sourceType !== "Repository") d.push("所有元の種類がリポジトリではない");
+  if (r.source !== null && !same(r.source, `${ctx.owner}/${ctx.name}`)) d.push("所有元が対象リポジトリと異なる");
+  if (r.bypassActors === null) d.push("バイパス情報が応答にない");
+  else if (r.bypassActors.length) d.push("バイパスが設定されている");
+  const inc = r.conditions?.ref_name?.include;
+  const want = [...sent.conditions.ref_name.include].sort();
+  if (!(Array.isArray(inc) && JSON.stringify([...inc].sort()) === JSON.stringify(want))) d.push("適用対象の ref が異なる");
+  const ex = r.conditions?.ref_name?.exclude;
+  if (Array.isArray(ex) && ex.length) d.push("除外対象がある");
+  const types = Array.isArray(r.rules) ? r.rules.map((x) => x?.type).sort() : null;
+  if (JSON.stringify(types) !== JSON.stringify(sent.rules.map((x) => x.type).sort())) d.push("ルールの種類が異なる");
+  return d;
+};
 
 /** 期待する PR の指定（head・base の ref と head の OID、必要なら head のリポジトリ）を検査する。 */
 const badExpect = (e, requireOid = true) => {
@@ -229,9 +296,15 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
      */
     request: (...a) => request(...a),
   };
-  request = async (target, method, path, body) => {
+  request = (target, method, path, body) => dispatch(target, method, path, body, {});
+  /**
+   * 要求の共通処理。opts は専用の関数だけが指定する内部の許可。
+   * opts.branchRules: ref 名を %2F にした実効ルールの読み取りパスを許す（形を厳密に検査する）。
+   * opts.rulesetCreate: 検証済みの本文による Ruleset 追加を許す。
+   */
+  const dispatch = async (target, method, path, body, opts) => {
     const m = String(method ?? "").toUpperCase();
-    const badP = badPath(path);
+    const badP = opts.branchRules ? (m === "GET" && BRANCH_RULES_PATH.test(path) ? null : "実効ルールのパスの形が不正") : badPath(path);
     if (badP) return refuse("refused", badP);
     const [pathOnly] = path.split("?");
     const write = !READ_METHODS.includes(m);
@@ -247,7 +320,8 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     if (!inScope) return refuse("target-mismatch", "パスが対象リポジトリの配下ではない");
     if (!READ_METHODS.includes(m) && !write) return refuse("refused", "未対応のメソッド");
     if (write) {
-      if (!WRITE_ROUTES.some((r) => r.method === m && r.re.test(pathOnly))) return refuse("refused", "この書き込み経路は公開していない");
+      const routes = opts.rulesetCreate ? [...WRITE_ROUTES, RULESET_CREATE_ROUTE] : WRITE_ROUTES;
+      if (!routes.some((r) => r.method === m && r.re.test(pathOnly))) return refuse("refused", "この書き込み経路は公開していない");
       const id = confirmed.get(keyOf(target));
       if (id === undefined) return refuse("refused", "対象のリポジトリ ID を照合する前は書き込めない");
       if (target.repositoryId && target.repositoryId !== id) return refuse("target-mismatch", "対象のリポジトリ ID が照合済みの ID と異なる");
@@ -323,6 +397,129 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     const d = pullDifferences(r.body, input, ctx);
     if (!d.length) return { ok: true, status: r.status, created: true, pull: summarize(r.body), calledTo: r.calledTo };
     return mismatch("作成された PR が期待と一致しない", d, { created: true, createdUrl: typeof r.body.html_url === "string" ? r.body.html_url : undefined, createdNumber: r.body.number, reconcile: false, calledTo: r.calledTo });
+  };
+  /** 読み取り・追加の前提となる、照合済みの対象 ID を確定する。通信はしない。 */
+  const confirmedId = (target) => {
+    const bad = badTarget(target);
+    if (bad) return { fail: refuse("refused", bad) };
+    if (normHost(target.host) !== pinnedHost) return { fail: refuse("target-mismatch", `対象のホスト ${normHost(target.host)} が固定済みのホストと異なる`) };
+    const id = confirmed.get(keyOf(target));
+    if (id === undefined) return { fail: refuse("refused", "対象のリポジトリ ID を照合する前は照会できない") };
+    if (target.repositoryId && target.repositoryId !== id) return { fail: refuse("target-mismatch", "対象のリポジトリ ID が照合済みの ID と異なる") };
+    return { id };
+  };
+  const repoBase = (t) => `/repos/${t.owner}/${t.name}`;
+
+  /**
+   * ページング付きの一覧を最後まで取得する。途中の失敗・形式不正・上限超過は一部だけを成功として返さない。
+   * pathFor(page) が各ページのパス、parse(item) が 1 件の検証（文字列ならその理由で失敗）。
+   */
+  const collect = async (target, pathFor, parse, opts, label) => {
+    const items = [];
+    const seen = new Set();
+    let calledTo;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const r = await dispatch(target, "GET", pathFor(page), undefined, opts);
+      if (!r.ok) return r;
+      calledTo = r.calledTo;
+      if (!Array.isArray(r.body)) return refuse("unknown-input", `${label}の応答が一覧ではない`, calledTo);
+      for (const raw of r.body) {
+        const v = parse(raw);
+        if (typeof v === "string") return refuse("unknown-input", `${label}の項目が不正: ${v}`, calledTo);
+        const key = v.key;
+        if (seen.has(key)) return refuse("unknown-input", `${label}に重複した項目がある`, calledTo);
+        seen.add(key);
+        items.push(v.value);
+      }
+      if (r.body.length < PAGE_SIZE) return { ok: true, status: r.status, items, calledTo };
+    }
+    return refuse("unknown-input", `${label}のページ数が上限を超え、全件を確認できない`, calledTo);
+  };
+
+  /** リポジトリ設定（squash 可否・公開範囲・権限情報）を取得する。応答にない項目は null（確認不能）で返す。 */
+  session.getRepositorySettings = async (target) => {
+    const { id, fail } = confirmedId(target);
+    if (fail) return fail;
+    const r = await request(target, "GET", repoBase(target));
+    if (!r.ok) return r;
+    const b = r.body;
+    if (!isObj(b) || !Number.isInteger(b.id) || typeof b.full_name !== "string") return refuse("unknown-input", "リポジトリ情報の応答にリポジトリ ID または名前がない", r.calledTo);
+    if (b.id !== id || !same(b.full_name, `${target.owner}/${target.name}`)) return refuse("target-mismatch", "応答のリポジトリが照合済みの対象と異なる", r.calledTo);
+    return {
+      ok: true,
+      status: r.status,
+      settings: {
+        repositoryId: b.id,
+        fullName: b.full_name,
+        visibility: strOrNull(b.visibility),
+        private: typeof b.private === "boolean" ? b.private : null,
+        allowSquashMerge: typeof b.allow_squash_merge === "boolean" ? b.allow_squash_merge : null,
+        defaultBranch: strOrNull(b.default_branch),
+        permissions: isObj(b.permissions) ? b.permissions : null,
+      },
+      calledTo: r.calledTo,
+    };
+  };
+
+  /** 親ルール（組織など）を含む Ruleset の一覧を全ページ取得する。空の一覧は ok で空配列、取得できない場合は失敗で返す。 */
+  session.listRulesets = async (target) => {
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const r = await collect(target, (p) => `${repoBase(target)}/rulesets?includes_parents=true&per_page=${PAGE_SIZE}&page=${p}`, (x) => {
+      if (!isObj(x) || !okNumber(x.id)) return "ID がない";
+      const v = parseRuleset(x);
+      return { key: v.id, value: { id: v.id, name: v.name, target: v.target, enforcement: v.enforcement, sourceType: v.sourceType, source: v.source } };
+    }, {}, "Ruleset 一覧");
+    return r.ok ? { ok: true, status: r.status, rulesets: r.items, calledTo: r.calledTo } : r;
+  };
+
+  /** Ruleset の詳細を取得する。バイパス情報がなければ bypassActors は null・bypassInfo は "missing"（確認不能）。 */
+  session.getRuleset = async (target, rulesetId) => {
+    if (!okNumber(rulesetId)) return refuse("refused", "Ruleset の ID が不正");
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const r = await request(target, "GET", `${repoBase(target)}/rulesets/${rulesetId}?includes_parents=true`);
+    if (!r.ok) return r;
+    if (!isObj(r.body) || !okNumber(r.body.id)) return refuse("unknown-input", "Ruleset 詳細の応答に ID がない", r.calledTo);
+    if (r.body.id !== rulesetId) return refuse("target-mismatch", "応答の Ruleset ID が要求と異なる", r.calledTo);
+    return { ok: true, status: r.status, ruleset: parseRuleset(r.body), calledTo: r.calledTo };
+  };
+
+  /**
+   * 対象ブランチの実効ルール（親ルール由来を含む）を全ページ取得する。
+   * ref 名は検査したうえでクライアントが %2F にエンコードして組み立てる。呼び出し側がエンコード済みの文字列を渡すことはできない。
+   */
+  session.getBranchRules = async (target, branch) => {
+    if (!okBranch(branch)) return refuse("refused", "ブランチ名が不正");
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const enc = branch.split("/").map(encodeURIComponent).join("%2F");
+    const r = await collect(target, (p) => `${repoBase(target)}/rules/branches/${enc}?per_page=${PAGE_SIZE}&page=${p}`, (x) => {
+      if (!isObj(x) || typeof x.type !== "string" || !RULE_TYPE.test(x.type) || !okNumber(x.ruleset_id)) return "種類または出所の Ruleset ID がない";
+      return { key: `${x.ruleset_id}/${x.type}/${JSON.stringify(x.parameters ?? null)}`, value: { type: x.type, rulesetId: x.ruleset_id, sourceType: strOrNull(x.ruleset_source_type), source: strOrNull(x.ruleset_source), parameters: isObj(x.parameters) ? x.parameters : null } };
+    }, { branchRules: true }, "実効ルール");
+    return r.ok ? { ok: true, status: r.status, branch, rules: r.items, calledTo: r.calledTo } : r;
+  };
+
+  /**
+   * 照合済みの対象に Ruleset を 1 件追加し、返却 ID と内容を検証する。更新・削除は公開しない。
+   * 本文はバイパスなし・有効・完全な ref 指定のものに限る。
+   * 競合（409・422）と結果不明（応答喪失・5xx・408・ID のない応答）は `reconcile: true` を付け、一覧の再取得で照合できるようにする。
+   * 作成後の食い違いは作成済みの ID と差異を返す。
+   */
+  session.createRuleset = async (target, input) => {
+    const bad = badRulesetBody(input);
+    if (bad) return refuse("refused", bad);
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const payload = structuredClone(input);
+    const r = await dispatch(target, "POST", `${repoBase(target)}/rulesets`, payload, { rulesetCreate: true });
+    if (!r.ok) return { ...r, reconcile: r.outcomeUnknown === true || r.status === 409 || r.status === 422 };
+    if (!isObj(r.body) || !okNumber(r.body.id)) return { ok: false, kind: "server", reason: "作成の応答に Ruleset の ID がない", status: r.status, outcomeUnknown: true, reconcile: true, calledTo: r.calledTo };
+    const rs = parseRuleset(r.body);
+    const d = rulesetDifferences(rs, payload, { owner: target.owner, name: target.name });
+    if (!d.length) return { ok: true, status: r.status, created: true, ruleset: rs, calledTo: r.calledTo };
+    return mismatch("作成された Ruleset が要求と一致しない", d, { created: true, createdId: rs.id, reconcile: false, calledTo: r.calledTo });
   };
   return Object.freeze(session);
 };
