@@ -166,7 +166,7 @@ function reportApply(d, res) {
   switch (res.status) {
     case "applied":
       // 応答が届かず一覧で照合して記録したもの。今回の送信で作られたか別の管理者が作ったかは区別できないため、追加とは断定しない
-      if (res.reconciled) d.io.out(`既存の同条件の Ruleset を確認して記録しました${ids}。応答が届かなかったため一覧で照合し、追加の要求は再送していません（今回の要求で作られたか別の管理者が作ったかは応答からは判別できません）。対象: ${(res.includedRefs ?? []).join(", ")}`);
+      if (res.reconciled) d.io.out(`既存の同条件の Ruleset を確認して記録しました${ids}。応答が不確かだったため一覧で照合し、追加の要求は再送していません（今回の要求で作られたか別の管理者が作ったかは応答からは判別できません）。対象: ${(res.includedRefs ?? []).join(", ")}`);
       else d.io.out(`Ruleset を追加しました${ids}。対象: ${(res.includedRefs ?? []).join(", ")}`);
       break;
     case "reused": d.io.out(`既存の Ruleset を再利用しました（書き込みなし）。ID: ${Object.values(res.reusedRulesetIds ?? {}).flat().join(", ")}`); break;
@@ -200,7 +200,7 @@ function reportApply(d, res) {
  * 導入の一連の処理（照合 → 事前検査 → 追加 → 適用後検査）。戻り値は終了コード。
  * 対象の照合で保存済みのリポジトリ ID と食い違えば、書き込まずに再確認を求める。
  */
-async function installRuleset(d, root, t, explicit) {
+async function installRuleset(d, root, t, explicit, state = {}) {
   const target = t.target;
   const base = { host: target.host, owner: target.owner, repository: target.repository, refs: t.refs };
   const dec = await decideChoice(d, root, target, t.refs, explicit);
@@ -240,6 +240,11 @@ async function installRuleset(d, root, t, explicit) {
   const applyCode = reportApply(d, res);
   if (!res.ok) return applyCode;
   const ins = await inspectRulesets(session, tgt, t.refs, { routes: workRoutes(d, HOST), afterApply: true, cwd: root });
+  // 適用は済んでいて、ずれが作業経路の管理権限（迂回可能）だけのとき、最後の案内を「未完了」にしないために印を付ける
+  state.routeBypassOnly = ins.status === "drift"
+    && (ins.checks ?? []).every((c) => c.status === "ok")
+    && (ins.refs ?? []).every((r) => r.status === "ok")
+    && (ins.routes ?? []).some((r) => r.status === "drift");
   return reportInspect(d, ins, "適用後の検査");
 }
 
@@ -366,18 +371,20 @@ export async function runSetup(args = [], deps = {}) {
     : "対象候補: GitHub のリモートがありません（Ruleset は対象外）。");
 
   let rs;
+  const rsState = {};
   if (t.kind === "none") {
     d.io.out("Ruleset: GitHub のリモートがないため対象外です。");
     rs = 0;
   } else if (t.kind === "ambiguous") {
     d.io.err(`Ruleset: ${t.reason}（適用は保留します）`);
     rs = 3;
-  } else rs = await installRuleset(d, root, t, o.ruleset);
+  } else rs = await installRuleset(d, root, t, o.ruleset, rsState);
 
   const hk = installHooks(d, root);
   const code = combine([rs, hk]);
   if (code === 0) d.io.out("導入を完了しました。");
   else if (code === 3) d.io.out("保留または確認できない項目があります（上の表示を確認し、再実行してください）。");
+  else if (rs === 1 && hk === 0 && rsState.routeBypassOnly) d.io.out("Ruleset の適用は完了しています。ただし作業経路の認証が管理権限を持つため、保護を迂回できます（enforced＝強制できている状態とは言えません）。上の作業経路の表示のとおり、作業用の認証から管理権限を外して brw check --ruleset で確かめてください。");
   else d.io.out("導入を完了できませんでした（上の理由を解消してから再実行してください）。");
   return code;
 }

@@ -34,10 +34,19 @@ import { runBranchOpsChecks } from "./branch-ops.mjs";
 import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
+import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
+// 一時ディレクトリの後始末: この実行専用の親ディレクトリを作り、TMPDIR をそこへ向ける。
+// os.tmpdir() を使う全テストと子プロセスの一時物がこの下に集まるため、終了時にこの親だけを消せば漏れなく片付く。
+// 自分が作ったパスだけを消すので、他セッションの /tmp/brw-* には触れない。
+const runTmp = mkdtempSync(join(tmpdir(), "brw-selftest-run-"));
+process.env.TMPDIR = runTmp;
+const cleanupRunTmp = () => { try { rmSync(runTmp, { recursive: true, force: true }); } catch { /* 後始末の失敗でテスト結果は変えない */ } };
+process.on("exit", cleanupRunTmp);
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { cleanupRunTmp(); process.exit(130); });
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const brw = join(root, "scripts/brw.mjs");
 let failed = 0;
@@ -232,6 +241,12 @@ eq("branch-guard/AC-14 保護ブランチ・宣言外への push は省かない
 eq("branch-guard/AC-14 強制・削除・タグ・全ブランチは省かない", [aa("git push -f origin develop"), aa("git push --force-with-lease origin develop"), aa("git push origin +develop"), aa("git push origin :develop"), aa("git push --delete origin develop"), aa("git push --tags origin"), aa("git push --all origin"), aa("git push --no-verify origin develop")], [false, false, false, false, false, false, false, false]);
 eq("branch-guard/AC-14 push 以外を含むコマンドは省かない", [aa("git push origin develop && rm -rf x"), aa("git push origin develop; echo x"), aa("git push origin develop || true"), aa("git push origin develop | sh"), aa("git push origin develop > out.txt"), aa("git push origin $(echo develop)"), aa("git push origin develop | tail -3 | sh"), aa("GIT_SSH_COMMAND=x git push origin develop"), aa("git -c core.sshCommand=x push origin develop"), aa("git push origin develop &")], [false, false, false, false, false, false, false, false, false, false]);
 eq("branch-guard/AC-14 宣言で有効にしていなければ省かない", aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } })), false);
+// 新既定（未指定は有効）に旧判定を合わせた確認。autoApproveOf（lib.mjs）と同じ結果になる
+const autoUnset = mkRepo("develop", { ...autoCfg, autoApprove: undefined });
+eq("branch-guard/AC-14 autoApprove 未指定の登録済み宣言は確認を省く（新既定）", [aa("git push origin develop", autoUnset), aa("git push origin develop", mkRepo("develop", { ...autoCfg, autoApprove: { pullRequest: true } }))], [true, true]);
+const autoUnsetDirty = mkRepo("develop", { ...autoCfg, autoApprove: { push: false } });
+writeFileSync(join(autoUnsetDirty, ".claude/branch-release-workflow.json"), JSON.stringify({ ...autoCfg, autoApprove: undefined }));
+eq("branch-guard/AC-14 autoApprove 未指定でも、未登録（編集中）の宣言では省かない", aa("git push origin develop", autoUnsetDirty), false);
 const autoDirty = mkRepo("develop", { ...autoCfg, autoApprove: { push: false, pullRequest: true } });
 writeFileSync(join(autoDirty, ".claude/branch-release-workflow.json"), JSON.stringify(autoCfg));
 eq("branch-guard/AC-14 作業ツリーで書き換えた宣言では省かない", aa("git push origin develop", autoDirty), false);
@@ -264,7 +279,9 @@ eq("branch-guard/AC-15 他のリポジトリ・ブラウザ・展開・別のコ
   ap('gh pr create --base develop --title "t"; rm -rf x'),
   ap("gh pr merge 1"),
 ], [false, false, false, false, false]);
-eq("branch-guard/AC-15 pullRequest を有効にしていなければ省かない", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true } })), false);
+// 新既定（未指定は有効）に合わせ、「無効」は明示的な false で表す。未指定は有効になる（lib.mjs の autoApproveOf と一致）
+eq("branch-guard/AC-15 pullRequest を明示的に false にしていれば省かない", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true, pullRequest: false } })), false);
+eq("branch-guard/AC-15 pullRequest が未指定なら新既定で省く", ap('gh pr create --base develop --title "t"', mkRepo("dev/feat", { ...autoCfg, autoApprove: { push: true } })), true);
 const hookOut = (cmd, repo) => spawnSync("node", [brw, "hook"], { cwd: repo, input: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd }, cwd: repo }), encoding: "utf8" }).stdout;
 eq("branch-guard/AC-14 フックは省けるとき allow を返し、それ以外の許可では何も返さない", [JSON.parse(hookOut("git push origin develop", auto)).hookSpecificOutput.permissionDecision, hookOut("git commit -m x", auto), hookOut("git push origin develop && ls", auto)], ["allow", "", ""]);
 
@@ -571,6 +588,9 @@ await runIntegrationPublishChecks(eq);
 
 // ---- Ruleset の導入・検査の契約（brw-enforcement 8.2） ----
 await runIntegrationRulesetChecks(eq);
+
+// ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
+await runHookLoggerChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

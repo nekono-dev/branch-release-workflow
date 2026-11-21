@@ -77,15 +77,25 @@ flowchart LR
 | パス | 変更 | 責務 |
 |---|---|---|
 | `scripts/lib.mjs` | 更新 | 宣言の互換読み込み・検証、恒常的な分岐元、現在の ref、個別の分岐元解決 |
-| `scripts/operation-policy.mjs` | 新規 | シェル・対応する GitHub ツール入力の操作への変換、ref 分類、操作の許可条件 |
-| `scripts/agent-hooks.mjs` | 新規 | イベントとホスト応答の変換、終了時の作業状態の案内、導入の動作検査 |
-| `scripts/github.mjs` | 新規 | 固定した GitHub ホスト・リポジトリへの API 呼び出し、応答とエラーの検証 |
-| `scripts/publish.mjs` | 新規 | 作業完了の記録、push と PR 作成の再実行、途中・完了の状態管理 |
-| `scripts/rulesets.mjs` | 新規 | Ruleset の対象・権限・既存設定の検査、適用計画、適用後の再確認 |
-| `scripts/brw.mjs` | 更新 | サブコマンド・導入確認の入出力、既存ブランチ操作と各サービスの呼び出し |
+| `scripts/operation-policy.mjs` | 新規 | シェル・対応する GitHub ツール入力の操作への変換、ref 分類 |
+| `scripts/github-operations.mjs` | 新規 | `gh` コマンド・MCP ツール入力からの GitHub 書き込み経路（PR 作成・マージ・自動マージ予約など）の識別。operation-policy から呼ぶ |
+| `scripts/operation-decision.mjs` | 新規 | 操作・登録済み宣言・作業の禁止から、拒否・通す・確認省略の可否を決める共通判定（ホストの入出力の形は持たない） |
+| `scripts/agent-hooks.mjs` | 新規 | イベントとホスト応答の変換、終了時の作業状態の案内 |
+| `scripts/hook-install.mjs` | 新規 | Codex フックの登録（既存定義の保持・衝突検出）、Claude の登録の検査、linked worktree の有効化 |
+| `scripts/hook-diagnose.mjs` | 新規 | フックの稼働と対応経路の診断（読み取り専用。合成入力による動作検査） |
+| `scripts/github-client.mjs` | 新規 | 固定した GitHub ホスト・リポジトリへの API 呼び出し、対象の照合、応答とエラーの検証、PR・Ruleset の照会と追加 |
+| `scripts/publish.mjs` | 新規 | 作業 ID・完了申告・公開計画・push の実行と、途中・完了の状態管理 |
+| `scripts/publish-pr.mjs` | 新規 | 保護対象への PR の再利用・作成と、応答不確実時の再取得による照合 |
+| `scripts/publish-cli.mjs` | 新規 | `brw work`・`brw publish`・`brw pause` の入口（引数の検査、文言、次の操作の案内） |
+| `scripts/ruleset-choice.mjs` | 新規 | 導入先と分岐元ごとの Ruleset の採否の保存と再利用 |
+| `scripts/ruleset-preflight.mjs` | 新規 | 導入前の読み取り検査（認証・導入権限・プラン・squash 設定・既存ルール） |
+| `scripts/ruleset-apply.mjs` | 新規 | 既存ルールの再利用、不足分だけの Ruleset 追加、応答不確実時の照合 |
+| `scripts/ruleset-inspect.mjs` | 新規 | 適用後・日常の実効ルールと作業経路（迂回可能な権限）の検査 |
+| `scripts/setup-cli.mjs` | 新規 | `brw setup`・`--migrate`・`brw check --ruleset` の入口（対象の決定、問い、表示、終了コード） |
+| `scripts/brw.mjs` | 更新 | サブコマンドの振り分け、既存ブランチ操作と各モジュールの呼び出し（旧 `hook` サブコマンドは手動実行用で、フック登録は agent-hooks.mjs） |
 | `hooks/hooks.json`、`scripts/install-codex.mjs` | 更新 | Claude プラグインのイベント登録、Codex 用フックの導入と既存設定の保持 |
 | `SKILL.md`、`references/setup.md`、`references/config.md`、`assets/config.example.json` | 更新 | ゲートで求めるワークフロー、導入・移行・復旧と対応範囲、宣言例 |
-| `tests/selftest.mjs`、`tests/enforcement.mjs` | 更新・新規 | 既存 CLI の互換性と、新しい操作・導入契約の統合テスト |
+| `tests/selftest.mjs` と `tests/*.mjs`（モジュール別の契約テスト・`integration-*.mjs`）、`tests/support/`、`tests/real-env/` | 更新・新規 | 既存 CLI の互換性、新しい操作・導入契約の統合テスト、テスト補助（一時リポジトリ・偽の GitHub）、実環境検証の補助 |
 
 ## System Flows
 
@@ -167,7 +177,7 @@ sequenceDiagram
 - `brw merge <source>` は、元 ref と checkout 先の両方が宣言済みの開発ブランチと確認できる場合にローカルマージする。対象 worktree と確定した元コミットを使い、競合は Git の状態と解決方法を返す。通常の開発ブランチへの push は共通判定に従う。開発間の取り込みに PR 作成は不要。
 - `protectedBranches` と恒常的な分岐元は、エージェント操作上の保護対象とする。対応するフック経路で直接の PR 作成も同じ分類を使い、宣言済み開発ブランチから保護対象への PR だけを BRW の公開操作として許可する。開発ブランチ間はローカルマージを案内し、宣言外への PR 作成は拒否する。保護対象への PR は作成または再利用まで行い、利用者に GitHub 上の PR URL、base、squash の案内を返す。エージェントからの GitHub マージと自動マージ予約、および非開発ブランチへのローカルマージは、対応するフック経路で拒否する。BRW は GitHub のマージ API を呼ばない。GitHub 側の直接更新とマージ方式の制限は、選択して適用した Ruleset の対象 ref に効く。
 
-- Claude はプラグインのイベントを更新し、Codex は信頼対象のプロジェクトフックをインストーラーで登録する。ランチャーは外部 BRW clone の絶対パスを参照する。Codex のプロジェクト・worktree で有効な登録元を特定し、親チェックアウトから継承する定義も含めて二重登録を防ぐ。既存のフックを保持し、同じ登録の再実行は変更なしで終える。登録元や衝突を解決できない場合は対象箇所を表示する。許可と拒否の両方について、対応する実行環境でフックが届くことを稼働検査する。
+- Claude はプラグインのイベントを更新し、Codex は信頼対象のプロジェクトフックをインストーラーで登録する。ランチャーは外部 BRW clone の絶対パスを参照する。Codex のプロジェクト・worktree で有効な登録元を特定し、親チェックアウトから継承する定義も含めて二重登録を防ぐ。Codex の linked worktree は、worktree 自身に `.codex/` ディレクトリがあるときだけ親チェックアウトの `.codex/hooks.json` を読み（worktree 側の hooks.json の中身は読まれない）、登録と信頼は親に結び付く。このため `brw create`・`brw resume` と `install-codex.mjs --repo <worktree>` は worktree に `.codex/` を作って有効化する。既存のフックを保持し、同じ登録の再実行は変更なしで終える。登録元や衝突を解決できない場合は対象箇所を表示する。許可と拒否の両方について、対応する実行環境でフックが届くことを稼働検査する。
 
 ### 完了公開と状態
 
@@ -226,3 +236,7 @@ sequenceDiagram
 ## Migration Strategy
 
 既存宣言を読み込み、ローカルのブランチ運用と重複を診断する。新規の確認省略の既定を案内し、明示済みの制限を維持する。設定を変えずに従来どおり確認を省略しない運用を続ける場合は、移行時に対象の項目を明示的に無効化できるようにする。Claude の既存プラグインの更新と Codex フックの登録・信頼登録を案内し、稼働を確認する。Ruleset の採否が未設定なら導入フローを実行する。新設した Ruleset の無効化は GitHub の管理者操作として記録済み ID を案内し、既存ルールの復旧を伴う変更はその管理主体に委ねる。
+
+## 改訂メモ
+
+- 2026-11-21: File Structure Plan を実際のファイル分割に合わせ、Codex の linked worktree の前提（worktree に `.codex/` があるときだけ親の hooks.json を読む。登録・信頼は親に結び付く）を訂正した。

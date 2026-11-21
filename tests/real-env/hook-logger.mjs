@@ -21,6 +21,11 @@ const redact = (s) => String(s ?? "")
   .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, "***")
   .replace(/(Bearer\s+)[A-Za-z0-9._-]{12,}/gi, "$1***");
 
+// gh pr create / edit の本文（--body・-b・--body-file・-F）は内容を記録しない。値だけを伏せ、他の引数は残す
+const VALUE = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|]+)`;
+const BODY_OPT = new RegExp(String.raw`(^|\s)(--body-file|--body|-b|-F)(?:=|\s+)${VALUE}`, "g");
+const redactPrBody = (cmd) => (typeof cmd === "string" && /\bgh\s+pr\s+(?:create|edit)\b/.test(cmd) ? cmd.replace(BODY_OPT, (_m, pre, opt) => `${pre}${opt} ***`) : cmd);
+
 let text = "";
 try { text = readFileSync(0, "utf8"); } catch { /* 入力なし */ }
 
@@ -30,6 +35,7 @@ const code = r.status ?? 1;
 
 let input = text;
 try { input = JSON.parse(text); } catch { /* 解釈できない入力は文字列のまま記録する */ }
+if (input?.tool_input && typeof input.tool_input === "object") input = { ...input, tool_input: { ...input.tool_input, command: redactPrBody(input.tool_input.command) } };
 const entry = {
   ts: new Date().toISOString(),
   host,

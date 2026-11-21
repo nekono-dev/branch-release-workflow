@@ -161,7 +161,7 @@ node ~/.local/share/branch-release-workflow/scripts/install-codex.mjs --repo /pa
 
 `--repo` で導入先リポジトリの `.codex/hooks.json` に BRW のフックを登録する（既存の定義は保持し、同じ登録の再実行は変更なしで終わる）。登録後、Codex で `/hooks` から信頼を承認する。登録元や衝突を解決できなければ対象の箇所を表示して止まる。
 
-linked worktree では、Codex（0.167 で実機確認）は**親（本体）チェックアウトの `.codex/hooks.json` を読む**が、worktree 自身に `.codex/` ディレクトリがあるときだけである（空でもよい。worktree 側の hooks.json の中身は読まれず、登録と信頼は親に結び付く）。`.codex/` が無い worktree では、親が登録済みでもフックは届かない。`brw create`・`brw resume` は、親に BRW の登録があるとき新しい worktree に `.codex/` を作って有効化する（共通の `info/exclude` に `.codex/` を足し、未追跡として現れないようにする）。手作業で作った worktree は `install-codex.mjs --repo <その worktree>` で有効化する。診断（`brw check`）は、`.codex/` の無い worktree を `worktree-not-registered`（未導入）と表示する。
+linked worktree では、Codex（0.167 で実機確認）は**親（本体）チェックアウトの `.codex/hooks.json` を読む**が、worktree 自身に `.codex/` ディレクトリがあるときだけである（空でもよい。worktree 側の hooks.json の中身は読まれず、登録と信頼は親に結び付く）。`.codex/` が無い worktree では、親が登録済みでもフックは届かない。`brw create`・`brw resume` は、親に BRW の登録があるとき新しい worktree に `.codex/` を作って有効化する（共通の `info/exclude` に `.codex/` を足し、未追跡として現れないようにする。`info/exclude` は親チェックアウトと全 worktree で共有されるため、この除外は親にも及び、親の `.codex/`（hooks.json など）も未追跡として表示されなくなる）。`install-codex.mjs --repo <worktree>` も同じ有効化を行い、同じ共通の `info/exclude` に `.codex/` を追記する。手作業で作った worktree は `install-codex.mjs --repo <その worktree>` で有効化する。診断（`brw check`）は、`.codex/` の無い worktree を `worktree-not-registered`（未導入）と表示する。
 
 更新は `git -C ~/.local/share/branch-release-workflow pull --ff-only`。検証済みの版に固定する運用では、そのコミットを fetch / checkout する。リンク先は同じ clone なので、コピーし直す必要はない。プロジェクト単位なら `--skills-dir /path/to/project/.agents/skills` を指定し、生成されたリンクを .gitignore に入れる。別の導入先が既にある場合は上書きしない。
 

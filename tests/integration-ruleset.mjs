@@ -339,6 +339,7 @@ export const runIntegrationRulesetChecks = async (eq) => {
     const r = await setupIn(dir, ["--ruleset", "on"], w);
     eq("ruleset-int/8.2 応答が切れても一覧で同条件を確かめて記録し、再送しない（書き込み 1 件、終了コード 0）", [r.code, writesOf(r.gh), brwCountOf(w), appliedIdsOf(dir)], [0, { POST: 1 }, 1, [100]]);
     eq("ruleset-int/8.2 照合で記録した場合は「追加した」と表示せず、既存の同条件の Ruleset を確認して記録したと表示する", [r.text.includes("既存の同条件の Ruleset を確認して記録しました"), r.text.includes("Ruleset を追加しました")], [true, false]);
+    eq("ruleset-int/8.2 照合の文言は「応答が不確かだったため」で、届かなかったとは断定しない（409・422 でも出るため）", [r.text.includes("応答が不確かだったため一覧で照合し"), r.text.includes("応答が届かなかったため")], [true, false]);
     eq("ruleset-int/8.2 応答喪失の後も既存の Ruleset は変更・削除されず、トークンは出力に出ない", [JSON.stringify(w.rulesets.find((x) => x.id === 50)) === JSON.stringify(REVIEW), r.text.includes(ADMIN) || r.text.includes(WORK)], [true, false]);
   }
   {
@@ -398,6 +399,7 @@ export const runIntegrationRulesetChecks = async (eq) => {
     const w = makeWorld({ rulesets: [REVIEW], ids: idsWith({ workAdmin: true }) });
     const r = await setupIn(dir, ["--ruleset", "on"], w, { workToken: WORK });
     eq("ruleset-int/8.2 作業主体が管理権限を持つ場合、適用後の検査は drift（終了コード 1）で enforced と表示しない", [r.code, writesOf(r.gh), /適用後の検査: drift/.test(r.text), /適用後の検査: enforced/.test(r.text)], [1, { POST: 1 }, true, false]);
+    eq("ruleset-int/8.2 作業経路が管理権限で drift のときは「適用は完了・迂回可能（enforced とは言えない）」と案内し、「導入を完了できませんでした」とは出さない", [/Ruleset の適用は完了しています。ただし作業経路の認証が管理権限を持つ/.test(r.text), /導入を完了できませんでした/.test(r.text), r.text.includes("導入を完了しました。")], [true, false, false]);
   }
   {
     const dir = repoOf();

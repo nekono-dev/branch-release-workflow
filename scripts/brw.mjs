@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // branch-release-workflow の CLI。サブコマンド:
-//   hook                       PreToolUse フック（標準入力の JSON を判定して deny/ask を返す）
+//   hook                       旧経路の PreToolUse フック（手動実行用。標準入力の JSON を判定して deny/ask/allow を返す）。
+//                              現行のフック登録は agent-hooks.mjs（Claude Code・Codex 共通）が行い、このサブコマンドは登録しない
 //   create <名前> [--base b] [--branch-only]   作業ブランチ（と worktree）を命名規則に従って作成
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
@@ -27,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONFIG_REL, configRel, branchBase, checkName, classifyBranch, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
+  CONFIG_REL, autoApproveOf, configRel, branchBase, checkName, classifyBranch, configCommitted, configMatchesHead, currentBranch, enabledInRepo, git, globToRegExp, judgeBranch, loadConfig, matchesAny, repoRoot,
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
@@ -287,7 +288,8 @@ export function autoApprovable(command, cwd) {
     const root = repoRoot(op.cwd);
     if (!root) return false;
     const { config, error } = loadConfig(root);
-    if (error || !config || config.autoApprove?.[op.kind] !== true || !configMatchesHead(root)) return false;
+    // 未指定は有効・明示的な false は無効・未登録/編集中は無効（lib.mjs の autoApproveOf と同じ規則）
+    if (error || !config || !autoApproveOf(config, configMatchesHead(root))[op.kind]) return false;
     if (op.kind === "push") {
       if (!sameNamePush(op.args, op.cwd)) return false;
       const targets = pushTargets(op.args, op.cwd);
