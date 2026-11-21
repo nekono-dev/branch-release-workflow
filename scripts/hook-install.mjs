@@ -99,7 +99,7 @@ export function registrationSourceOf(dir) {
 }
 
 /** 設定の文字列で [features] の hooks（旧キー codex_hooks）が偽か。 */
-const hooksDisabled = (text) => {
+export const hooksDisabled = (text) => {
   let section = "";
   for (const raw of String(text ?? "").split("\n")) {
     const line = raw.trim();
@@ -111,7 +111,7 @@ const hooksDisabled = (text) => {
 };
 
 /** 自分の定義（agent-hooks.mjs の codex 呼び出し）を含むか。 */
-const hasManaged = (doc) => isObj(doc?.hooks) && Object.values(doc.hooks).some((gs) => Array.isArray(gs) && gs.some((g) => commandsOf(g).some((c) => managedEvent(c) !== null)));
+export const hasManaged = (doc) => isObj(doc?.hooks) && Object.values(doc.hooks).some((gs) => Array.isArray(gs) && gs.some((g) => commandsOf(g).some((c) => managedEvent(c) !== null)));
 
 /**
  * 現在の hooks.json の内容に、必要な登録をマージする（純粋な変換。ファイルは読み書きしない）。
