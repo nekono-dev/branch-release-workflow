@@ -12,6 +12,7 @@ import * as deployCf from "../scripts/deploy/cloudflare-workers.mjs";
 import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
 import { runSupportChecks } from "./support/selftest-support.mjs";
+import { runEnforcementChecks } from "./enforcement.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -483,6 +484,9 @@ import * as lib from "../scripts/lib.mjs";
 
 // ---- テスト補助の動作確認（brw-enforcement 1.2） ----
 await runSupportChecks(eq);
+
+// ---- 操作の分類と対象の確定（brw-enforcement 2.1） ----
+await runEnforcementChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

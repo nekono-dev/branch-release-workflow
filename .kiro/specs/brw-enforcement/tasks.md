@@ -15,7 +15,7 @@
   - _Requirements: 1.1, 2.7, 5.2, 6.1, 6.3_
 
 - [ ] 2. 操作の分類と共通判定を実装する
-- [ ] 2.1 シェルと Git の操作対象を確定する
+- [x] 2.1 シェルと Git の操作対象を確定する
   - 引用符と作業ディレクトリを扱い、`git -C`、現在の ref、remote、refspec、追跡設定を使って変更対象を照合する。
   - ブランチ作成・再開、commit、push、マージを分類する。強制、削除、タグ、複合コマンドを通常 push と区別する。
   - 判定不能な変更を識別でき、正常な照会や未導入のリポジトリが通過することを確認する。
@@ -215,3 +215,4 @@
 
 - 1.1: `classifyBranch`・`autoApproveOf`・`permanentBases` は lib.mjs に追加済みだが、既存の `judgeBranch` とフックの `autoApprovable` へは未配線。操作判定（2.3）とフック接続（6.1）で配線する。命名規則に合わない開発指定は宣言外として扱う。
 - 1.2: テスト補助は tests/support/ にある（git-fixture・hook-fixtures・fake-github）。偽 GitHub は `request(method, path, body)` 形式で routes は完全一致のみ。3.x でクライアントの注入点を決めるとき、必要ならアダプタや可変パス対応を足す。Codex のフック入力形は想定の fixture で、実機の形との一致は 8.4 で確認する。既存の自己テストは /tmp/brw-* を実行ごとに残す（既存の挙動で、1.2 の補助は残さない）。
+- 2.1: 操作の分類は scripts/operation-policy.mjs の `classifyCommand(command, cwd)`（結果を返すだけで brw.mjs へは未接続。既存の tokenize/splitCommand とは別の字句解析を持つため、2.3 か 6.x で統合を検討する）。確定できない・判定不能な変更は安全側（unresolved/unparseable）に倒す。残る限界: 別スクリプトや node/python/make 経由で git を呼ぶ場合は検出できない（導入診断で明示する）。READ_ONLY 扱いの reset・update-ref・symbolic-ref などローカルの ref を動かすサブコマンドは照会扱いのまま（2.3 以降で要判断）。`-c` の危険設定と引数に展開・ワイルドカードを含む fetch は過検出になりうる。
