@@ -164,3 +164,20 @@ Claude Code の既存フックは `PreToolUse` で拒否や許可を返せる。
 ### 次の手順
 
 - `/kiro-spec-design brw-enforcement` で設計を更新する。上の Research Needed 1・2 は設計の冒頭で決める（利用者の確認が要る可能性がある）。
+
+---
+
+## 設計時の統合（要件 2.9〜2.16）（2026-11-23）
+
+ギャップ分析（上）の Option A（既存の Stop 処理と SKILL.md を拡張する）に、commit の確認省略を加えた形を採った。
+
+- **一般化**: 「作業ブランチに残った変更」という 1 つの概念（未コミットの変更と未 push の commit）で、要件 2.11（リモートだけで再開）・2.12（終了時の検出）・2.13（調査のみは止めない）・2.14（push 禁止）をまとめた。作業状態（セッションに結び付いた作業）に依存せず、Git の状態だけから導く（`work-remainder.mjs`）。
+- **Build vs Adopt**: 区切りの commit・push の実行手段は新設しない（Option B の `brw checkpoint` は、`kiro-impl` の commit 手順と二重になり、cc-sdd 側を変えられないため見送り）。`git add`・`git commit` の確認省略は、既存の `safePush` と同じ作法（限定した引数、複合コマンドは全区間が条件を満たすとき）で足す。
+- **簡素化**: フックによる push の実行と、commit 直後の push の案内（Option C の PostToolUse）は採らない。フックは判定と案内だけを行う方針を保ち、PostToolUse が追加の文脈を返せるかの実機確認は、残余リスクとともに設計の Non-Goals に残した。状態ファイルは増やさず、Stop のたびに Git から導く。
+- **ギャップ分析の Research Needed への回答**: (1) commit の確認省略は `autoApprove.commit`（未指定は有効）と限定した引数で行う。(2) 宣言に push 禁止の専用項目は無いため、`autoApprove.push: false` を「宣言が push を禁じる」と扱う（要件 2.14 の解釈。検証設計の確認事項）。(3) 未 push は `git rev-list --count HEAD --not --remotes` で、ネットワークなしに判定する。(4) 無関係な未追跡ファイルは、案内を 1 回に限る（`stop_hook_active`）ことと、パスの提示で扱う。(5) セッションに結び付いた作業が無くても検出し、公開の案内と 1 つの block にまとめる。(6) PostToolUse の追加文脈は未確認のまま持ち越す。(7) 長い応答での区切りごとの push は、実環境の検証項目に入れた。
+
+### 持ち越し
+
+- `autoApprove.push: false` を「宣言が push を禁じる」と読む解釈の確認（利用者）。
+- クォートした heredoc のメッセージの受け入れ範囲（実装時に、Claude の標準的な commit 手順で通ることを確かめる）。
+- Claude・Codex の PostToolUse が追加の文脈を返せるか（返せれば、commit 直後の push の案内を別途検討できる）。
