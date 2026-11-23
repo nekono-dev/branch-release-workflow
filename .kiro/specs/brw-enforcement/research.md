@@ -181,3 +181,15 @@ Claude Code の既存フックは `PreToolUse` で拒否や許可を返せる。
 - `autoApprove.push: false` を「宣言が push を禁じる」と読む解釈の確認（利用者）。
 - クォートした heredoc のメッセージの受け入れ範囲（実装時に、Claude の標準的な commit 手順で通ることを確かめる）。
 - Claude・Codex の PostToolUse が追加の文脈を返せるか（返せれば、commit 直後の push の案内を別途検討できる）。
+
+---
+
+## Codex での追加検証（2026-11-23、設計の再生成前）
+
+harness-plugin-unification の research.md の同名の節に、検証の条件と全項目の結果を記録した。本 spec に関わる結果だけを再掲する。
+
+- **commit の確認省略（2.9, 2.10）**: 対話相当（承認方針 `on-request`）では、`git add … && git commit …` はサンドボックスの失敗のあと `PermissionRequest` フックに全コマンド文字列で届き、`allow` で承認なしに実行された。設計の方式（Codex は `PermissionRequest` の許可で返す）は成立する。
+- **非対話（`codex exec`）の制約**: 承認方針が常に `never` で `PermissionRequest` は発生せず、`workspace-write` では `.git` が読み取り専用のため commit・push は失敗する。BRW のフックでは解決できず、実行側の書き込み許可（`--add-dir <.git>`、linked worktree では `<.git>/worktrees/<名>` も）か、外部のサンドボックスが要る。診断の `limits` と導入手順に明記する。
+- **Stop の案内（2.12〜2.15）**: `reason` はモデルに `hook_prompt` として届き、再入では `stop_hook_active: true` になる。案内の対象がエージェント自身の作業で生じた変更のときは commit・push が実行された。無関係な既存の変更のときは「依頼の範囲外」として実行されなかった。案内文に、この作業で生じた変更かどうかの判断と、そうでない場合の報告を含める。
+- **PostToolUse の追加文脈**: Codex では `additionalContext` がモデルに届く（Claude は未確認）。commit 直後の push の案内（Non-Goals）の実現可能性の材料になるが、利用者の判断（残余リスクの許容。中断の契機はトークンの使い切りと作業の停止）により、本 spec では採らない。
+- **中断の契機と Stop の関係**: トークンの使い切りと利用者による停止では、Stop が呼ばれない場合がある（Codex には別に `interrupt` イベントがある）。この残余リスクは許容され、取りこぼしは区切りごとの push で最小化する。それ以外の契機での中断は、利用者の依頼（「commit して」「push して」）で扱う。

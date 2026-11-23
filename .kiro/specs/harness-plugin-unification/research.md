@@ -130,3 +130,20 @@
 - `.claude-plugin/plugin.json` の `skills` を `./skills/` に変えたときの Claude 側のスキル名・スラッシュコマンドの不変（`claude plugin validate`・`eval`）。
 - Codex の管理者設定（`allow_managed_hooks_only` など）でプラグインのフックが無視される場合の挙動。検出の専用経路は持たず、信頼を書いても `trusted` に変わらなければ `not-effective` として扱う。
 - Codex Cloud のタスク上でのプラグイン・フックの挙動（文書に記載がなく、本 spec の対象外とする）。
+
+---
+
+## Codex での追加検証（2026-11-23、設計の再生成前）
+
+設計の持ち越し事項と、利用者が求めた Codex 実機での検証を行った（Codex 0.167、`gpt-6.2-sol`・medium、一時的な `CODEX_HOME`。確認後に一時ディレクトリ（認証ファイルの複製を含む）を削除した）。設計どおりの配置（`skills/branch-release-workflow/SKILL.md`、`.codex-plugin/plugin.json`、`hooks/codex-hooks.json`、現行の `scripts/` 一式）のプロトタイプをローカルのマーケットプレイスとして導入して確かめた。
+
+| 項目 | 結果 | 設計への反映 |
+|---|---|---|
+| Git のマーケットプレイスの宣言形式 | `codex plugin marketplace add nekono-dev/branch-release-workflow` は `[marketplaces.nekono-dev]`・`source_type = "git"`・`source = "https://github.com/nekono-dev/branch-release-workflow.git"` を書く。受け付ける指定は `owner/repo`、Git の URL、ローカルのパスで、`file://` の URL は拒否される | 導入先の `.codex/config.toml` の記入例を確定。持ち越し事項を解消 |
+| スキルからのスクリプト参照 | Codex のエージェントは、プラグインのキャッシュ上の `skills/branch-release-workflow/SKILL.md` を読み、`../../scripts/brw.mjs` を正しく解決して実行した（`brw guard` の実行を含む）。同じ SKILL.md の `../../references/…` も案内として読めた | 参照規則（SKILL.md からの相対パス）を確定 |
+| Claude の `skills` 指定の変更 | `skills: ["./skills/"]` でも `claude plugin validate .` は通る（警告のみで、旧指定と同じ） | 検証済みとして扱う。スキル名の不変と `eval` は実装時に確認 |
+| 非対話（`codex exec`）の承認とサンドボックス | `exec` の承認方針は常に `never` で、`PermissionRequest` は発生しない。`workspace-write` のサンドボックスは `.git` を読み取り専用にするため、`git add`・`git commit` は `index.lock` を作れず失敗する。`--add-dir <リポジトリ>/.git` を付けると main のチェックアウトで commit できる。linked worktree では、さらに `--add-dir <共通の .git>/worktrees/<名>` が要る。この指定で、ローカルの bare リモートへの push も成功した | クラウド・CI の手順に、commit・push を行う `codex exec` の書き込み許可（`--add-dir`）を明記する。受け入れ確認の手順にも反映する |
+| 対話相当（`on-request`）の commit | app-server で承認方針 `on-request` のスレッドを動かすと、`git add … && git commit …` はサンドボックスで失敗したあとエスカレーションされ、`PermissionRequest` フックが全コマンド文字列つきで呼ばれる。フックが `allow` を返すと、クライアントへの承認要求なしで commit が実行された | commit の確認省略（brw-enforcement）の経路を実機で確認 |
+| Stop の block | `{"decision":"block","reason":…}` の `reason` は、モデルに `hook_prompt`（ユーザーのメッセージ）として届く。Codex は 1 回続行したあとに Stop を `stop_hook_active: true` で呼び直す。入力には `session_id`・`turn_id`・`cwd`・`last_assistant_message` などがある | brw-enforcement の Stop の案内の契約を確認 |
+| Stop の案内にエージェントが従うか | 案内の対象がエージェント自身の作業で生じた変更（`x.txt` の作成）のとき、エージェントは `git add`・`git commit`・`git push` を実行した。対象が依頼と無関係な既存の未追跡ファイルのとき、「依頼の範囲外」として実行しなかった（2 回目の Stop で終了） | 案内文に「この作業で生じた変更なら commit・push する。そうでなければ、その旨を報告して終了してよい」を含める |
+| PostToolUse の追加文脈 | `hookSpecificOutput.additionalContext` はモデルに届いた（Codex）。Claude は未確認 | brw-enforcement の Non-Goals（commit 直後の push の案内）の判断材料として記録 |

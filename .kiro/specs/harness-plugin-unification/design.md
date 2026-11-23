@@ -242,7 +242,7 @@ stateDiagram-v2
 #### スキルの置き場所
 
 - `SKILL.md` を `skills/branch-release-workflow/SKILL.md` へ `git mv` する。ディレクトリ名と frontmatter の `name` を同じ `branch-release-workflow` にし、スキル名を変えない。
-- 参照の規則: エージェントの Bash にはプラグインのルートを指す環境変数が無い（実機確認。設定されるのはフックの実行時だけ）ため、SKILL.md からの相対パスで参照する。`<skill>` は SKILL.md があるディレクトリとし、スクリプトは `node <skill>/../../scripts/brw.mjs`、文書は `../../references/…`、`../../assets/…` と書く。プラグインのキャッシュはディレクトリ構成をそのまま保つため、両ハーネスで同じ相対パスが成り立つ。
+- 参照の規則（Codex で、キャッシュ上の SKILL.md からの `../../scripts/brw.mjs` の解決と実行を実機確認済み）: エージェントの Bash にはプラグインのルートを指す環境変数が無い（実機確認。設定されるのはフックの実行時だけ）ため、SKILL.md からの相対パスで参照する。`<skill>` は SKILL.md があるディレクトリとし、スクリプトは `node <skill>/../../scripts/brw.mjs`、文書は `../../references/…`、`../../assets/…` と書く。プラグインのキャッシュはディレクトリ構成をそのまま保つため、両ハーネスで同じ相対パスが成り立つ。
 - `references/`・`assets/`・`scripts/` は移動しない（README・自己テスト・他の文書が参照するため）。
 
 ### 部品
@@ -352,7 +352,7 @@ export function registerHookTrust(inspection: Extract<CodexInspection, {status: 
 | `installed`、すべて `trusted`／`managed` | 応答の確認（`runProbes`）へ進む | — |
 
 - ランチャーの場所は、フックの `sourcePath` から導いたプラグインのルート（`pluginRoot`）の `scripts/agent-hooks.mjs` とする。応答の確認（`runProbes`）は変えない。
-- 旧方式の検出（`unknown-common-dir`・`duplicate-worktree`・`stale-launcher`・`symlink`・`worktree-not-registered` など）を削除する。`LIMITS` から `codex-format-unverified`・`codex-hooks-disabled-partial`・`codex-trust-by-caller` を外し、次の 2 件を足す: Codex の信頼の登録・確認は内部 API に依存し、版が上がると使えなくなることがある（その場合は `/hooks` で確認する）。プラグインを更新したら `brw setup` を実行し直す。
+- 旧方式の検出（`unknown-common-dir`・`duplicate-worktree`・`stale-launcher`・`symlink`・`worktree-not-registered` など）を削除する。`LIMITS` から `codex-format-unverified`・`codex-hooks-disabled-partial`・`codex-trust-by-caller` を外し、次の 3 件を足す: Codex の信頼の登録・確認は内部 API に依存し、版が上がると使えなくなることがある（その場合は `/hooks` で確認する）。プラグインを更新したら `brw setup` を実行し直す。非対話の Codex（`codex exec`）は、`.git` への書き込み許可（`--add-dir`）が無いと commit・push が失敗する。
 
 #### setup-cli（更新）
 
@@ -383,14 +383,27 @@ export function registerHookTrust(inspection: Extract<CodexInspection, {status: 
 | 状態の確認 | `brw check` | `brw check` |
 | 更新 | プラグインの更新 ＋ `brw setup` | `codex plugin marketplace upgrade` ＋ `codex plugin add` ＋ `brw setup` |
 
-- 導入先リポジトリの宣言（要件 6）: Claude は `.claude/settings.json` の `extraKnownMarketplaces`・`enabledPlugins`（従来どおり）。Codex は `.codex/config.toml` の `[marketplaces.<名前>]` と `[plugins."branch-release-workflow@<名前>"] enabled = true`。宣言だけではプラグインは導入されない（実機確認）ため、導入コマンドの実行が別に要ると明記する。Git のマーケットプレイスの記述形式は、実装時に `codex plugin marketplace add` が書き出した設定を見て確定し、記入例にする。
+- 導入先リポジトリの宣言（要件 6）: Claude は `.claude/settings.json` の `extraKnownMarketplaces`・`enabledPlugins`（従来どおり）。Codex は `.codex/config.toml` の `[marketplaces.<名前>]` と `[plugins."branch-release-workflow@<名前>"] enabled = true`。宣言だけではプラグインは導入されない（実機確認）ため、導入コマンドの実行が別に要ると明記する。記入例（Codex 0.167 で `codex plugin marketplace add nekono-dev/branch-release-workflow` が書き出す形式を実機で確認済み）:
+
+```toml
+[marketplaces.nekono-dev]
+source_type = "git"
+source = "https://github.com/nekono-dev/branch-release-workflow.git"
+
+[plugins."branch-release-workflow@nekono-dev"]
+enabled = true
+```
+
+  `marketplace add` が受け付ける指定は `owner/repo`、Git の URL、ローカルのパスで、`file://` の URL は拒否される。
 - クラウド・CI: セットアップスクリプトに、表の「追加・導入」の 2 行と `brw setup --host <ハーネス>` を並べる。`brw` の場所は、`codex plugin add --json` の `installedPath`（Claude は `${CLAUDE_PLUGIN_ROOT}` を使えるフックの外では、導入先のキャッシュのパス）から求める。スクリプトは `brw setup` の終了コードで成否を判定する。
+- 非対話の Codex（`codex exec`）で commit・push を行う場合は、承認方針が常に `never` でサンドボックスの `.git` が読み取り専用のため、実行側の書き込み許可が要る（実機確認）。`--add-dir <リポジトリ>/.git` を付け、linked worktree ではさらに `--add-dir <共通の .git>/worktrees/<名>` を付ける。この指定で commit と push（ローカルの bare リモート）が成功した。外部のサンドボックスで隔離された環境では、`--dangerously-bypass-approvals-and-sandbox` を使う運用もありうるが、本手順の既定にはしない。
 - 旧方式で導入済みの利用者向けに、「旧方式の登録が残っていれば手で削除する」の 1 行だけを記す。移行手段は設けない。
 
 ### 受け入れ確認
 
 - `tests/real-env/codex-plugin.mjs`（任意実行。`BRW_REAL_ENV_CODEX=1` と認証ファイルの場所の環境変数が両方あるときだけ動く）。一時ディレクトリ（`mkdtemp`、権限 0700）に `CODEX_HOME` を作り、認証ファイルを複製して使い、終了時に必ず削除する。利用者の `~/.codex` には触れない。
-- 手順: マーケットプレイスの追加（このリポジトリのチェックアウトを指定）→ プラグインの導入 → `brw setup --host codex` → `brw check` → 指揮役（既定 `gpt-6.2-sol`・思考の深さ medium。環境変数で変更可）の `codex exec` が、導入先の一時リポジトリの保護ブランチで `git commit` を試みる（BRW が実行前に拒否し、HEAD が変わらないことを確かめる）→ 作業ブランチの linked worktree（`.codex/` なし）で同じ操作の判定を確かめる → 非対話（`codex exec`）で信頼登録なしの場合に強制が働かないこと、登録後に働くことを確かめる。
+- 実機で確認済みの前提: ローカルのマーケットプレイスとして導入したプロトタイプ（設計どおりの配置）で、導入、信頼の登録、フックの発火（PreToolUse・PostToolUse・Stop）、スキルの相対参照、`--add-dir` を付けた commit・push までを Codex 0.167 で確かめた。受け入れ確認はこれを `brw` 本体と `brw setup` で再現する。
+- 手順: マーケットプレイスの追加（このリポジトリのチェックアウトを指定）→ プラグインの導入 → `brw setup --host codex` → `brw check` → 指揮役（既定 `gpt-6.2-sol`・思考の深さ medium。環境変数で変更可）の `codex exec` が、導入先の一時リポジトリの保護ブランチで `git commit` を試みる（BRW が実行前に拒否し、HEAD が変わらないことを確かめる）→ 作業ブランチの linked worktree（`.codex/` なし）で同じ操作の判定を確かめる（commit まで進める場面では `--add-dir` を付ける） → 非対話（`codex exec`）で信頼登録なしの場合に強制が働かないこと、登録後に働くことを確かめる。
 - Claude 側は既存の `claude plugin validate .` と `claude plugin eval .` を通す。両ハーネスの結果は同じ操作に対する判定（拒否の理由の種別）を表にして記録する。想定と異なる結果は成功として記録しない。
 
 ## Data Models
@@ -429,6 +442,6 @@ export function registerHookTrust(inspection: Extract<CodexInspection, {status: 
 
 - **app-server への依存（リスク: 中）**: 信頼の登録は実験的な内部 API を使う。版が上がって使えなくなったときは `/hooks` の手動承認に切り替わり、クラウド・CI では `brw setup` が失敗する。対策は、フォールバックの案内、`codex-plugin.mjs` に依存を閉じ込めること、受け入れ確認で版ごとに再確認すること。
 - **更新による強制の停止（リスク: 中）**: 更新で信頼が外れると、フックは黙って読み込まれない。対策は、手順で更新のたびに `brw setup` を実行すること、`brw check` が `trust-outdated` を報告すること。
-- **Git のマーケットプレイスの記述形式（未確認）**: 導入先の `.codex/config.toml` に書く Git の指定形式は、ローカルの指定でしか確認していない。実装の最初のタスクで、`codex plugin marketplace add`（Git の URL）が書き出す設定を確かめて記入例にする。
-- **Claude の `skills` 指定の変更（未確認）**: `./skills/` への変更でスキル名とスラッシュコマンドが変わらないことを `claude plugin validate`・`eval` で確かめる（8.4）。
+- **非対話の Codex の書き込み許可（リスク: 低）**: `codex exec` は `.git` が読み取り専用のため、commit・push には `--add-dir` が要る。手順と診断の `limits` に明記する。BRW のフックでは解決できない（承認方針が `never` のため `PermissionRequest` が発生しない）。
+- **Claude の `skills` 指定の変更（`validate` は確認済み）**: `skills: ["./skills/"]` で `claude plugin validate .` は通る（警告のみで旧指定と同じ）。スキル名とスラッシュコマンドが変わらないことは、実装時に `claude plugin eval .` で確かめる（8.4）。
 - **管理者設定（`allow_managed_hooks_only` など）**: 検出の専用経路は持たない。信頼を書いても `trusted` に変わらなければ `not-effective` として手動承認の案内に切り替える。
