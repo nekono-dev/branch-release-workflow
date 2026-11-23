@@ -129,7 +129,7 @@ tests/
 ### Modified Files
 
 - `scripts/hook-diagnose.mjs` — `codexRegistration`・`WORKTREE_NOT_REGISTERED`・旧ランチャーの検出を削除し、`codex`（導入状態）を引数に受けて経路を作る。`LIMITS` の Codex 項目を新方式に合わせる。
-- `scripts/setup-cli.mjs` — `installHooks` を `setupHooks`（非同期）に置き換え、`--host` を足す。`codexHome`・`featuresText` の受け渡しを削除する。
+- `scripts/setup-cli.mjs` — `installHooks` を `setupHooks`（非同期）に置き換え、`--host` と対象の決め方を足す。`runSetup` の導入後の検査と `runStateCheck`（`brw check`）が、Codex の検査結果を `diagnose` へ渡す。`codexHome`・`featuresText` の受け渡しを削除する。
 - `scripts/brw.mjs` — `installWorktreeHooks` の import と呼び出し（`create`・`resume`）、関連の出力を削除する。
 - `tests/selftest.mjs`、`tests/hook-diagnose.mjs`、`tests/setup-cli.mjs`、`tests/branch-ops.mjs`、`tests/real-env/host-events.mjs`、`tests/real-env/hosts.mjs` — 旧方式の検証を削除し、新方式の検証に置き換える。`selftest.mjs` の `install-codex` のリンク検証（109 行付近）は削除する。
 - `README.md`、`references/setup.md`、`SKILL.md`（移動後）— Codex の導入を新手順に書き換え、旧方式の記述（clone、`install-codex.mjs`、worktree の `.codex/`）を取り除く。
@@ -356,7 +356,9 @@ export function registerHookTrust(inspection: Extract<CodexInspection, {status: 
 
 #### setup-cli（更新）
 
-- `installHooks`（同期）を `setupHooks`（非同期）に置き換える。`brw setup [--host claude|codex|all]` を足す（既定は `all`）。
+- `installHooks`（同期）を `setupHooks`（非同期）に置き換える。`brw setup [--host claude|codex]` を足す。
+- **対象のハーネスの決め方**: `--host` を指定したときはそのハーネスだけを対象にし、確認できなければ失敗にする。省略したときは、導入先リポジトリが宣言しているハーネスを対象にする（Claude: `.claude/settings.json` の `enabledPlugins` に BRW がある。Codex: `.codex/config.toml` の `[plugins."branch-release-workflow@…"]` がある）。どちらの宣言も無いときは、利用できるハーネス（Claude は常に、Codex は `codex` コマンドが見つかるとき）を対象にし、Codex が対象外（宣言なしで `codex` が見つからない・プラグイン未導入）のときは 1 行の注意を表示して失敗にしない。これにより、Claude だけを使うリポジトリが、手元に `codex` があるだけで失敗しない。
+- **呼び出し元（診断の入口）**: Codex の検査結果（`inspectCodexPlugin`）を `diagnose` へ渡す箇所は 2 つある。`runSetup` の導入後の検査と、`brw check` の追加節（`runStateCheck`。すでに非同期）。どちらも対象のハーネスの決め方を共有する。`runStateCheck` は従来どおり経路ごとの状態と限界を表示するだけで、終了コードには含めない（導入の誤りは `brw setup` の終了コードで扱う）。
 - 手順: ① Claude の登録を `checkClaudeHooks` で検査する（従来どおり）。② Codex を対象に含めるとき、`inspectCodexPlugin` を呼ぶ。③ 結果に応じて分岐する。
 
 | 検査結果 | 動作 | 終了コード |
@@ -365,7 +367,7 @@ export function registerHookTrust(inspection: Extract<CodexInspection, {status: 
 | `installed` ＋ 不一致 | 古いキャッシュとして、`codex plugin add` の再実行を案内 | 1 |
 | `not-installed`／`disabled` | 導入に必要な 2 つのコマンド（`marketplace add`・`plugin add`）を表示し、導入先リポジトリの `.codex/config.toml` の記入例へ誘導 | 1 |
 | `unsupported`（フック無効） | 理由と、設定の見直しの案内 | 1 |
-| `unavailable` ＋ `codex-not-found` | `--host all` では対象外として 1 行表示して続ける。`--host codex` では失敗 | 0（all）、3（codex） |
+| `unavailable` ＋ `codex-not-found` | Codex が対象（`--host codex`、または `.codex/config.toml` の宣言がある）なら、見つからないことを表示して失敗にする。対象でなければ 1 行の注意だけ | 3（対象のとき）、0（対象でないとき） |
 | `unavailable` ＋ その他 | 確認できなかった理由と、`/hooks` での確認方法 | 3 |
 
 - 非対話の実行でも同じ分岐で、失敗は必ず非 0 の終了コードで示す（要件 7.3）。信頼の確認を飛ばすオプション（`--dangerously-bypass-hook-trust`）は使わず、案内にも出さない。
@@ -424,7 +426,7 @@ enabled = true
 
 - **対応表と配布物（要件 3、1.3、8.4）**: `tests/hook-registry.mjs` で、`hooks/hooks.json`・`hooks/codex-hooks.json` が `definitionOf` の結果と一致すること（3.3）、一方の定義を壊すと差異が報告されること（3.4）、両マニフェストの `name`・`version` の一致、Codex 用マニフェストの `hooks` の指す先、配布物にシンボリックリンクが無いこと（3.5）、Claude のコマンドが `claude`・Codex のコマンドが `codex` を引数に持つこと（3.1、3.2）を検査する。
 - **Codex クライアント（要件 4、5）**: `tests/codex-plugin.mjs` と偽の `codex`（`tests/support/fake-codex.mjs`）で、未導入・無効・導入済み、フックの `untrusted`・`modified`・`trusted`・`managed`、フック機能の無効、`codex` が無い・古い・応答しない、定義の件数の不一致を再現する。信頼登録が BRW のフックのキーだけを書くこと（4.3、4.8）、再実行で変更なしになること（4.5）、途中失敗で残りだけを書くこと（4.7）、書いても `trusted` に変わらないときに成功と報告しないこと（4.6）を確かめる。
-- **診断と `brw setup`（要件 5、4.1〜4.7、7.3）**: `tests/hook-diagnose.mjs`・`tests/setup-cli.mjs` で、上の状態語彙の対応表と終了コードの分岐を、偽の検査結果で確かめる。`--host all` で Codex が無い環境が失敗にならないこと、`--host codex` では失敗になることを含む。旧方式の検出が出力に現れないこと（5.5）。
+- **診断と `brw setup`（要件 5、4.1〜4.7、7.3）**: `tests/hook-diagnose.mjs`・`tests/setup-cli.mjs` で、上の状態語彙の対応表と終了コードの分岐を、偽の検査結果で確かめる。宣言が Claude だけのリポジトリで `codex` が無くても失敗にならないこと、`--host codex` または `.codex/config.toml` の宣言がある場合は `codex` が無いと失敗になること、`runStateCheck` が終了コードを変えずに表示することを含む。旧方式の検出が出力に現れないこと（5.5）。
 - **旧方式の削除（要件 2.3、2.4、8）**: `tests/branch-ops.mjs` で、`brw create`・`brw resume` が worktree に `.codex/` や `info/exclude` の追記を作らないこと（2.4）を確かめる。削除対象のファイルが無いこと、文書に旧方式の記述が残っていないこと（8.2）を検査する。
 - **実機の受け入れ（要件 7、9）**: `tests/real-env/codex-plugin.mjs` を、`gpt-6.2-sol`（思考の深さ medium）の `codex exec` で実行する（9.2）。導入から保護ブランチの拒否、linked worktree での動作、非対話での信頼登録の有無による差までを通しで確かめる（7.2、2.3）。`claude plugin validate`・`eval` を通す（9.3、8.4）。
 

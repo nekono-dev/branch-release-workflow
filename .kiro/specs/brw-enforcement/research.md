@@ -193,3 +193,9 @@ harness-plugin-unification の research.md の同名の節に、検証の条件�
 - **Stop の案内（2.12〜2.15）**: `reason` はモデルに `hook_prompt` として届き、再入では `stop_hook_active: true` になる。案内の対象がエージェント自身の作業で生じた変更のときは commit・push が実行された。無関係な既存の変更のときは「依頼の範囲外」として実行されなかった。案内文に、この作業で生じた変更かどうかの判断と、そうでない場合の報告を含める。
 - **PostToolUse の追加文脈**: Codex では `additionalContext` がモデルに届く（Claude は未確認）。commit 直後の push の案内（Non-Goals）の実現可能性の材料になるが、利用者の判断（残余リスクの許容。中断の契機はトークンの使い切りと作業の停止）により、本 spec では採らない。
 - **中断の契機と Stop の関係**: トークンの使い切りと利用者による停止では、Stop が呼ばれない場合がある（Codex には別に `interrupt` イベントがある）。この残余リスクは許容され、取りこぼしは区切りごとの push で最小化する。それ以外の契機での中断は、利用者の依頼（「commit して」「push して」）で扱う。
+
+### 設計の検証で訂正した点（2026-11-23）
+
+- 設計では commit の確認省略を `brw.mjs` の `autoApprovable`（`safePush` と同じ作法）に足す案にしていたが、フックの実際の経路は `agent-hooks.mjs` の `judgeBash` → `operation-decision.mjs` の `evaluateAll`（`eligibleForApproval`）→ `plainOperation` だった（`autoApprovable` は手動実行用の旧経路）。設計を、`evalCommit`・`operation-policy.mjs` の flags・`plainOperation` の複合コマンドへの対応に改めた。
+- `plainOperation` は変更操作がちょうど 1 つの `git`・`gh` だけを許す。`git add` は読み取り扱いのため、`git add … && git commit …` を含む複合は現状では確認省略されない。この点も設計に含めた。
+- 既存の `stopGuidance` は、セッション ID や状態ファイルが無いと先頭で `null` を返す。残りの案内はこれと独立に評価する構造に改めた。

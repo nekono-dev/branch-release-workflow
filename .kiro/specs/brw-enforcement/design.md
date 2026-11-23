@@ -102,7 +102,7 @@ flowchart LR
 | `scripts/ruleset-apply.mjs` | 新規 | 既存ルールの再利用、不足分だけの Ruleset 追加、応答不確実時の照合 |
 | `scripts/ruleset-inspect.mjs` | 新規 | 適用後・日常の実効ルールと作業経路（迂回可能な権限）の検査 |
 | `scripts/setup-cli.mjs` | 新規 | `brw setup`・`--migrate`・`brw check --ruleset` の入口（対象の決定、問い、表示、終了コード） |
-| `scripts/brw.mjs` | 更新 | サブコマンドの振り分け、既存ブランチ操作と各モジュールの呼び出し（旧 `hook` サブコマンドは手動実行用で、フック登録は agent-hooks.mjs）。追加: 確認省略の対象に `git add`・`git commit`（`safeStage`・`safeCommit`） |
+| `scripts/brw.mjs` | 更新 | サブコマンドの振り分け、既存ブランチ操作と各モジュールの呼び出し（旧 `hook` サブコマンドは手動実行用で、フック登録は agent-hooks.mjs）。`autoApprovable` など手動実行用の判定は拡張しない（実際の確認省略の経路は `operation-decision.mjs` と `agent-hooks.mjs`） |
 | `hooks/hooks.json` | 更新 | Claude プラグインのイベント登録。Codex 用の定義と導入は harness-plugin-unification が持つ（`scripts/install-codex.mjs` は削除） |
 | `SKILL.md`、`references/setup.md`、`references/config.md`、`assets/config.example.json` | 更新 | ゲートで求めるワークフロー、導入・移行・復旧と対応範囲、宣言例。追加: SKILL.md の「作業の区切りの commit・push」（「してよい」を「行う」に改める）、`references/config.md` の `autoApprove.commit` と push 禁止の扱い |
 | `CLAUDE.md`（このリポジトリ） | 更新 | このリポジトリで cc-sdd の各フェーズ・各タスクの区切りに commit・push する指示（`kiro-*` スキルは書き換えられないため） |
@@ -178,7 +178,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | 2.1, 2.6, 2.8 | 操作判定、フック変換 | 送り先の検証と確認省略、明示制限の優先 |
 | 2.2, 2.3, 2.4, 2.5 | 完了公開、フック変換 | 状態と push・保護対象への PR 作成・再利用 |
 | 2.7 | 完了公開、GitHub クライアント | 失敗の報告、push 後および作成応答消失時の復旧 |
-| 2.9, 2.10 | SKILL.md・CLAUDE.md の指示、操作判定（commit の確認省略） | 区切りの commit・push、`safeStage`・`safeCommit`、`autoApprove.commit` |
+| 2.9, 2.10 | SKILL.md・CLAUDE.md の指示、操作判定（commit の確認省略） | 区切りの commit・push、`evalCommit` の確認省略、`plainOperation` の複合コマンド、`autoApprove.commit` |
 | 2.11 | 区切りの commit・push、`brw resume`、作業ブランチの残り | リモートからの再開（既存の `resume`）、終了時の検出 |
 | 2.12, 2.13 | 作業ブランチの残り、フック変換（Stop） | `remainderOf`、Stop の統合案内、調査のみの応答は止めない |
 | 2.14 | 作業ブランチの残り、完了公開の状態（`noPush`）、宣言（`autoApprove.push`） | push 禁止時は commit までの案内と未 push の報告 |
@@ -210,7 +210,12 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 - 開発ブランチは命名規則を満たし、`workBranches` に一致するものから恒常的な分岐元と `protectedBranches` を除いて判定する。保護・宣言外への直接更新を拒否する。BRW の作成・再開は正規の CLI コマンドから行う。既存の branch-only と worktree 付きの両方に対応し、`resume` でローカルブランチから worktree を作れるようにする。
 - シェル入力は引用符を考慮して解析し、ホストから確認できる実際の実行ディレクトリ、Git の `-C`、実際の remote・refspec と追跡設定を照合する。ブランチ変更を含み、内容を確定できない複合操作には拒否を返す。確認省略はコマンド全体の対象が検証できる場合に限る。強制・削除、未登録や編集中の宣言、明示オプトアウトには確認省略を適用しない。GitHub を変更する MCP ツールも既知の引数を検証する。対応外の書き込みツールは、ホストが遮断を支援する場合は BRW 経由へ誘導し、それ以外は検査で強制範囲外と表示する。
 - Claude は `PreToolUse` で拒否と許可を返す。Codex は同イベントで明示的に拒否し、確認省略は `PermissionRequest` に対してのみ許可を返す。導入済みの対応経路では、変更能力のある呼び出しを分類できない場合や、リポジトリ・操作・更新先のいずれかを確定できない場合は、理由付きで拒否する。既知の変更ツールで必須入力が欠ける場合も同じ。通常のホスト承認に委ねるのは、BRW の適合判定が済み、確認省略の条件だけを満たさない操作に限る。既知の照会と未導入リポジトリは通過させる。導入設定だけがある場合は変更を保留し、設定の復旧を案内する。フック自体が届かない経路は導入検査で報告する。
-- **commit の確認省略（2.9, 2.10）**: `autoApprovable` の対象に、作業ブランチ上の `git add` と `git commit` を加える（`safeStage`・`safeCommit`。`safePush` と同じ作法で、複合コマンドは全区間が条件を満たすときだけ省略する）。条件: 登録済みで作業ツリーの内容が HEAD と一致する宣言（リポジトリ直下の `.branch-release-workflow.json`。`autoApprove` はその項目）、`autoApprove.commit` が明示的に `false` でないこと、現在のブランチが `judgeBranch` で allow（作業ブランチ）であること。`git add` は `-A`・`-u`・`--all`・`-N`・`-v` とパス指定だけを許し、`git commit` は `-m`・`-F`・`-a`・`-s`・`-q`・`--allow-empty` だけを許す。`--amend`・`--no-verify`・`-n`・`-c`（設定の上書き）・環境変数の前置・展開を含む引数は省略の対象外とし、通常の承認に任せる。メッセージは、リテラルの引用文字列、またはクォートした heredoc（`-m "$(cat <<'EOF' … EOF)"`、本文は展開されない形）に限って受け入れる。Claude は `PreToolUse` の許可、Codex は `PermissionRequest` の許可で返し、保護ブランチ・宣言外の commit は従来どおり拒否する。Codex の対話相当（承認方針 `on-request`）では、`git add … && git commit …` はサンドボックスの失敗のあとにエスカレーションされ、`PermissionRequest` フックへ全コマンド文字列で届き、許可で承認要求なしに実行されることを実機で確認した。非対話（`codex exec`）は承認方針が常に `never` で `PermissionRequest` が発生せず、`.git` が読み取り専用のため、実行側の書き込み許可（`--add-dir`）が無いと commit・push は失敗する（BRW のフックでは解決できない。診断の `limits` と導入手順に明記する）。
+- **commit の確認省略（2.9, 2.10）**: 実際の確認省略の経路は、`agent-hooks.mjs` の `judgeBash` が `evaluateAll`（`operation-decision.mjs`）の結果 `eligibleForApproval` と `plainOperation` の両方を満たすときに許可を返す形である（`brw.mjs` の `autoApprovable`・`safePush` は手動実行用の旧経路で、拡張しない）。この経路に次を足す。
+  - `operation-decision.mjs` の `evalCommit`: 開発ブランチへの commit が、登録済みで作業ツリーの内容が HEAD と一致する宣言（リポジトリ直下の `.branch-release-workflow.json`。`autoApprove` はその項目）で、`autoApprove.commit` が明示的に `false` でなく、通常の commit（`--amend`・`--no-verify`・`-n`・`-c`（設定の上書き）・環境変数の前置・メッセージ以外の展開を含まない）のとき、`eligibleForApproval`（`approval: "skip"`）を返す。そうでなければ従来どおり `approval: "normal"`（通常の承認に任せる）。保護ブランチ・宣言外は従来どおり拒否する。
+  - `operation-policy.mjs`: `git commit` の分類に、上の除外条件（`amend`・`noVerify`・設定の上書き）を `op.flags` として持たせる。メッセージは、リテラルの引用文字列、またはクォートした heredoc（`-m "$(cat <<'EOF' … EOF)"`。既存の解析器は heredoc を読めるため、本文が展開されない形だけを通常の引数として扱う）に限る。
+  - `agent-hooks.mjs` の `plainOperation`: 現在は変更操作がちょうど 1 つの `git`・`gh` コマンドだけを対象にする。agent の典型的な `git add <パス> && git commit -m …`（読み取り扱いの `git add` と commit の複合。続けて `git push` を含むこともある）が確認省略されるよう、(a) 判定対象は `query` 以外の操作だけを数える、(b) 各区間は `cd`・`git add`・`git commit`・`git push` のいずれかで、`query` 以外の操作がすべて `eligibleForApproval` のときだけ許可する、に改める。パイプ・リダイレクト・その他のコマンドを含む複合は従来どおり通常の承認に任せる。`git add` は `-A`・`-u`・`--all`・`-N`・`-v` とパス指定だけを許し、それ以外の引数（`-f`・`--force`・`-i`・`-p` など）を含むときは対象外にする。
+  - `lib.mjs`: `validateConfig` が `autoApprove.commit` を受け付け、`autoApproveOf` が `commit` を返す。
+  - Claude は `PreToolUse` の許可、Codex は `PermissionRequest` の許可で返す。
 - `brw merge <source>` は、元 ref と checkout 先の両方が宣言済みの開発ブランチと確認できる場合にローカルマージする。対象 worktree と確定した元コミットを使い、競合は Git の状態と解決方法を返す。通常の開発ブランチへの push は共通判定に従う。開発間の取り込みに PR 作成は不要。
 - `protectedBranches` と恒常的な分岐元は、エージェント操作上の保護対象とする。対応するフック経路で直接の PR 作成も同じ分類を使い、宣言済み開発ブランチから保護対象への PR だけを BRW の公開操作として許可する。開発ブランチ間はローカルマージを案内し、宣言外への PR 作成は拒否する。保護対象への PR は作成または再利用まで行い、利用者に GitHub 上の PR URL、base、squash の案内を返す。エージェントからの GitHub マージと自動マージ予約、および非開発ブランチへのローカルマージは、対応するフック経路で拒否する。BRW は GitHub のマージ API を呼ばない。GitHub 側の直接更新とマージ方式の制限は、選択して適用した Ruleset の対象 ref に効く。
 
@@ -236,6 +241,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 
 **責務と制約**
 - 読み取りだけを行い、状態・設定・リモートを変更しない。ネットワークを使わない（追跡ブランチの古さは許容する）。
+- 既存の `stopGuidance` は、セッションの ID や状態ファイルが無い・読めないときに先頭で `null` を返す。これを `publishGuidance`（既存の処理。セッションに結び付いた準備済み作業の案内）と、残りの案内（本節。cwd と Git だけを使う）に分け、残りの案内は `publishGuidance` の早期の `null` に影響されず常に評価する。2 つの案内を 1 つの block にまとめる（公開の案内を先に並べる）。
 - 対象は、cwd のリポジトリが BRW 導入済みで、現在のブランチが `judgeBranch` で allow（作業ブランチ）のとき。保護ブランチ・恒常的な分岐元・宣言外のブランチ・detached HEAD・導入していないリポジトリは対象外（案内しない。2.16、1.5）。
 - 未コミットの変更: `git status --porcelain --untracked-files=normal`（ignore されたものは含まない。新規の未追跡ファイルを含める）。
 - 未 push の commit: `git rev-list --count HEAD --not --remotes`（既知のどのリモート追跡ブランチにも含まれない commit の数）。追跡ブランチが無い新規のブランチも検出でき、初回の push 前でも成立する。
@@ -311,6 +317,7 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 設定用の管理者資格情報は導入操作で使用し、通常作業の資格情報は Ruleset を編集・迂回できないものを使用する。適用や検査に使う資格情報の値は出力しない。
 - 対応するフック経路の同一性、実行ディレクトリ、操作対象を検査する。リポジトリや worktree が供給する未登録の宣言や CLI パス変更で、確認省略や書き込みの許可範囲が広がらないようにする。
 - フックの信頼の登録は harness-plugin-unification の `brw setup` が BRW のフックに限って行う（利用者の決定で、従来の「製品の確認に任せる」を改めた）。設定だけで強制を保証できない経路は導入診断で明示する。
+- commit の確認省略は commit する内容を検査しない（既存の push の確認省略と同じ）。秘密情報の混入の防止は `.gitignore` やリポジトリ側の対策に委ね、`git add` は強制（`-f`）や対話（`-i`・`-p`）の指定を対象外にする。
 - commit の確認省略は、作業ブランチ、登録済みの宣言、限定した引数の形に限り、`--amend`・`--no-verify`・設定の上書き・展開を含む引数は対象外にする。確認を省いても、保護ブランチ・宣言外への commit・push の拒否は変わらない。
 
 ## Migration Strategy
@@ -321,5 +328,5 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 
 - 2026-11-21: File Structure Plan を実際のファイル分割に合わせ、Codex の linked worktree の前提（worktree に `.codex/` があるときだけ親の hooks.json を読む。登録・信頼は親に結び付く）を訂正した。
 - 2026-11-21: 利用者の決定（仕様変更）により、Ruleset の既定を「導入する」から「導入しない（既定 off の任意の追加事項）」へ改訂した。承認済みの文書への改訂で、要件 4.1〜4.3 と対話の既定・非対話の未指定の扱いを変更した（`--ruleset on` と保存済みの導入の挙動は不変）。
-- 2026-11-23: 要件 2.9〜2.16（区切りごとの commit・push と、応答終了時の残りの検出）を追加した。commit の確認省略（`safeStage`・`safeCommit`、`autoApprove.commit`）、Stop の統合（`work-remainder.mjs`）、指示の文面を設計した。Codex へのフックの届け方は harness-plugin-unification に委ね、`hook-install.mjs`・`install-codex.mjs` の記述を削除対象へ改めた。
+- 2026-11-23: 要件 2.9〜2.16（区切りごとの commit・push と、応答終了時の残りの検出）を追加した。commit の確認省略（`evalCommit`・`plainOperation`・`autoApprove.commit`。検証で `brw.mjs` ではなく実際の経路に改めた）、Stop の統合（`work-remainder.mjs`）、指示の文面を設計した。Codex へのフックの届け方は harness-plugin-unification に委ね、`hook-install.mjs`・`install-codex.mjs` の記述を削除対象へ改めた。
 - 2026-11-23（再生成）: Codex 0.167 の実機検証の結果を反映した。`PermissionRequest` による commit の確認省略（対話相当）、非対話での `.git` 書き込み許可の要否、Stop の案内への従い方（案内文に「この作業で生じた変更か」の判断を含める）、PostToolUse の追加文脈（Codex で到達。本 spec では採らない）。利用者が `autoApprove.push: false` の解釈と残余リスク（中断の契機はトークンの使い切りと作業の停止）を確認・許容した。
