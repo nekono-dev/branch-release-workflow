@@ -1,16 +1,16 @@
 {
   "feature_name": "harness-plugin-unification",
   "created_at": "2026-11-23T00:23:11Z",
-  "updated_at": "2026-11-23T08:53:11Z",
+  "updated_at": "2026-11-23T09:26:28Z",
   "language": "ja",
-  "phase": "requirements-generated",
+  "phase": "design-generated",
   "approvals": {
     "requirements": {
       "generated": true,
-      "approved": false
+      "approved": true
     },
     "design": {
-      "generated": false,
+      "generated": true,
       "approved": false
     },
     "tasks": {
@@ -20,5 +20,3 @@
   },
   "ready_for_implementation": false
 }
-
-

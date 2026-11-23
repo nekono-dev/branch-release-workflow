@@ -102,3 +102,31 @@
 ## 次の手順
 
 - `/kiro-spec-design harness-plugin-unification` で設計に進む。Research Needed の 1（スキルの参照規則）と 2（信頼の登録手段）は設計の冒頭で決める。
+
+---
+
+## 設計時の追加調査と統合（2026-11-23）
+
+設計の前に、ギャップ分析の Research Needed のうち設計を左右する 4 件を、一時的な `CODEX_HOME`（Codex 0.167、`gpt-6.2-sol`・medium）で実機確認した。一時ディレクトリは確認後に削除した（認証ファイルの複製を含む）。
+
+### 確認した事実
+
+| 項目 | 結果 | 設計への反映 |
+|---|---|---|
+| エージェントの Bash の環境変数 | `PLUGIN_ROOT`・`CLAUDE_PLUGIN_ROOT`・`PLUGIN_DATA` は**フックの実行時にだけ**設定され、エージェントが実行する Bash には設定されない | スキルからのスクリプト参照は環境変数に頼らず、SKILL.md からの相対パス（`<skill>/../../scripts/brw.mjs`）にする |
+| 機械可読な状態の取得 | `codex plugin list --json`（`installed[]` に `pluginId`・`version`・`installed`・`enabled`）と `codex plugin add --json`（`installedPath`）がある。app-server の `hooks/list` は `trustStatus`（`managed`・`untrusted`・`trusted`・`modified`）と `currentHash`、`sourcePath`、`pluginId` を返す | 表の出力を解析せず、JSON と app-server の応答を境界で検証して使う。`modified` を「更新後に登録し直していない信頼」として検出できる |
+| 同じ版のまま中身を変えた場合 | `codex plugin add` の再実行でキャッシュが更新され、信頼状態は `trusted` → `modified` になる。`currentHash` は変わる | 版を上げなくても更新は届く。`brw setup` で `modified` を登録し直す。自己テストでは両マニフェストの版の一致だけを検査する |
+| 信頼の書き込み | `config/batchWrite` で `hooks.state."<key>".trusted_hash` を `upsert` すると `trusted` になり、Codex が `trusted_content_hash` を補う。`codex exec` でも linked worktree でも、登録後はフックが動く | BRW は `currentHash` をそのまま書く（ハッシュを自分で計算しない）。書き込みは BRW のフックのキーだけ |
+
+### 設計の統合（synthesis）
+
+- **一般化**: 要件 3（定義の取り違え防止）、5（診断）、4（信頼）は、「どのイベントをどのハーネスに登録するか」という 1 つの表に帰着する。対応表を 1 か所に持ち、定義ファイルの生成・検査、信頼登録の期待件数、診断のイベント一覧のすべてがそれを参照する形にした。
+- **Build vs Adopt**: 導入は Codex の公式プラグイン機構を採用し、独自の登録先（`.codex/hooks.json`）・独自の導入コマンドは持たない。信頼の登録は、手動承認（`/hooks`）では非対話・クラウドで要件 7 を満たせないため、app-server を使う。app-server は実験的な内部 API であり、依存を `codex-plugin.mjs` 1 か所に閉じ込め、失敗時は手動承認へ切り替える。
+- **簡素化**: `brw setup` は `codex plugin add` を実行しない（導入は利用者またはセットアップスクリプトの操作とし、`brw setup` は確認と信頼の登録だけを行う）。マーケットプレイス定義は `.claude-plugin/marketplace.json` を共有し、`.agents/plugins/marketplace.json` は足さない。`hook-install.mjs` の Codex 部分は丸ごと削除し、Claude の検査だけを `hook-registry.mjs` へ移す。worktree の有効化は不要になるため削除する。
+
+### 持ち越し（実装時に確認する事項）
+
+- Git のマーケットプレイス（`owner/repo`・URL）を `codex plugin marketplace add` で追加したときに `config.toml` へ書かれる形式（導入先の `.codex/config.toml` の記入例に使う）。ローカルの指定でしか確認していない。
+- `.claude-plugin/plugin.json` の `skills` を `./skills/` に変えたときの Claude 側のスキル名・スラッシュコマンドの不変（`claude plugin validate`・`eval`）。
+- Codex の管理者設定（`allow_managed_hooks_only` など）でプラグインのフックが無視される場合の挙動。検出の専用経路は持たず、信頼を書いても `trusted` に変わらなければ `not-effective` として扱う。
+- Codex Cloud のタスク上でのプラグイン・フックの挙動（文書に記載がなく、本 spec の対象外とする）。
