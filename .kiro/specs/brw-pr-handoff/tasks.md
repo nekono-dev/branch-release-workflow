@@ -19,7 +19,7 @@
   - 公開後に作業状態を読むと、リモート名・OID・URL・取り込み先が取り出せる。既存の公開の試験が変わらず通る。
   - _Boundary: 公開の状態記録_
   - _Requirements: 4.4, 4.6, 4.7_
-- [ ] 1.4 手順書の経路で直接の PR 作成を拒否する
+- [x] 1.4 手順書の経路で直接の PR 作成を拒否する
   - brw-branch-gate の 1.2 で作る共通の入口を使い、`brw guard` が `gh pr create` などの直接の PR 作成を、このタスク群の 1.2 の判定で拒否する。
   - `brw guard "gh pr create …"` が拒否になり、案内に `brw pr` が含まれる。
   - _Depends: 1.2（このタスク群）、brw-branch-gate の 1.2_

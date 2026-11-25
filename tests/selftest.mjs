@@ -123,6 +123,9 @@ const prRepo = mkRepoWithRemote({ branch: "dev/foo", config: cfg });
 gitOut(prRepo.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
 const guardPr = run(prRepo.dir, "guard", "gh pr create --base dev/bar --head dev/foo --title t");
 eq("brw-branch-gate/1.6 guard は PR 作成の拒否を終了コード 1 で返す", [guardPr.status, guardPr.stdout.includes("[deny]")], [1, true]);
+// brw-pr-handoff 1.1・1.6: 規則に適合する直接の PR 作成も、guard が終了コード 1 で拒否し、brw pr を案内する
+const guardPrOk = run(prRepo.dir, "guard", "gh pr create --base develop --head dev/foo --title t --body b");
+eq("brw-pr-handoff/1.6 guard は規則に適合する直接の PR 作成も拒否し、brw pr-template と brw pr を案内する", [guardPrOk.status, guardPrOk.stdout.includes("[deny]"), guardPrOk.stdout.includes("brw pr-template"), guardPrOk.stdout.includes("brw pr")], [1, true, true, true]);
 prRepo.cleanup();
 const newSetup = mkRepo("develop", null);
 writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
