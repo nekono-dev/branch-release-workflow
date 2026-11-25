@@ -75,3 +75,13 @@
 | 3. 新 worktree で `git stash apply S` | 終了コード 0。変更・削除・実行権限・バイナリがすべて現れた。ステージ済みの変更は未ステージの変更として現れた（案内に書く） |
 | 4. 照合 | 存在するファイルは `S` のツリーとオブジェクト ID が一致。**削除されたファイルは `rev-parse` の出力が不定になるため、存在の有無（`git cat-file -e S:<パス>`）で比べる**（設計に反映） |
 | 5. 再照合と取り除き | 2 回目の `git stash create` のツリーが `S` と一致。`git restore --staged --worktree --source=HEAD -- <パス>` で該当のパスだけが戻り、**未追跡のファイルは触れずに残った** |
+
+
+### 実機での確認（タスク 4.3、2026-11-25）
+
+- **実エージェントの実行は未検証**: 使い捨てリポジトリで `claude -p ... --permission-mode bypassPermissions` を入れ子で起動しようとしたが、実行環境の自動判定（auto mode classifier、理由は Undermining Oversight）に拒否された。権限の迂回はせず、実エージェントを動かす確認は行っていない。利用者が許可した環境で、`tests/real-env/` の方式（一時クローン・フックの導入）に沿って実施する必要がある。
+- **代わりに確認できたこと**（使い捨てリポジトリ、`agent-hooks.mjs` を標準入力のフック入力で実プロセス起動）:
+  - Claude Code の `Bash`（`git switch -c dev/probe-a`）→ `permissionDecision: allow` と `updatedInput.command`。その書き換え後のコマンドを実際の bash で実行すると、worktree `.claude/worktrees/dev-probe-a` が作られ、続く `pwd` が worktree、ブランチが `dev/probe-a`（作業場所が移った）。案内の見出し 4 行が表示された。
+  - `EnterWorktree {name}` → 拒否。2 手（`brw create` → `EnterWorktree` の path 指定）の案内。`EnterWorktree {path: <BRW の worktree>}` → 応答なし（通過）。
+  - Codex の `Bash`（同じ入力）→ 拒否。「次のコマンド:」に作成と移動（`cd <worktree>`）を連ねたコマンドを示した。
+- **実機で未確認**: 書き換え後の `cd` が、エージェントの次の Bash 呼び出しの作業ディレクトリとして引き継がれること（設計時の PoC #2 で確認済みの挙動に依存。実エージェントでは未再確認）。
