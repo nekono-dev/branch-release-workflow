@@ -32,6 +32,7 @@ import {
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
+import { denyOfCommand } from "./agent-hooks.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
@@ -707,9 +708,19 @@ function renderWrangler(args) {
   process.exit(deployCf.writeAndHook(root, config, target, r));
 }
 
+// 手順書の経路で、共通の判定の拒否を必ず止める操作の種類: ブランチの作成・再開（create）と PR 作成（pr-create）
+const GUARD_OP_KINDS = ["create", "pr-create"];
+
 // Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
 function guard(args) {
   if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド"', 2);
+  // 作成・再開・PR 作成を含むコマンドは、共通の判定（フックと同じ）が拒否したら、拒否の code によらず止める。
+  // それ以外（commit・push だけ）は従来の判定へ進み、出力と終了コードを変えない
+  const denial = denyOfCommand(args[0], process.cwd());
+  if (denial && denial.kinds.some((k) => GUARD_OP_KINDS.includes(k))) {
+    console.log(`[deny] ${denial.reason}`);
+    process.exit(1);
+  }
   const result = judgeCommand(args[0], process.cwd());
   console.log(`[${result.decision}] ${result.reason ?? "ブランチ規則に適合しています。"}`);
   if (result.decision !== "allow") process.exit(1);

@@ -268,6 +268,16 @@ function judgeBash(command, cwd) {
   return PASS;
 }
 
+/**
+ * コマンドを共通の操作判定にかけ、拒否なら判定（verdict・code・reason）と、含まれる操作の種類（kinds）を返す。拒否でなければ null。
+ * 手順書の経路（brw guard）が、フックと同じ拒否を再利用するために使う。kinds で作成・PR 作成かを判断できる。
+ */
+export function denyOfCommand(command, cwd) {
+  const cls = classifyCommand(command, cwd);
+  const d = evaluateAll(cls, restrictionsFor(cwd));
+  return d.verdict === "deny" ? { ...decisionOf(d), kinds: cls.operations.map((o) => o.kind) } : null;
+}
+
 /** ホストの入力（オブジェクトまたは JSON 文字列）を判定する。判定できない入力は PASS（確認省略しない）。 */
 export function decideHook(host, event, input) {
   try {

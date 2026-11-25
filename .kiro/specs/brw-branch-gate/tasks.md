@@ -8,7 +8,7 @@
   - 既存の分類の試験が変わらず通り、新しい項目が `switch -c`・`checkout -b`・`branch`・`worktree add -b` の各形で期待どおりに取れる（開始点あり・なしを含む）。
   - _Boundary: 判定の分類_
   - _Requirements: 1.1, 1.4, 3.1_
-- [ ] 1.2 手順書の経路（`brw guard`）が共通の判定を先に呼ぶようにする
+- [x] 1.2 手順書の経路（`brw guard`）が共通の判定を先に呼ぶようにする
   - `brw guard` が、旧来の commit・push の判定の前に、共通の分類と判定を呼び、作成・再開・PR 作成の拒否があれば案内を表示して終了コード 1 にする。拒否が無ければ従来の判定へ進む。
   - `brw guard "git switch -c dev/x"` が拒否になり、従来の commit・push の判定結果は変わらない。
   - brw-pr-handoff の「直接の PR 作成の拒否」が同じ入口を再利用できる形にする。

@@ -36,6 +36,8 @@ import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
+import { decideHook } from "../scripts/agent-hooks.mjs";
+import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -98,6 +100,28 @@ eq("branch-guard/AC-12 旧パスの宣言を後方互換で読める", loadConfi
 eq("branch-guard/AC-13 Codex guard は作業ブランチを許可", run(shared, "guard", "git push origin dev/foo").status, 0);
 eq("branch-guard/AC-13 Codex guard は保護ブランチへの送り先を拒否", run(shared, "guard", "git push origin HEAD:main").status, 1);
 eq("branch-guard/AC-13 Codex guard は不明な操作を確認扱いで停止", run(shared, "guard", "git push --all").status, 1);
+// 1.6: 手順書の経路も作成・再開の拒否を共通の判定で止める（commit・push の従来の結果は変えない）
+g(shared, "branch", "dev/other");
+const guardCreate = run(shared, "guard", "git switch -c dev/x");
+eq("brw-branch-gate/1.6 guard は作成の拒否を終了コード 1 で返す", guardCreate.status, 1);
+eq("brw-branch-gate/1.6 guard の作成の拒否は BRW の手順を示す", [guardCreate.stdout.includes("[deny]"), guardCreate.stdout.includes("brw create")], [true, true]);
+eq("brw-branch-gate/1.6 guard は再開の拒否を終了コード 1 で返す", run(shared, "guard", "git switch dev/other").status, 1);
+eq("brw-branch-gate/1.6 guard は作業ブランチの commit を従来どおり許可", run(shared, "guard", "git commit -m x").status, 0);
+// 1.6: 作成先が展開で決まる作成は、判定不能として guard でも拒否する（フックと同じ）
+eq("brw-branch-gate/1.6 guard は作成先を確定できない作成（判定不能）を終了コード 1 で拒否する", run(shared, "guard", 'git switch -c "$X"').status, 1);
+// 1.6: 宣言ファイルが壊れていると、作成は guard とフックの両方で拒否する（一致させる）
+const brokenDecl = mkRepoWithRemote({ branch: "main", config: cfg, register: false });
+writeFileSync(join(brokenDecl.dir, ".branch-release-workflow.json"), "{ 壊れた");
+const brokenHook = decideHook("claude", "PreToolUse", { tool_name: "Bash", tool_input: { command: "git switch -c dev/x" }, cwd: brokenDecl.dir });
+eq("brw-branch-gate/1.6 宣言が壊れていると、フックは作成を拒否する", brokenHook.verdict, "deny");
+eq("brw-branch-gate/1.6 宣言が壊れていると、guard も作成を終了コード 1 で拒否する（フックと一致）", run(brokenDecl.dir, "guard", "git switch -c dev/x").status, 1);
+brokenDecl.cleanup();
+// 1.6: PR 作成の拒否（開発ブランチ間の取り込み）を guard が終了コード 1 で返す
+const prRepo = mkRepoWithRemote({ branch: "dev/foo", config: cfg });
+gitOut(prRepo.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
+const guardPr = run(prRepo.dir, "guard", "gh pr create --base dev/bar --head dev/foo --title t");
+eq("brw-branch-gate/1.6 guard は PR 作成の拒否を終了コード 1 で返す", [guardPr.status, guardPr.stdout.includes("[deny]")], [1, true]);
+prRepo.cleanup();
 const newSetup = mkRepo("develop", null);
 writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
 eq("branch-guard/AC-12 未登録の共通宣言で worktree を作成できる", run(newSetup, "create", "shared-setup").status, 0);
