@@ -28,9 +28,11 @@
 - EnterWorktree の判定と、フックの対象入口の拡大（定義と導入検査）。
 - 判定の拡張（開始点の記録）と、それに対する試験・評価ケース・資料。
 
+- `brw create --carry`（追跡済みファイルの未コミットの変更を新しい worktree へ移す、安全確認つきの移動）。
+
 ### 担わない
 
-- ブランチ作成そのもの（`brw create`・`brw resume` の処理内容）。作成・再開の成否と配置先は既存のまま使う。
+- ブランチ作成そのもの（`brw create`・`brw resume` の処理内容）のうち `--carry` 以外。作成・再開の成否と配置先は既存のまま使う。未追跡のファイルの移動。
 - 保護・分岐元・宣言外のブランチの扱い（`operation-decision` の既存の判定）。
 - PR・片付け・公開計画（brw-pr-handoff、brw-enforcement）。
 
@@ -88,12 +90,15 @@ flowchart TD
 ```
 scripts/
 ├── branch-gate.mjs        # 新規: ゲートの計画（置き換え可否・コマンド組み立て・案内の書式・EnterWorktree の判定）
+├── carry.mjs              # 新規: 未コミットの変更の移動（退避の作成・適用・照合・取り除き・巻き戻し）
+├── brw.mjs                # 変更: create に --carry を追加し、carry.mjs を呼ぶ
 ├── operation-policy.mjs   # 変更: createOp が開始点（start）を記録する
 ├── agent-hooks.mjs        # 変更: judgeBash がゲートを呼ぶ、EnterWorktree を判定、responseOf が rewrite 応答を作る
 ├── hook-install.mjs       # 変更: CLAUDE_HOOKS に EnterWorktree の matcher を追加
 hooks/
 └── hooks.json             # 変更: PreToolUse に EnterWorktree の matcher を追加
 tests/
+├── carry.mjs              # 新規: 移動の安全確認（照合・巻き戻し・並行変更）の試験
 ├── branch-gate.mjs        # 新規: ゲートの計画の単体・契約テスト
 ├── agent-hooks.mjs        # 変更: rewrite 応答・EnterWorktree の契約テストを追加
 └── selftest.mjs           # 変更: 新規テストを呼ぶ
@@ -139,6 +144,12 @@ sequenceDiagram
 | 1.5 | 配置先以外・移動を確認できない環境は拒否 | `planGate`（配置先の照合） | `deny` |
 | 1.6 | 書き換え非対応のホストは拒否 | `agent-hooks`（host 判定） | `deny` |
 | 1.7 | 未導入リポジトリは何もしない | 既存の `repoState`（`unmanaged`） | 既存どおり通過 |
+| 1.8 | 追跡済みの未コミット変更があれば拒否し 2 択を案内 | `planGate`（`gate-dirty`）、`guidance` | `deny` |
+| 1.9 | 未追跡だけなら置き換え、残ることを案内 | `planGate` | `rewrite` の `notice` |
+| 1.10 | `--carry`: 適用・照合後にだけ取り除く | `carry.mjs`、`brw.mjs`（`create`） | `carryChanges` |
+| 1.11 | 失敗・不一致・分岐元のずれは巻き戻す | `carry.mjs`、`brw.mjs`（`create`） | `CarryResult.failed` |
+| 1.12 | 並行して変わったら取り除かない | `carry.mjs` | `CarryResult.keptBoth` |
+| 1.13 | 未追跡は移さず一覧を表示 | `carry.mjs` | `CarryResult.skipped` |
 | 2.1 | EnterWorktree の `name` は拒否し 2 手を案内 | `judgeEnterWorktree` | `deny` |
 | 2.2 | BRW の worktree への `path` は許可 | `judgeEnterWorktree` | 通過 |
 | 2.3 | それ以外の `path` は拒否 | `judgeEnterWorktree` | `deny` |
@@ -188,7 +199,8 @@ sequenceDiagram
   7. `via` が `worktree` のとき、パスが `<本体>/.claude/worktrees/<alias>` と一致する。一致しなければ拒否。
 - `action: "create"` でも、ブランチがローカルまたは `origin` に既にあるとき（リモートにだけある切り替えを含む）は `resume` として扱う。
 - `branchOnly`（`git branch <名前>`）は `brw create <名前> --branch-only` に置き換え、`cd` は付けない（作業場所を移さない）。
-- 作成は未コミットの変更を移さない。作業ツリーに未コミットの変更があるときは、案内に「未コミットの変更は元の作業ツリーに残る」と件数を書く（拒否はしない）。
+- 追跡済みファイルの未コミットの変更（`git status --porcelain` の `??` 以外）があるときは、置き換えず拒否する（`gate-dirty`）。案内は 2 つの選択肢: 「`brw create <名前>`（変更は元の作業ツリーに残る）」と「`brw create <名前> --carry`（変更を新しい worktree へ移す）」。どちらを選ぶかは、変更が自分のものかを知っている呼び出し側に委ねる。
+- 未追跡のファイルだけがあるときは置き換え、案内に「未追跡のファイル N 件は元の作業ツリーに残る」と書く。
 
 **契約**: Service
 
@@ -212,7 +224,7 @@ type GateResult =
 type GateDenyCode =
   | "gate-name-invalid" | "gate-start-unsupported" | "gate-compound"
   | "gate-outside-placement" | "gate-host-no-rewrite" | "gate-unresolved"
-  | "gate-action-unsupported";
+  | "gate-action-unsupported" | "gate-dirty";
 
 function planGate(input: GateInput): GateResult;
 ```
@@ -243,6 +255,33 @@ type EnterDecision =
   | { verdict: "deny"; reason: string; code: "gate-enter-name" | "gate-enter-path" | "gate-enter-unresolved" };
 function judgeEnterWorktree(input: EnterWorktreeInput, cwd: string | null): EnterDecision;
 ```
+
+#### carryChanges（`scripts/carry.mjs`）
+
+| 項目 | 内容 |
+|---|---|
+| 役割 | `brw create --carry` で、追跡済みファイルの未コミットの変更を新しい worktree へ安全に移す |
+| 要件 | 1.10〜1.13 |
+
+**方式**（research.md の検討を採用）
+1. 退避の作成: 元の作業ツリーで `git stash create` を実行し、変更を表すコミット `S` を得る（退避の置き場 `refs/stash` は使わない。他のセッションと共有されるため）。出力が空なら移す変更は無い。
+2. 前提の確認: `brw create` が決めた開始点のコミットが、元の作業ツリーの `HEAD` と同じであること。違えば移さず失敗（分岐元がずれていると適用が混ざるため）。
+3. 適用: 新しい worktree で `git stash apply <S>`。競合・失敗なら失敗。
+4. 照合: `S` が変更した全パスについて、新しい worktree の内容（ファイルの OID・存在・実行権限）が `S` と一致すること。
+5. 取り除き: 元の作業ツリーで、もう一度 `git stash create` した結果のツリーが `S` と同じときだけ、`git restore --staged --worktree --source=HEAD -- <パス>` で該当のパスだけを戻す（`reset --hard` は使わない）。違えば何も戻さない（`keptBoth`）。
+6. 失敗時の巻き戻し: 手順 2〜4 の失敗では、作成した worktree とブランチを削除する。元の作業ツリーには手順 5 まで触れない。
+
+**契約**: Service
+
+```typescript
+type CarryResult =
+  | { kind: "none" }                                              // 移す変更が無い
+  | { kind: "carried"; files: string[]; skipped: string[] }       // skipped は未追跡
+  | { kind: "keptBoth"; files: string[]; skipped: string[] }      // 元にも残した
+  | { kind: "failed"; reason: string };                           // 巻き戻し済み
+function carryChanges(opts: { source: string; worktree: string; startOid: string }): CarryResult;
+```
+- 不変条件: `carried` 以外では、元の作業ツリーの内容は呼び出し前と同じ。ステージ済みの変更は、移動後は未ステージの変更になる（案内に書く）。
 
 #### guidance（案内の書式）
 
@@ -280,6 +319,7 @@ BRW 案内: 置き換え | 拒否
 **実装メモ**
 - 連携: `createOp` の `start`・`branchOnly` を `planGate` が読む。
 - 検証: 書き換え後のコマンドの文字列を、引用の往復（シェルで解釈して元の引数に戻ること）で試験する。
+- リスク: `--carry` は元の作業ツリーを書き換える唯一の処理。取り除きの直前の再照合（手順 5）で、並行する他のセッションの変更を失わないようにする。
 - リスク: `brw create` が worktree 作成後に `renameSync`（宣言の未登録時）で失敗しうる。既存の挙動で、この仕様では変えない（拒否は残さない保証は、作成が失敗した場合の巻き戻しの対象外と明記する）。
 
 ## データモデル
@@ -307,6 +347,12 @@ BRW 案内: 置き換え | 拒否
 - 引用の往復: 空白・単引用符を含むパスでも、書き換えコマンドをシェルで解釈して元の引数に戻ること。
 - `judgeEnterWorktree`: `name` は拒否、BRW の worktree への `path` は通過、それ以外の `path`・入力不正は拒否（2.1〜2.4）。
 - 案内の書式: 見出し 4 行があり、特定の呼び出し側の語を含まず、同じ入力で同じ文面になること（4.2〜4.5）。
+
+### 移動（`tests/carry.mjs`）
+- 追跡済みの変更（変更・削除・実行権限・バイナリ）が新しい worktree に同じ内容で現れ、元から取り除かれること（1.10）。
+- 開始点が `HEAD` と異なるとき、適用が競合したとき、照合が一致しないときに、worktree とブランチが残らず元が変わらないこと（1.11）。
+- 照合と取り除きの間に元のファイルを書き換えると、何も取り除かず `keptBoth` になること（1.12）。
+- 未追跡のファイルは移らず、一覧が表示されること（1.13）。
 
 ### 統合（`tests/agent-hooks.mjs` ほか）
 - `handleHook("claude", "PreToolUse", …)` が `updatedInput` つきの許可を返し、`handleHook("codex", …)` が同じ入力で拒否を返すこと（1.6、5.4）。

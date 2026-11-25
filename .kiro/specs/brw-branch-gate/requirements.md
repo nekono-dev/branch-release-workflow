@@ -6,8 +6,8 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 
 ## Boundary Context
 
-- **In scope**: ブランチ・worktree の作成と作業場所の変更を試みる入口の判定、命名規則に合う素の git コマンドの `brw create` への置き換え、置き換えられない場合の拒否と案内、EnterWorktree の拒否と 2 手の案内、既存ブランチへの切り替えの扱い、利用者向けの資料と検査。
-- **Out of scope**: cc-sdd-bootstrap と kiro 系スキルの変更、`brw create` の命名規則・分岐元・配置先の変更、保護規則・Ruleset の変更、PR 作成・片付けの流れ（brw-pr-handoff）、宣言のないリポジトリの挙動の変更。
+- **In scope**: ブランチ・worktree の作成と作業場所の変更を試みる入口の判定、命名規則に合う素の git コマンドの `brw create` への置き換え、置き換えられない場合の拒否と案内、未コミットの変更を移す `brw create --carry`、EnterWorktree の拒否と 2 手の案内、既存ブランチへの切り替えの扱い、利用者向けの資料と検査。
+- **Out of scope**: cc-sdd-bootstrap と kiro 系スキルの変更、`brw create` の命名規則・分岐元・配置先の変更（`--carry` の追加を除く）、未追跡のファイルの移動、保護規則・Ruleset の変更、PR 作成・片付けの流れ（brw-pr-handoff）、宣言のないリポジトリの挙動の変更。
 - **Adjacent expectations**: 作業ブランチの作成・再開は、既存の `brw create` と `brw resume`（brw-enforcement）が行う。呼び出し側は素の git で試みるだけで、BRW を呼ぶ手順を知る必要はない。Codex では入力の書き換えを前提とせず、拒否と案内で扱う。
 
 ## 用語
@@ -23,13 +23,19 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 **Objective:** As a 呼び出し側（エージェントや cc-sdd-bootstrap）, I want 通常のブランチ作成を指示するだけで BRW の手順が適用されてほしい, so that BRW を知らなくても命名規則・分岐元・作業場所が統一される
 
 #### Acceptance Criteria
-1. When エージェントが BRW 導入済みのリポジトリで `git switch -c`・`git checkout -b`・`git branch <名前>`・`git worktree add -b` による作業ブランチの作成を実行しようとし、名前が宣言の命名規則に合うとき, the BRW shall その操作を `brw create` による作成に置き換えて実行する。
+1. When エージェントが BRW 導入済みのリポジトリで `git switch -c`・`git checkout -b`・`git branch <名前>`・`git worktree add -b` による作業ブランチの作成を実行しようとし、名前が宣言の命名規則に合い、追跡済みファイルの未コミットの変更が無いとき, the BRW shall その操作を `brw create` による作成に置き換えて実行する。
 2. When 置き換えを実行したとき, the BRW shall 作成された worktree へ作業場所を移し、続くコマンドが worktree の中で実行されるようにする。
 3. When 置き換えを実行したとき, the BRW shall 何が何に置き換えられたかと、作業場所が移ったことを自然文で表示する。
 4. If 名前が宣言の命名規則に合わない、分岐元を確定できない、または操作が他のコマンドと組み合わされていて対象を確定できないとき, then the BRW shall 置き換えず操作を拒否し、理由と実行すべき `brw create` の例を表示する。
 5. If 操作が `brw create` の配置先（リポジトリ本体の `.claude/worktrees/` の配下）以外の場所を指している、または作業場所の移動を確認できない実行環境であるとき, then the BRW shall 置き換えを行わず、拒否して `brw create` の使い方を案内する。
 6. Where 実行環境が操作の書き換えに対応していない（Codex など）, the BRW shall 置き換えを行わず、拒否して実行すべき手順を表示する。
 7. Where BRW を導入していないリポジトリ, the BRW shall ブランチ・worktree の作成を拒否も置き換えもしない。
+8. If 追跡済みファイルの未コミットの変更があるとき, then the BRW shall 置き換えず操作を拒否し、「変更を移さずに作る `brw create <名前>`」と「変更を移して作る `brw create <名前> --carry`」の 2 つの選択肢を、それぞれ何が起きるかとともに案内する。
+9. While 追跡済みファイルの未コミットの変更が無く未追跡のファイルだけがある, the BRW shall 置き換えを実行し、未追跡のファイルが元の作業ツリーに残ることと件数を案内に含める。
+10. When `brw create` に `--carry` が指定されたとき, the BRW shall 元の作業ツリーにある追跡済みファイルの未コミットの変更を新しい worktree に適用し、適用結果が元の変更と一致したことを確認した後にだけ、元の作業ツリーから同じ変更を取り除く。
+11. If `--carry` の適用が失敗した、結果が元の変更と一致しない、または分岐元が元の作業ツリーの HEAD と異なるとき, then the BRW shall 元の作業ツリーを変更せず、作成した worktree とブランチを残さず、理由を表示する。
+12. If `--carry` の確認と取り除きの間に元の作業ツリーの変更が変わったとき, then the BRW shall 元の作業ツリーから何も取り除かず、変更が両方に残っていることを表示する。
+13. When `--carry` が実行されたとき, the BRW shall 未追跡のファイルを移さず、移さなかったファイルの一覧を表示する。
 
 ### Requirement 2: Bash 以外の入口も BRW の手順に収束させる
 
