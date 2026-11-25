@@ -702,14 +702,15 @@ function finish(cwd, workId, { outcome, code, lockWaitMs }) {
 }
 
 /** 成功（遠隔の ref が準備時の OID を指す）を記録し、作業を pushed にする。記録できなかった場合は recorded: false で知らせる。 */
-function finishSuccess(cwd, workId, { execution, oid, lockWaitMs }) {
+function finishSuccess(cwd, workId, { execution, oid, remote, lockWaitMs }) {
   const code = execution === "auto" ? null : execution;
   // 結果の記録と「準備済み → pushed」の遷移を 1 回の状態ロックで行い、片方だけ残らないようにする
   const rec = update(cwd, (state) => {
     const w = state.works[workId];
     if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
     w.results = w.results && typeof w.results === "object" ? w.results : {};
-    w.results.push = { outcome: "success", code };
+    // 公開記録: push 先のリモート名と公開した OID（片付けが遠隔の先端を確かめるために使う）
+    w.results.push = { outcome: "success", code, remote, oid };
     if (w.status === "ready") w.status = "pushed";
     w.updatedAt = now();
     return { ok: true, work: w };
@@ -760,7 +761,7 @@ function pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWait
   const { head, branch } = v.g;
   const before = remoteOidOf(cwd, pre.remote, branch);
   // 既に同じ OID が遠隔にあれば push は要らない（禁止の作業でも、PR 側の処理は進めてよい）
-  if (!before.error && before.oid === head) return finishSuccess(cwd, workId, { execution: "already-published", oid: head, lockWaitMs });
+  if (!before.error && before.oid === head) return finishSuccess(cwd, workId, { execution: "already-published", oid: head, remote: pre.remote, lockWaitMs });
   if (d.kind === "prohibited") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
   if (d.kind === "needsApproval") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
   if (before.error) return finish(cwd, workId, { outcome: "failed", code: "remote-unreadable", lockWaitMs });
@@ -798,7 +799,7 @@ function pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWait
 
   // (5) 遠隔の ref を読んで照合する（応答が無くても、遠隔が同じ OID なら成功として扱う）
   const after = remoteOidOf(cwd, started.remote, branch);
-  if (!after.error && after.oid === pushHead) return finishSuccess(cwd, workId, { execution: started.proceed.execution, oid: pushHead, lockWaitMs });
+  if (!after.error && after.oid === pushHead) return finishSuccess(cwd, workId, { execution: started.proceed.execution, oid: pushHead, remote: started.remote, lockWaitMs });
   // 分岐（non-fast-forward・fetch first）と、遠隔のフック・ルールセットによる拒否を区別する
   const text = String(p.stderr ?? "");
   const code = after.error ? "remote-unreadable"

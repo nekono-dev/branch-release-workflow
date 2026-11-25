@@ -134,7 +134,8 @@ export const runPublishPrChecks = async (eq) => {
       const x = await runPublishPr(dir, id, { planId, repository: REPO, session: gh.session, title: "変更の要約", body: "本文" });
       eq("enforcement/4.5 保護対象への PR を作成し、対象 URL・base・push の結果を返す", [x.ok, x.outcome, x.pr?.number, x.pr?.url, x.pr?.created, x.base, x.push?.outcome], [true, "success", 7, "https://github.com/acme/app/pull/7", true, "main", "success"]);
       eq("enforcement/4.5 GitHub への書き込みは PR の作成 1 件だけで、head・base・タイトル・本文は実際の値", [gh.fake.writeCount, gh.fake.applied[0]?.body], [1, { title: "変更の要約", body: "本文", head: "dev/foo", base: "main" }]);
-      eq("enforcement/4.5 成功を結果に記録し、作業の状態を published にする", [workOf(dir, id).results.pr, workOf(dir, id).status], [{ outcome: "success", code: null, url: "https://github.com/acme/app/pull/7" }, "published"]);
+      eq("enforcement/4.5 成功を結果に記録し、作業の状態を published にする", [{ outcome: workOf(dir, id).results.pr.outcome, code: workOf(dir, id).results.pr.code, url: workOf(dir, id).results.pr.url }, workOf(dir, id).status], [{ outcome: "success", code: null, url: "https://github.com/acme/app/pull/7" }, "published"]);
+      eq("brw-pr-handoff/4.7 PR の成功時に、PR の URL と取り込み先を公開記録として保存する（push の記録も残る）", [workOf(dir, id).results.pr.url, workOf(dir, id).results.pr.base, workOf(dir, id).results.push.remote, typeof workOf(dir, id).results.push.oid], ["https://github.com/acme/app/pull/7", "main", "origin", "string"]);
       eq("enforcement/4.5 状態ファイルに資格情報を残さない", stateText(dir).includes(TOKEN), false);
     });
 
