@@ -449,6 +449,12 @@ const runPlanGateChecks = async (eq) => {
     const h = (tool, input) => decideHook("claude", "PreToolUse", { tool_name: tool, tool_input: input, cwd: plain });
     return [h("Bash", { command: "git switch -c foo" }).verdict, h("EnterWorktree", { name: "x" }).verdict];
   })(), ["pass", "pass"]);
+  eq("brw-branch-gate/1.7 BRW を導入していないリポジトリでは、ブランチ・worktree の作成を拒否も置き換えもしない", (() => {
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-hook-nodecl-")));
+    execFileSync("git", ["init", "-q", "-b", "develop", plain], { stdio: "ignore" });
+    const h = (command) => decideHook("claude", "PreToolUse", { tool_name: "Bash", tool_input: { command }, cwd: plain });
+    return ["git switch -c foo", "git checkout -b foo", "git branch foo", "git worktree add -b foo ../foo"].map((c) => h(c).verdict);
+  })(), ["pass", "pass", "pass", "pass"]);
   eq("brw-branch-gate/5.4 同じ入力の判定結果（置き換え可否を除く）は、Claude Code と Codex で同じ", [
     bash("claude", "git switch -c Foo").code === bash("codex", "git switch -c Foo").code,
     bash("claude", "git switch -c dev/a && git push").code === bash("codex", "git switch -c dev/a && git push").code,
