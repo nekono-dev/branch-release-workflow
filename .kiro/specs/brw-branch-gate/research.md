@@ -19,9 +19,9 @@
 
 - 書き換えの条件: `namePattern` に合う名前、分岐元が確定できる、対象が単独の操作（複合コマンドでない）。満たさなければ拒否。
 - 書き換え後のコマンドは `brw create <名前> && cd <worktree のパス>` とし、実行時の出力に「何が置き換えられたか」を自然文で添える（#1・#6）。
-- EnterWorktree は、名前が規則に合うなら `brw create` を実行したうえで `{path}` へ書き換える。副作用（worktree の作成）をフックの中で行うため、設計で「フックが副作用を持つ」ことの是非を決める（代案: 拒否して `brw create` の後に `EnterWorktree {path}` を案内する）。
+- EnterWorktree は**拒否**し、`brw create <名前>` を実行した後に `EnterWorktree {path: <作成された worktree>}` を呼ぶ 2 手を、自然文で案内する（決定済み）。フックの中で worktree を作る案は、ツールが実行されなかった場合の作り残し・計画モードでの書き込み・二重実行と時間切れ・名前の食い違い（EnterWorktree は英大文字・`_`・`.` を許すが `namePattern` は許さない）の懸念があり採らない。`path` 指定の EnterWorktree は、BRW が作った worktree への切り替えとして許可する（#5 で動作を確認済み）。
 - 作業場所が `.claude/worktrees/` の配下であることを前提にする（#2・#5）。
 
 ## 未決（利用者の判断が必要）
 
-- EnterWorktree: フック内で worktree を作って書き換える（便利、副作用あり）か、拒否して 2 手に分ける（副作用なし、手数が増える）か。
+なし（EnterWorktree は拒否して 2 手を案内する方針で決定）。
