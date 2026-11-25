@@ -34,7 +34,7 @@
   - _Boundary: planGate_
   - _Depends: 2.2_
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
-- [ ] 2.4 EnterWorktree の判定を作る
+- [x] 2.4 EnterWorktree の判定を作る
   - `name` 指定は拒否し、`brw create` の後に `path` 指定で入る 2 手を案内する。`path` 指定は、`.claude/worktrees/` の配下で worktree 一覧に載る開発ブランチのものだけを許可し、それ以外・入力の不備・例外は拒否する。導入していないリポジトリは通す。
   - 各入力の組合せ（`name`・BRW の worktree への `path`・それ以外の `path`・両方・どちらも無い）が期待どおりに分かれる。
   - _Boundary: judgeEnterWorktree_

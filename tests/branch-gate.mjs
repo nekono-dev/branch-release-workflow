@@ -1,10 +1,10 @@
 // ゲート（brw-branch-gate）の契約試験。selftest.mjs から呼ばれる。後続のタスクも、この関数に試験を追記する。
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gatherFacts, guidance, planGate, shellQuote } from "../scripts/branch-gate.mjs";
+import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "../scripts/branch-gate.mjs";
 import { classifyCommand } from "../scripts/operation-policy.mjs";
 import { normalizeConfig } from "../scripts/lib.mjs";
 
@@ -334,5 +334,78 @@ const runPlanGateChecks = async (eq) => {
     resumePlan("git switch dev/bar", resumeOp("dev/$x")).code,
     planGate({ host: "claude", command: "git switch dev/bar && git push", toolInput: {}, op: resumeOp("dev/bar"), config: CONFIG, facts: factsOf({ branchExists: () => ({ local: true, origin: false }) }), hasLeadingCd: false, unresolved: [] }).code,
   ], ["gate-name-invalid", "gate-compound"]);
+
+
+  // ---- EnterWorktree の判定（judgeEnterWorktree）: 実際の一時リポジトリで確かめる ----
+  const er = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-")));
+  const eg = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", er, ...a], { stdio: "ignore" });
+  execFileSync("git", ["init", "-q", "-b", "develop", er], { stdio: "ignore" });
+  writeFileSync(join(er, ".branch-release-workflow.json"), JSON.stringify({ workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop", namePattern: "^dev/[a-z0-9-]+$" }));
+  eg("add", ".branch-release-workflow.json");
+  eg("commit", "-q", "-m", "init");
+  const inWt = join(er, ".claude", "worktrees", "dev-foo");
+  const outWt = join(realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-out-"))), "out");
+  const undeclWt = join(er, ".claude", "worktrees", "feature-x");
+  const detachedWt = join(er, ".claude", "worktrees", "detached");
+  eg("worktree", "add", "-q", "-b", "dev/foo", inWt);
+  eg("worktree", "add", "-q", "-b", "dev/out", outWt);
+  eg("worktree", "add", "-q", "-b", "feature/x", undeclWt);
+  eg("worktree", "add", "-q", "--detach", detachedWt);
+  const enter = (input, cwd = er) => judgeEnterWorktree(input, cwd);
+  // 配置先そのものが本体の外へのシンボリックリンクのリポジトリ（外にある開発ブランチの worktree を、配下と誤認しない）
+  const sr = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-sym-")));
+  const sg = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", sr, ...a], { stdio: "ignore" });
+  execFileSync("git", ["init", "-q", "-b", "develop", sr], { stdio: "ignore" });
+  writeFileSync(join(sr, ".branch-release-workflow.json"), JSON.stringify({ workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" }));
+  sg("add", ".branch-release-workflow.json");
+  sg("commit", "-q", "-m", "init");
+  const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-sym-out-")));
+  mkdirSync(join(sr, ".claude"));
+  symlinkSync(elsewhere, join(sr, ".claude", "worktrees"));
+  sg("worktree", "add", "-q", "-b", "dev/sym", join(elsewhere, "dev-sym"));
+  eq("brw-branch-gate/2.3 配置先が本体の外を指すシンボリックリンクのとき、その先の worktree は通さない", enter({ path: join(sr, ".claude", "worktrees", "dev-sym") }, sr).code, "gate-enter-path");
+  eq("brw-branch-gate/2.2 BRW の開発ブランチの worktree への path 指定は通過する", enter({ path: inWt }).verdict, "pass");
+  eq("brw-branch-gate/2.2 相対パス・末尾の区切り付きでも、同じ worktree なら通過する", [enter({ path: ".claude/worktrees/dev-foo" }).verdict, enter({ path: `${inWt}/` }).verdict], ["pass", "pass"]);
+  eq("brw-branch-gate/2.2 worktree の中を作業場所にしていても通過する", enter({ path: inWt }, inWt).verdict, "pass");
+  const byName = enter({ name: "dev/bar" });
+  eq("brw-branch-gate/2.1 name 指定は拒否し、brw create の後に path 指定で入る 2 手を案内する", [
+    byName.verdict, byName.code,
+    byName.reason.includes(`次のコマンド: 1) cd ${q(er)} && node ${q(BRW)} create 'dev/bar' 2) EnterWorktree を path に ${join(er, ".claude", "worktrees", "dev-bar")} を指定して呼ぶ`),
+    byName.reason.includes(`作業場所: ${join(er, ".claude", "worktrees", "dev-bar")}`),
+  ], ["deny", "gate-enter-name", true, true]);
+  const badName = enter({ name: "My_Task" });
+  eq("brw-branch-gate/2.1 命名規則に合わない name は、合う名前の付け方も案内する", [badName.code, badName.reason.includes("^dev/[a-z0-9-]+$"), badName.reason.includes("作業場所: -")], ["gate-enter-name", true, true]);
+  eq("brw-branch-gate/2.1 name も path も無い（ランダム名の作成）は拒否する", [enter({}).code, enter(undefined).code, enter(null).code], ["gate-enter-name", "gate-enter-name", "gate-enter-name"]);
+  eq("brw-branch-gate/2.3 BRW の配置先の外の worktree への path は拒否し、brw resume を案内する", (() => {
+    const d = enter({ path: outWt });
+    return [d.verdict, d.code, d.reason.includes("resume"), d.reason.includes("配下にありません")];
+  })(), ["deny", "gate-enter-path", true, true]);
+  eq("brw-branch-gate/2.3 宣言の開発ブランチでない worktree・detached HEAD・一覧に無い場所・本体への path は拒否する", [
+    enter({ path: undeclWt }).code, enter({ path: detachedWt }).code, enter({ path: join(er, ".claude", "worktrees", "nothing") }).code, enter({ path: er }).code,
+  ], ["gate-enter-path", "gate-enter-path", "gate-enter-path", "gate-enter-path"]);
+  eq("brw-branch-gate/2.4 name と path の両方・型の不正・空文字は、対象を確定できず止める", [
+    enter({ name: "dev/a", path: inWt }).code, enter({ path: 5 }).code, enter({ name: ["x"] }).code, enter({ path: "" }).code, enter({ name: "a\nb" }).code,
+  ], ["gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved"]);
+  eq("brw-branch-gate/2.4 明示された null・配列・文字列の入力は、path が許可対象でも通さない", [
+    enter({ name: null, path: inWt }).code, enter({ name: "dev/a", path: null }).code, enter([inWt]).code, enter(inWt).code,
+  ], ["gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved"]);
+  eq("brw-branch-gate/5.1 作業ディレクトリを確定できないときは止める", [enter({ path: inWt }, null).code, enter({ path: inWt }, "relative/dir").code, enter({ path: inWt }, join(er, "missing")).code], ["gate-enter-unresolved", "gate-enter-unresolved", "gate-enter-unresolved"]);
+  eq("brw-branch-gate/5.1 git の実行に失敗するときは、リポジトリの外とは見なさず止める", (() => {
+    const old = process.env.PATH;
+    process.env.PATH = "/nonexistent-brw-test";
+    try { return enter({ path: inWt }).code; } finally { process.env.PATH = old; }
+  })(), "gate-enter-unresolved");
+  eq("brw-branch-gate/5.3 BRW を導入していないリポジトリと、git の外は通す", (() => {
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-plain-")));
+    execFileSync("git", ["init", "-q", "-b", "develop", plain], { stdio: "ignore" });
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-enter-nogit-")));
+    return [enter({ name: "x" }, plain).verdict, enter({ path: "/anywhere" }, outside).verdict];
+  })(), ["pass", "pass"]);
+  writeFileSync(join(er, ".branch-release-workflow.json"), "{ broken");
+  eq("brw-branch-gate/5.1 宣言ファイルが不正なときは規則を確認できず止める", enter({ path: inWt }).code, "gate-enter-unresolved");
+  eq("brw-branch-gate/2.5 拒否の案内は他の入口と同じ固定の書式で、特定の呼び出し側の語を含まない", [
+    byName.reason.split("\n")[1], byName.reason.split("\n")[0].startsWith("[branch-release-workflow] "), CALLER_WORDS.test(byName.reason),
+    enter({ path: outWt }, er).reason === enter({ path: outWt }, er).reason,
+  ], ["BRW 案内: 拒否", true, false, true]);
 
 };

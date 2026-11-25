@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // ブランチ作成・再開のゲート（brw-branch-gate）。案内の書式（guidance）と、作成の置き換えの計画（planGate）を置く。
-// EnterWorktree の判定（judgeEnterWorktree）は後続のタスクで同じファイルに追加する。
 // planGate は git を呼ばない純粋な関数。git の状態は gatherFacts（呼び出し側が作る）から受け取る。
 // 外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { aliasOf, checkName, classifyBranch, configRel, currentBranch, git, redactSecrets, sanitize, worktrees } from "./lib.mjs";
+import { aliasOf, checkName, classifyBranch, configRel, currentBranch, enabledInRepo, git, loadConfig, redactSecrets, sanitize, worktrees } from "./lib.mjs";
 
 const HEADING = "[branch-release-workflow]";
 const OUTCOMES = ["置き換え", "拒否"];
@@ -355,4 +356,106 @@ export function planGate(input) {
     "この環境では元の操作を BRW の手順に書き換えられません。次のコマンドを実行してください。",
     "次のコマンドは、Claude Code で置き換えた場合と同じ作成と作業場所の移動を行います。",
   ], plan.worktree);
+}
+
+// ---- EnterWorktree の判定（judgeEnterWorktree） ---------------------------------
+
+const enterDenied = (code, conclusion, commands, notes, workdir = null) => ({
+  verdict: "deny",
+  code,
+  reason: guidance({ outcome: "拒否", conclusion, commands, workdir, notes: notes.join("\n") }),
+});
+// 実在するパスは実体へ解決し、無ければ絶対パスへ正規化する
+const realOf = (p) => {
+  try { return existsSync(p) ? realpathSync(p) : resolve(p); } catch { return resolve(p); }
+};
+
+// 作業ディレクトリのリポジトリの状態。git が「リポジトリではない」と答えたときだけ outside。実行の失敗・権限などは unresolved（確定できない）
+function repoOf(cwd) {
+  const r = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" } });
+  if (r.error) return { state: "unresolved" };
+  if (r.status === 0 && r.stdout.trim() !== "") return { state: "inside", root: r.stdout.trim() };
+  return /not a git repository/i.test(r.stderr ?? "") ? { state: "outside" } : { state: "unresolved" };
+}
+
+/**
+ * EnterWorktree の入力を判定する。副作用なし。
+ * BRW を導入していないリポジトリ（または git の外）は通過。導入済みでは、`path` が BRW の開発ブランチの worktree
+ * （本体の .claude/worktrees/ の配下で、worktree 一覧に載り、宣言の開発ブランチを使用中）のときだけ通過し、それ以外は案内つきで拒否する。
+ * 例外が出たときも拒否（安全側）。
+ * @param {{name?: unknown, path?: unknown}|null|undefined} input EnterWorktree の tool_input
+ * @param {string|null} cwd フックの作業ディレクトリ
+ * @returns {{verdict: "pass"} | {verdict: "deny", code: "gate-enter-name"|"gate-enter-path"|"gate-enter-unresolved", reason: string}}
+ */
+export function judgeEnterWorktree(input, cwd) {
+  try {
+    if (typeof cwd !== "string" || cwd === "" || !isAbsolute(cwd) || !existsSync(cwd))
+      return enterDenied("gate-enter-unresolved", "作業場所を確定できないため、EnterWorktree を止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["作業ディレクトリを確定できません。git リポジトリの中で、brw create または brw resume で作業場所を用意してください。"]);
+    const repo = repoOf(cwd);
+    if (repo.state === "outside") return { verdict: "pass" }; // リポジトリの外
+    if (repo.state !== "inside") return enterDenied("gate-enter-unresolved", "git の状態を確認できないため、EnterWorktree を止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["git を実行できない、またはリポジトリの状態を読めません。git の状態を確認してから、brw create または brw resume で作業場所を用意してください。"]);
+    const root = repo.root;
+    const { config, error } = loadConfig(root);
+    if (error) return enterDenied("gate-enter-unresolved", "宣言ファイルが不正で規則を確認できないため、EnterWorktree を止めます", [`node ${shellQuote(BRW_CLI)} check`], [error.split("\n")[0], "宣言ファイルを修正してから再実行してください。"]);
+    if (!config) return enabledInRepo(root)
+      ? enterDenied("gate-enter-unresolved", "BRW の導入設定はありますが宣言ファイルがなく、規則を確認できないため、EnterWorktree を止めます", [`node ${shellQuote(BRW_CLI)} check`], ["宣言ファイルを作成するか、導入設定を復旧してください。"])
+      : { verdict: "pass" }; // 未導入のリポジトリ
+    const list = worktrees(root);
+    const main = list[0]?.path ?? null;
+    if (main === null) return enterDenied("gate-enter-unresolved", "本体の作業ツリーを確定できないため、EnterWorktree を止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["git の状態を読めません。git リポジトリの中で実行してください。"]);
+
+    // 入力の無い呼び出し（名前なしの作成）は空として扱う。オブジェクト以外は対象を確定できない
+    const obj = input === undefined || input === null ? {} : input;
+    if (typeof obj !== "object" || Array.isArray(obj))
+      return enterDenied("gate-enter-unresolved", "EnterWorktree の入力から対象を確定できないため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["入力はオブジェクト（name または path）で指定してください。"]);
+    const name = obj.name;
+    const path = obj.path;
+    // 明示された null は指定とみなし、型の検査で拒否する（未指定の undefined だけが「無い」）
+    const hasName = name !== undefined;
+    const hasPath = path !== undefined;
+    const valid = (v) => typeof v === "string" && v.trim() !== "" && !/[\0\r\n]/.test(v);
+    if ((hasName && !valid(name)) || (hasPath && !valid(path)))
+      return enterDenied("gate-enter-unresolved", "EnterWorktree の入力から対象を確定できないため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["name と path は空でない文字列で指定してください。BRW の worktree へは、path にそのパスを指定します。"]);
+    if (hasName && hasPath)
+      return enterDenied("gate-enter-unresolved", "EnterWorktree に name と path の両方が指定されているため、対象を確定できません", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["name（新規作成）と path（既存の worktree へ移動）は同時に指定できません。BRW の worktree へ入るには path だけを指定してください。"]);
+
+    if (!hasPath) {
+      // 新しい worktree の作成（name 指定、または名前なし）。brw create の後に path 指定で入る 2 手を案内する
+      const branch = valid(name) && SAFE_VALUE.test(name) && classifyBranch(config, name) === "development" && checkName(config, name) === null ? name : "<名前>";
+      const wt = join(main, ".claude", "worktrees", aliasOf(branch === "<名前>" ? "<名前>" : branch));
+      const hint = branch === "<名前>"
+        ? [`作業ブランチの名前は、宣言の作業ブランチ（${config.workBranches.join(", ")}）と命名規則${config.namePattern ? `（${config.namePattern}）` : ""}に合う名前にしてください。`, "<名前> は、その名前に置き換えます。"]
+        : [];
+      return enterDenied("gate-enter-name", "EnterWorktree による worktree の作成は、BRW の命名規則と分岐元を通らないため、止めます", [
+        `cd ${shellQuote(root)} && node ${shellQuote(BRW_CLI)} create ${shellQuote(branch)}`,
+        `EnterWorktree を path に ${wt} を指定して呼ぶ`,
+      ], [
+        "1) brw create で作業ブランチと worktree を作ります。2) できた worktree のパスを path に指定して EnterWorktree を呼ぶと、作業場所がその worktree に移ります。",
+        ...hint,
+      ], branch === "<名前>" ? null : wt);
+    }
+
+    // path 指定: BRW の開発ブランチの worktree への切り替えだけを通す
+    const target = realOf(isAbsolute(path) ? path : resolve(cwd, path));
+    const entry = list.slice(1).find((w) => realOf(w.path) === target);
+    // 配置先そのものが本体の外を指す（シンボリックリンク）ときは、配下と認めない
+    const placementDir = join(realOf(main), ".claude", "worktrees");
+    const placementSound = realOf(join(main, ".claude", "worktrees")) === placementDir;
+    const placed = relative(placementDir, target);
+    const underPlacement = placementSound && placed !== "" && !placed.startsWith("..") && !isAbsolute(placed);
+    if (entry && entry.branch && underPlacement && classifyBranch(config, entry.branch) === "development") return { verdict: "pass" };
+    const cause = !entry ? "git の worktree 一覧に載っていません"
+      : !underPlacement ? "本体の .claude/worktrees/ の配下にありません"
+      : !entry.branch ? "ブランチを使用していません（detached HEAD）"
+      : `使用中のブランチ '${entry.branch}' は宣言の開発ブランチではありません`;
+    return enterDenied("gate-enter-path", `指定された場所（${sanitize(String(path))}）は BRW の作業ブランチの worktree ではないため、EnterWorktree を止めます`, [
+      `cd ${shellQuote(root)} && node ${shellQuote(BRW_CLI)} resume <ブランチ>`,
+      "EnterWorktree を path に、brw resume が示した worktree を指定して呼ぶ",
+    ], [
+      `理由: ${cause}。`,
+      "既存の作業ブランチへ入るときは、brw resume でその worktree を用意してから、path に指定してください。新しく作るときは brw create <名前> を使います。",
+    ]);
+  } catch {
+    return enterDenied("gate-enter-unresolved", "EnterWorktree の判定で内部エラーが起きたため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["判定を完了できませんでした。brw create または brw resume で作業場所を用意してください。"]);
+  }
 }
