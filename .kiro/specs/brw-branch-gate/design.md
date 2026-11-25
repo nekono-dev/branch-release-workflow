@@ -267,7 +267,7 @@ function judgeEnterWorktree(input: EnterWorktreeInput, cwd: string | null): Ente
 1. 退避の作成: 元の作業ツリーで `git stash create` を実行し、変更を表すコミット `S` を得る（退避の置き場 `refs/stash` は使わない。他のセッションと共有されるため）。出力が空なら移す変更は無い。
 2. 前提の確認: `brw create` が決めた開始点のコミットが、元の作業ツリーの `HEAD` と同じであること。違えば移さず失敗（分岐元がずれていると適用が混ざるため）。
 3. 適用: 新しい worktree で `git stash apply <S>`。競合・失敗なら失敗。
-4. 照合: `S` が変更した全パスについて、新しい worktree の内容（ファイルの OID・存在・実行権限）が `S` と一致すること。
+4. 照合: `S` が変更した全パスについて、新しい worktree の内容（ファイルの OID・実行権限）が `S` と一致し、`S` で削除されたパスは存在しないこと。存在の判定は `git cat-file -e S:<パス>` による（削除されたパスに `rev-parse` を使わない。research.md の検証）。
 5. 取り除き: 元の作業ツリーで、もう一度 `git stash create` した結果のツリーが `S` と同じときだけ、`git restore --staged --worktree --source=HEAD -- <パス>` で該当のパスだけを戻す（`reset --hard` は使わない）。違えば何も戻さない（`keptBoth`）。
 6. 失敗時の巻き戻し: 手順 2〜4 の失敗では、作成した worktree とブランチを削除する。元の作業ツリーには手順 5 まで触れない。
 
