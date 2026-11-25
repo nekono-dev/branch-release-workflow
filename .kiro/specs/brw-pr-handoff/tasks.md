@@ -42,7 +42,7 @@
   - _Boundary: pr-template（本文・指示）_
   - _Depends: 2.2_
   - _Requirements: 3.1, 3.7, 3.9, 6.2_
-- [ ] 2.4 (P) 片付けの安全確認と削除を共有の部品へ移す
+- [x] 2.4 (P) 片付けの安全確認と削除を共有の部品へ移す
   - `brw finish` が持つ安全確認と削除を独立した部品へ移し、遠隔の確認をリモート名の既存の取得に揃える。`brw finish` の挙動は変えず、移した後も既存の試験が通る。
   - 手動の `brw finish` が従来どおり動き、未 push・未コミットの worktree は残る。
   - _Boundary: cleanup（共有部）_
