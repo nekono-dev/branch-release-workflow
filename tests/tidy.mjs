@@ -1,6 +1,6 @@
 // 別コミット（tidy）の試験。selftest.mjs から呼ばれる。実際の一時リポジトリで確かめる。
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { previewTidy, tidyChanges, TIDY_SUBJECT } from "../scripts/tidy.mjs";
@@ -39,6 +39,14 @@ export const runTidyChecks = async (eq) => {
   eq("brw-pr-handoff/2.3 .gitignore の対象は別コミットに含まれない", git(d, "ls-files").includes("ignored.log"), false);
   eq("brw-pr-handoff/2.5 戻り値に含めたファイルの一覧とコミットの OID を持つ", [r.oid === git(d, "rev-parse", "HEAD").trim(), r.files.includes("dir/sub/n.txt")], [true, true]);
   eq("brw-pr-handoff/2.6 別コミットの後は再実行しても何も作らない", tidyChanges(d).kind, "none");
+
+  // git add -f で強制的にステージされた ignore 対象は含めない
+  const g = repo();
+  writeFileSync(join(g, "ignored.log"), "x\n");
+  writeFileSync(join(g, "keep.txt"), "k\n");
+  git(g, "add", "-f", "ignored.log");
+  const gr = tidyChanges(g);
+  eq("brw-pr-handoff/2.3 強制的にステージされた ignore 対象は別コミットに含めず、ステージから外す（ファイルは残る）", [gr.kind, [...gr.files].sort(), git(g, "ls-files").includes("ignored.log"), existsSync(join(g, "ignored.log"))], ["committed", ["keep.txt"], false, true]);
 
   // 秘密らしい名前
   const s = repo();
