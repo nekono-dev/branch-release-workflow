@@ -131,6 +131,8 @@ const factsOf = (over = {}) => ({
   mainRoot: ROOT,
   cwd: ROOT,
   currentBranch: "develop",
+  mainBranch: "develop",
+  worktreeOf: () => null,
   trackedChanges: 0,
   untrackedChanges: 0,
   branchExists: () => ({ local: false, origin: false }),
@@ -275,5 +277,62 @@ const runPlanGateChecks = async (eq) => {
   const fl = gatherFacts(linked);
   const linkedPlan = planGate({ host: "claude", command: "git switch -c dev/foo develop", toolInput: {}, op: classifyCommand("git switch -c dev/foo develop", linked).operations.find((o) => o.kind === "create"), config: CONFIG, facts: fl, hasLeadingCd: false, unresolved: [] });
   eq("brw-branch-gate/5.1 連携 worktree の facts は、作業ディレクトリに連携 worktree・本体に本体を持つ", [fl.cwd === linked, fl.mainRoot === repo], [true, true]);
+  eq("brw-branch-gate/3.1 gatherFacts は本体のブランチと、ブランチを使用中の worktree（本体を除く）を返す", [fl.mainBranch, fl.worktreeOf("dev/linked") === linked, fl.worktreeOf("develop"), fl.worktreeOf("dev/none")], ["develop", true, null, null]);
+  eq("brw-branch-gate/3.4 detached HEAD への移動は作成の操作として分類されない", [
+    classifyCommand("git switch --detach HEAD", repo).operations.some((o) => o.kind === "create"),
+    classifyCommand("git checkout --detach HEAD", repo).operations.some((o) => o.kind === "create"),
+  ], [false, false]);
   eq("brw-branch-gate/1.1 連携 worktree から操作するときの置き換えは、その worktree で brw create を実行する", String(linkedPlan.command).startsWith(`cd ${q(linked)} && node ${q(BRW)} create 'dev/foo' && cd ${q(join(repo, ".claude", "worktrees", "dev-foo"))} && printf `), true);
+
+  // ---- 既存の開発ブランチの再開（brw resume への置き換え） ----
+  const resumeOp = (branch, over = {}) => ({ kind: "create", action: "resume", via: "switch", branch, start: null, branchOnly: false, cwd: ROOT, unresolved: [], ...over });
+  const resumePlan = (command, op, { host = "claude", facts = factsOf({ branchExists: () => ({ local: true, origin: false }) }) } = {}) =>
+    planGate({ host, command, toolInput: { command }, op, config: CONFIG, facts, hasLeadingCd: false, unresolved: op.unresolved });
+  const rwt = wtOf(ROOT, "dev/bar");
+  const rp = resumePlan("git switch dev/bar", resumeOp("dev/bar"));
+  eq("brw-branch-gate/3.1 既存の開発ブランチへの切り替えは brw resume への置き換えになる", [rp.verdict, rp.command.startsWith(
+    `cd ${q(ROOT)} && node ${q(BRW)} resume 'dev/bar' && cd ${q(rwt)} && printf '%s\\n' `)], ["rewrite", true]);
+  eq("brw-branch-gate/3.1 置き換えの実行は、本体・brw resume の引数・worktree の順になる", runShadowed(rp.command).startsWith(
+    `[CD]${ROOT}[/CD][NODE][${BRW}][resume][dev/bar][/NODE][CD]${rwt}[/CD][branch-release-workflow] `), true);
+  eq("brw-branch-gate/3.1 リモートにだけあるブランチの切り替えも再開になる", resumePlan("git switch dev/bar", { ...resumeOp("dev/bar"), action: "create" }, { facts: factsOf({ branchExists: () => ({ local: false, origin: true }) }) }).verdict, "rewrite");
+  eq("brw-branch-gate/3.1 checkout の切り替えも再開になる", resumePlan("git checkout dev/bar", resumeOp("dev/bar", { via: "checkout" })).verdict, "rewrite");
+  const used = resumePlan("git switch dev/bar", resumeOp("dev/bar"), { facts: factsOf({ branchExists: () => ({ local: true, origin: false }), worktreeOf: () => "/elsewhere/dev-bar" }) });
+  eq("brw-branch-gate/3.1 既にそのブランチの worktree があるときは、その場所へ移る", [used.verdict, used.worktree], ["rewrite", "/elsewhere/dev-bar"]);
+  eq("brw-branch-gate/3.1 置き換えの案内は固定の書式で、作業場所と未コミットの変更の残り先を含む", (() => {
+    const d = resumePlan("git switch dev/bar", resumeOp("dev/bar"), { facts: factsOf({ branchExists: () => ({ local: true, origin: false }), trackedChanges: 2, untrackedChanges: 1 }) });
+    const text = runShadowed(d.command);
+    return [text.includes("BRW 案内: 置き換え"), text.includes(`作業場所: ${rwt}`), text.includes("追跡済み 2 件・未追跡 1 件"), CALLER_WORDS.test(text)];
+  })(), [true, true, true, false]);
+  eq("brw-branch-gate/1.5 worktree add <配置先> <既存ブランチ> は配置先が再開先と一致するときだけ置き換える", [
+    resumePlan(`git worktree add ${rwt} dev/bar`, resumeOp("dev/bar", { via: "worktree", path: rwt })).verdict,
+    resumePlan("git worktree add /elsewhere/x dev/bar", resumeOp("dev/bar", { via: "worktree", path: "/elsewhere/x" })).code,
+  ], ["rewrite", "gate-outside-placement"]);
+  eq("brw-branch-gate/3.2 保護・分岐元への切り替えは置き換えず、通常の承認に任せる（ブランチを作らない）", [
+    resumePlan("git switch main", resumeOp("main")).verdict,
+    resumePlan("git switch develop", resumeOp("develop")).verdict,
+    resumePlan("git switch main", resumeOp("main")).code,
+  ], ["pass", "pass", "gate-resume-protected"]);
+  eq("brw-branch-gate/3.3 存在を確認できない保護・分岐元ブランチへの切り替えも通さず止める", [
+    resumePlan("git switch main", resumeOp("main"), { facts: factsOf({ branchExists: () => ({ local: false, origin: false }) }) }).code,
+    resumePlan("git switch main", resumeOp("main"), { facts: factsOf({ branchExists: () => ({ local: false, origin: true }) }) }).verdict,
+  ], ["gate-unresolved", "pass"]);
+  eq("brw-branch-gate/3.1 宣言の開発ブランチでない切り替え先は、再開に置き換えず拒否する", (() => {
+    const d = resumePlan("git switch feature/x", resumeOp("feature/x"));
+    return [d.verdict, d.code, d.reason.includes("次のコマンド: ")];
+  })(), ["deny", "gate-name-invalid", true]);
+  eq("brw-branch-gate/3.3 切り替え先が既存のブランチと確認できないときは止める", [
+    resumePlan("git switch dev/bar", resumeOp("dev/bar"), { facts: factsOf({ branchExists: () => ({ local: false, origin: false }) }) }).code,
+    resumePlan("git switch dev/bar", resumeOp("dev/bar", { unresolved: ["切り替え先 'dev/bar' が既存のブランチと確認できません。"] })).code,
+  ], ["gate-unresolved", "gate-unresolved"]);
+  eq("brw-branch-gate/3.1 本体で使用中のブランチは再開に置き換えず拒否する", resumePlan("git switch dev/bar", resumeOp("dev/bar"), { facts: factsOf({ branchExists: () => ({ local: true, origin: false }), mainBranch: "dev/bar" }) }).code, "gate-action-unsupported");
+  eq("brw-branch-gate/1.6 codex では書き換えず、再開と作業場所の移動を次のコマンドとして示す拒否にする", (() => {
+    const d = resumePlan("git switch dev/bar", resumeOp("dev/bar"), { host: "codex" });
+    return [d.verdict, d.code, d.reason.includes(`node ${q(BRW)} resume 'dev/bar' && cd ${q(rwt)}`)];
+  })(), ["deny", "gate-host-no-rewrite", true]);
+  eq("brw-branch-gate/3.2 codex でも保護ブランチへの切り替えは通常の承認に任せる", resumePlan("git switch main", resumeOp("main"), { host: "codex" }).verdict, "pass");
+  eq("brw-branch-gate/3.1 記号を含む切り替え先と、他のコマンドとの組み合わせは置き換えない", [
+    resumePlan("git switch dev/bar", resumeOp("dev/$x")).code,
+    planGate({ host: "claude", command: "git switch dev/bar && git push", toolInput: {}, op: resumeOp("dev/bar"), config: CONFIG, facts: factsOf({ branchExists: () => ({ local: true, origin: false }) }), hasLeadingCd: false, unresolved: [] }).code,
+  ], ["gate-name-invalid", "gate-compound"]);
+
 };
