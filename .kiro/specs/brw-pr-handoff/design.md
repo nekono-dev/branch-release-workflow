@@ -226,7 +226,7 @@ function runPr(args: string[], deps?: PrDeps): Promise<number>; // 終了コー�
 ### 別コミット（`scripts/tidy.mjs`）
 
 ```typescript
-interface TidyResult =
+type TidyResult =
   | { kind: "none" }
   | { kind: "committed"; files: string[]; oid: string }
   | { kind: "blocked"; secretLike: string[] }
