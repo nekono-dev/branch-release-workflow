@@ -10,6 +10,8 @@
 | `namePattern` | 作業ブランチ名（接頭辞を含むブランチ名全体）の正規表現 |
 | `maxNameLength` | 作業ブランチ名の最大文字数。既定は 54（プレビューのホスト名が DNS ラベルの 63 文字に収まるように） |
 | `autoApprove` | 省略可。確認を省く作業ブランチ運用の操作。省略した項目は有効、明示的な `false` だけが無効（下の「作業ブランチ運用の操作の確認の省略」） |
+| `afterPublish.cleanup` | 省略可。PR を作成した後に、その作業の worktree・ローカルブランチ・作業状態を片付けるか。省略は有効、`false` の明示だけが無効（無効のときは何も削除せず、手動の片付け `brw finish` を案内する） |
+| `pullRequest.language` | 省略可。`brw pr-template` が出す PR 本文の雛形の言語（`ja` / `en`）。省略は `ja`。リポジトリの `.github/PULL_REQUEST_TEMPLATE.md` があればそれを優先する |
 | `preview.provider` | `none` / `url-template` / `cloudflare-previews`。省略時は `urlTemplate` があれば `url-template`、無ければ `none` |
 | `preview.urlTemplate` | プレビューURLの雛形。`{alias}`（ブランチ名の `/` を `-` にしたもの）を含める。`{branch}` と `${変数}` も使える。ホスト名が `.workers.dev` で終われば workers.dev 配信、それ以外は独自ドメイン配信と判定する |
 | `preview.target` | `deploy` があり provider が `cloudflare-previews` なら必須。プレビューを作る配備先（`deploy.targets` の名前） |

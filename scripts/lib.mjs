@@ -79,6 +79,7 @@ export function loadConfig(root) {
 }
 
 const PROVIDERS = ["none", "url-template", "cloudflare-previews"];
+export const PR_LANGUAGES = ["ja", "en"];
 
 export function validateConfig(c) {
   const errs = [];
@@ -107,6 +108,24 @@ export function validateConfig(c) {
     else for (const [k, v] of Object.entries(a)) {
       if (!["push", "pullRequest"].includes(k)) errs.push(`autoApprove.${k} は未知のキーです（push・pullRequest）`);
       else if (typeof v !== "boolean") errs.push(`autoApprove.${k} は true / false にしてください`);
+    }
+  }
+  // PR 作成後の片付け（brw-pr-handoff）。省略は有効、false の明示だけが無効
+  if (c.afterPublish !== undefined) {
+    const a = c.afterPublish;
+    if (typeof a !== "object" || a === null || Array.isArray(a)) errs.push("afterPublish はオブジェクトにしてください（cleanup）");
+    else for (const [k, v] of Object.entries(a)) {
+      if (k !== "cleanup") errs.push(`afterPublish.${k} は未知のキーです（cleanup）`);
+      else if (typeof v !== "boolean") errs.push("afterPublish.cleanup は true / false にしてください");
+    }
+  }
+  // PR 本文の言語。省略は日本語
+  if (c.pullRequest !== undefined) {
+    const a = c.pullRequest;
+    if (typeof a !== "object" || a === null || Array.isArray(a)) errs.push("pullRequest はオブジェクトにしてください（language）");
+    else for (const [k, v] of Object.entries(a)) {
+      if (k !== "language") errs.push(`pullRequest.${k} は未知のキーです（language）`);
+      else if (!PR_LANGUAGES.includes(v)) errs.push(`pullRequest.language は ${PR_LANGUAGES.join(" / ")} のいずれかにしてください`);
     }
   }
   if (c.preview !== undefined) {
@@ -169,7 +188,10 @@ export function normalizeConfig(c) {
   const deploy = c.deploy
     ? { output: "wrangler.jsonc", ...c.deploy, brwSource: { ...DEFAULT_BRW_SOURCE, ...(c.deploy.brwSource ?? {}) } }
     : undefined;
-  const n = { baseBranch: "develop", maxNameLength: 54, ...c, preview, ...(deploy ? { deploy } : {}) };
+  // 片付けは省略時に有効（false の明示だけが無効）、PR 本文の言語は省略時に日本語
+  const afterPublish = { cleanup: c.afterPublish?.cleanup !== false };
+  const pullRequest = { language: c.pullRequest?.language ?? "ja" };
+  const n = { baseBranch: "develop", maxNameLength: 54, ...c, preview, afterPublish, pullRequest, ...(deploy ? { deploy } : {}) };
   // 恒常的な分岐元は baseBranch と固定名の baseBranches だけ（一時的な brwBase は含めない）
   return { ...n, permanentBases: [...new Set([n.baseBranch, ...(c.baseBranches ?? [])])] };
 }

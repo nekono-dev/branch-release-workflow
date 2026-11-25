@@ -283,6 +283,17 @@ const autoUp = mkRepo("develop", autoCfg);
 g(autoUp, "config", "branch.develop.merge", "refs/heads/main");
 g(autoUp, "config", "push.default", "upstream");
 eq("branch-guard/AC-14 送り先を省き、追跡先が別名なら省かない", [aa("git push", autoUp), aa("git push origin develop", autoUp)], [false, true]);
+eq("brw-pr-handoff/5.2 片付けの設定が省略された宣言は有効として読まれ、false の明示だけが無効になる", [normalizeConfig(autoCfg).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: {} }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: true } }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: false } }).afterPublish.cleanup], [true, true, true, false]);
+eq("brw-pr-handoff/5.4 設定の無い既存の宣言も検証を通り、片付け有効・日本語で読まれる", [validateConfig(autoCfg), normalizeConfig(autoCfg).pullRequest.language], [[], "ja"]);
+eq("brw-pr-handoff/5.6 片付けの設定の型違い・未知のキー・オブジェクト以外は宣言の不正として報告する", [
+  validateConfig({ ...autoCfg, afterPublish: { cleanup: "yes" } }).length, validateConfig({ ...autoCfg, afterPublish: { cleanups: true } }).length,
+  validateConfig({ ...autoCfg, afterPublish: true }).length, validateConfig({ ...autoCfg, afterPublish: null }).length, validateConfig({ ...autoCfg, afterPublish: [] }).length,
+], [1, 1, 1, 1, 1]);
+eq("brw-pr-handoff/5.7 本文の言語は ja・en だけを受け付け、省略は ja になる", [
+  validateConfig({ ...autoCfg, pullRequest: { language: "en" } }), normalizeConfig({ ...autoCfg, pullRequest: { language: "en" } }).pullRequest.language,
+  validateConfig({ ...autoCfg, pullRequest: { language: "fr" } }).length, validateConfig({ ...autoCfg, pullRequest: { lang: "ja" } }).length, validateConfig({ ...autoCfg, pullRequest: "ja" }).length,
+], [[], "en", 1, 1, 1]);
+eq("brw-pr-handoff/5.3 導入の記入例は片付けを有効にする既定値を持ち、検証を通る", (() => { const ex = JSON.parse(readFileSync(new URL("../assets/config.example.json", import.meta.url), "utf8")); return [ex.afterPublish, ex.pullRequest, validateConfig(ex)]; })(), [{ cleanup: true }, { language: "ja" }, []]);
 eq("branch-guard/AC-14 autoApprove の値が真偽値でない・未知のキーなら不正", [validateConfig({ ...autoCfg, autoApprove: { push: "yes" } }).length, validateConfig({ ...autoCfg, autoApprove: { merge: true } }).length, validateConfig({ ...autoCfg, autoApprove: true }).length], [1, 1, 1]);
 const onDevAuto = mkRepo("dev/feat", autoCfg);
 const ap = (cmd, repo = onDevAuto) => autoApprovable(cmd, repo);
