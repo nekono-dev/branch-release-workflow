@@ -27,7 +27,7 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 2. When 置き換えを実行したとき, the BRW shall 作成された worktree へ作業場所を移し、続くコマンドが worktree の中で実行されるようにする。
 3. When 置き換えを実行したとき, the BRW shall 何が何に置き換えられたかと、作業場所が移ったことを自然文で表示する。
 4. If 名前が宣言の命名規則に合わない、分岐元を確定できない、または操作が他のコマンドと組み合わされていて対象を確定できないとき, then the BRW shall 置き換えず操作を拒否し、理由と実行すべき `brw create` の例を表示する。
-5. While 作業場所が `.claude/worktrees/` の配下にない, the BRW shall 作業場所の移動を前提にした置き換えを行わず、拒否して手順を案内する。
+5. If 操作が `brw create` の配置先（リポジトリ本体の `.claude/worktrees/` の配下）以外の場所を指している、または作業場所の移動を確認できない実行環境であるとき, then the BRW shall 置き換えを行わず、拒否して `brw create` の使い方を案内する。
 6. Where 実行環境が操作の書き換えに対応していない（Codex など）, the BRW shall 置き換えを行わず、拒否して実行すべき手順を表示する。
 7. Where BRW を導入していないリポジトリ, the BRW shall ブランチ・worktree の作成を拒否も置き換えもしない。
 

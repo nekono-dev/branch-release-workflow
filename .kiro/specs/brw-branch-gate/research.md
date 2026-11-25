@@ -25,3 +25,29 @@
 ## 未決（利用者の判断が必要）
 
 なし（EnterWorktree は拒否して 2 手を案内する方針で決定）。
+
+---
+
+# 設計フェーズの調査（2026-11-25、Extension の軽量調査）
+
+## 追加の検証
+
+| # | 確かめたこと | 結果 | 設計への影響 |
+|---|---|---|---|
+| 9 | 実物の `brw create` を、フックの書き換え（`node brw.mjs create <名前> && cd <worktree> && echo …`）で動かす | **成功**。`pwd` が `.claude/worktrees/dev-foo`、`git branch --show-current` が `dev/foo`。同じ名前でもう一度実行すると `brw create` が「既に存在します」で終了コード 1 になり、作業場所は動かず、続く `pwd` は直前の worktree のまま | 置き換えは `&&` でつなぐだけで、失敗時の巻き戻しは不要（失敗した `create` は何も作らない）。`cd` の失敗も同じく後続を止める |
+| 10 | 書き換えた入力に `description` などの他の項目を残せるか | 残せる（`{...tool_input, command}`）。許可（`permissionDecision: "allow"`）を返すと、`acceptEdits` モードでも確認なしで実行された | 他の項目は展開して引き継ぐ。許可の返却は BRW 自身の CLI に限るので、確認を省略してよい |
+| 11 | フックの入力に作業ディレクトリが含まれるか | 含まれる（`cwd`）。worktree の中から呼ばれても本体のパスを逆引きできる（`worktrees()` の先頭） | 置き換えのコマンドは、判定した作業ディレクトリへ `cd` してから始める（先頭の `cd` を持つ元コマンドでも対象リポジトリが一致する） |
+
+## 既存の構造（拡張点）
+
+- `scripts/operation-policy.mjs` の `createOp` が `switch`・`checkout`・`branch`・`worktree add` を `create` 操作（`action`: `create`・`resume`・`rename`・`copy`、`via`、`branch`、`path`）に分類する。**開始点（start-point）は記録していない**。
+- `scripts/operation-decision.mjs` の `evalCreate` は常に拒否（`branch-create`・`branch-resume`）。保護・分岐元への切り替えだけ通常承認に任せる。
+- `scripts/agent-hooks.mjs` の `judgeBash` が判定結果を `verdict`（`deny`・`ask`・`allow`・`pass`）にし、`responseOf` がホストの応答にする。`decideHook` は `tool_name` が `Bash` と `mcp__*` のときだけ判定する。
+- `scripts/hook-install.mjs` が登録すべきフックの一覧（`CLAUDE_HOOKS`・Codex 用）を持ち、導入検査（`hook-diagnose.mjs`・`brw check`）が不足を報告する。`hooks/hooks.json`（プラグイン）にも matcher の定義がある。
+- `brw create` は配置先を `<本体>/.claude/worktrees/<alias>` に固定し、既存ブランチなら失敗する。`brw resume` は残っている worktree を使うか、ローカルまたはリモートから作り直す。
+
+## 統合の判断（Synthesis）
+
+- **一般化**: 「作成」と「再開」は、置き換え先のコマンドと `cd` 先が違うだけで、判定・書き換え・案内は共通。1 つの計画関数（`planGate`）が両方を扱う。EnterWorktree も同じ案内の書式を使う。
+- **Build vs Adopt**: フックの入力書き換えは、Claude Code のホスト機能（`updatedInput`、PoC #1）を使う。自前の実行ラッパーは作らない（ラッパーは PATH の差し替えが必要で、Bash 以外の入口を捉えられない）。
+- **単純化**: 判定層（`operation-decision`）は変えない。拒否の結果を受けて、フックの層で「置き換え可能なら書き換え」に変換する。これにより Codex・`brw guard`・既存の判定の試験は影響を受けない（要件 5.4）。
