@@ -95,7 +95,7 @@ scripts/
 ├── publish-cli.mjs    # 変更: 本文ファイルの読み取り先に BRW の本文置き場を許可
 ├── agent-hooks.mjs    # 変更: 信頼済みの brw pr を確認省略の対象にし、本文置き場を許可
 ├── operation-decision.mjs # 変更: evaluateAll に origin を追加。agent 起点の PR 作成は規則に合っても拒否して brw pr を案内
-├── publish-cli.mjs / publish-pr.mjs # 変更: decidePr が origin: "brw-publish" を渡す
+├── publish.mjs / publish-pr.mjs # 変更: issuePlan と decidePr が origin: "brw-publish" を渡す。push・PR の結果に公開記録（push 先のリモート名・公開した OID・PR の URL）を保存する
 ├── lib.mjs            # 変更: 宣言の検証・既定値に afterPublish・pullRequest を追加
 └── setup-cli.mjs      # 変更: 宣言の新規作成時に afterPublish.cleanup: true を書く
 assets/
@@ -168,7 +168,7 @@ sequenceDiagram
 | 4.2・4.11 | 作業状態の削除（順序） | `cleanup` | `cleanupAfterPr` |
 | 4.3 | リモート・プレビューは残す | `cleanup`（削除対象の限定） | — |
 | 4.4・4.5 | 未 push・未コミットは残す | `finishBlocker`（共有） | `CleanupResult.kept` |
-| 4.6・4.10 | 止まったとき再試行できる | `pr-flow`（再入）、`cleanup`（状態を残す） | 状態 `published` |
+| 4.6・4.10 | 止まったとき再試行できる | `pr-flow`（再入）、`cleanup`（状態を残す、`brwState` の記録） | 状態 `published`、`brw finish` |
 | 4.7 | 既存 PR 再利用でも同じ判定 | `pr-flow` | 同上 |
 | 4.8・4.9 | 本体のパス・次の `brw create` を表示 | `cleanup`（`afterCleanupGuide`） | 標準出力 |
 | 5.1〜5.4 | 設定・既定・導入時・既存導入先 | `lib.mjs`、`setup-cli.mjs` | `afterPublish.cleanup` |
@@ -256,7 +256,7 @@ function instruction(ctx: TemplateContext): string;             // 自己完結�
 ### 片付け（`scripts/cleanup.mjs`）
 
 ```typescript
-interface KnownPr { url: string; base: string }
+interface KnownPr { url: string; base: string; oid: string; remote: string }   // oid・remote は作業状態の公開記録から読む
 type CleanupResult =
   | { kind: "cleaned"; branch: string; worktree: string | null; main: string }
   | { kind: "kept"; branch: string; reason: string };            // 未 push・未コミットなど
@@ -265,17 +265,20 @@ function removeBranch(main, others, branch): { worktree: string | null };
 function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; known: KnownPr }): CleanupResult;
 ```
 - 順序（4.2・4.11）: ① 削除前に状態ファイル（`.json`・`.json.lock`）と本文ファイルのパスを求める → ② 安全確認（下記）→ ③ `removeBranch`（git は `cwd` に本体のパスを明示。research.md #6）→ ④ 状態の削除（下記）と本文ファイルの削除 → ⑤ 案内の出力。②で止まったときは何も消さず、状態は `published` のまま残す（4.6）。
-- **安全確認（②）**: `KnownPr` に公開した**OID と push 先のリモート名**を含める（公開計画が固定した値）。確認は次のすべて。(a) 作業ブランチのローカルの先端が公開した OID と同じ（公開後の追加コミットが無い）。(b) そのリモートのブランチが存在し、先端が同じ OID（**存在しない・照会できない・OID が違うときは片付けない**。`finishBlocker` の「遠隔に無ければ片付けてよい」は手動の `brw finish` だけで使い、`known` を渡す自動側には適用しない）。(c) worktree に未コミットの変更が無い。(d) 本体が作業ブランチを使っていない。`origin` 以外の push 先でも、記録されたリモート名で確認する。
-- **状態の削除（④）**: ロックを取得し、この作業の記録だけを取り除く。状態ファイルに、未完了（`published` 以外）の別の作業が残っていなければファイルとロックを削除し、残っていればその作業の記録だけを消して、ファイルは残す。worktree は 1 つの状態ファイルに結び付くので、通常は全記録が完了済みで、ファイルごと削除される。
-- **部分的な失敗の回復**: ③で worktree は消えたがブランチの削除が失敗したときは、「本体で `brw finish <ブランチ>` を実行する」と案内し、状態は残す（手動の `finish` は worktree が無くても動く）。④の途中で失敗したときは、片付けは済んでいるが状態が残っていることを表示する（孤児の状態は次の同名の `brw create` で作業 ID が衝突しない。既存の公開は `published` を現在の作業から外す）。
+- **公開記録（新規）**: push の成功時に、作業状態の `results.push` へ `remote`（push 先のリモート名）と `oid`（公開した OID）を、PR の成功時に `results.pr` へ `url` と `base` を保存する（既存は `outcome`・`code` だけで、再試行時に復元できない。review 指摘）。`KnownPr` はこの記録から作る。記録が無い・読めないときは片付けを止める（`kept`、理由「公開記録を確認できない」）。
+- **安全確認（②）**: `KnownPr` の**OID と push 先のリモート名**（上記の公開記録）を使う。確認は次のすべて。(a) 作業ブランチのローカルの先端が公開した OID と同じ（公開後の追加コミットが無い）。(b) そのリモートのブランチが存在し、先端が同じ OID（**存在しない・照会できない・OID が違うときは片付けない**。`finishBlocker` の「遠隔に無ければ片付けてよい」は手動の `brw finish` だけで使い、`known` を渡す自動側には適用しない）。(c) worktree に未コミットの変更が無い。(d) 本体が作業ブランチを使っていない。`origin` 以外の push 先でも、記録されたリモート名で確認する。
+- **状態の削除（④）**: ロックを取得し、この作業の記録だけを取り除く。取り除いた後に**他の記録（公開済みを含む）が 1 つでも残っていればファイルを残し**、残っていなければファイルとロックを削除する。
+- **部分的な失敗の回復**: 状態ファイルは worktree の実体パスのハッシュで決まるため、worktree が消えた後は探せない。そこで、①の時点で状態ファイルのパスを `git config branch.<ブランチ>.brwState` に記録する。③で worktree は消えたがブランチの削除が失敗したときは、「本体で `brw finish <ブランチ>` を実行する」と案内する。手動の `brw finish` は、削除に成功した後に `brwState` が記録されていれば同じ手順（④）で状態を削除し、設定を外す（手動の片付けも状態を残さなくなる）。④の途中で失敗したときは、片付けが済んでいて状態が残っていることを表示し、`brw finish <ブランチ>` での回復を案内する。
+- **手動の `brw finish`（共有部分）**: 手動側の遠隔確認も `origin` 固定ではなく、`branch.<ブランチ>.pushRemote`（既存の `remoteNameOf`）を使うよう揃える。「遠隔に無いとき片付けてよい」は手動側だけの条件のままにする（取り込み済みの判定を前提とするため）。
 - 案内: 本体のパスと「次の作業は `brw create <名前>`」。作業場所が消えた後のコマンドは、ホストが本体へ戻して実行する（research.md #1）。
 
 ### 判定層（`scripts/operation-decision.mjs`）
 
 - **衝突の回避**: `scripts/publish-pr.mjs` の `decidePr` は、作成の可否と承認を `gh pr create` 相当のコマンド文字列で `evaluateAll` に判定させている（禁止・適合・確認省略の判断を共通判定に任せる設計）。`evalPrCreate` を一律に拒否すると、BRW 自身の PR 作成も拒否になる。そこで `evaluateAll(classified, restrictions, ctx)` に `ctx.origin`（`"agent"` が既定、`"brw-publish"` は内部）を追加する。
   - `ctx.origin === "agent"`（フック・`brw guard`・MCP の判定。既定）: `gh pr create`・GitHub API・MCP による PR 作成を、規則に適合する場合も `deny`（コード `pr-create-use-brw`）にし、案内は `ALT_PR_FLOW`（`brw pr-template` で本文を用意し、`brw pr` で作成する）。不適合の拒否の案内は変えない。
-  - `ctx.origin === "brw-publish"`: 従来の判定（禁止・適合・確認省略）を使う。`decidePr` だけがこれを渡す。
-  - 既定が拒否なので、渡し忘れは安全側に倒れる。変更対象は `operation-decision.mjs`（`evaluateAll`・`evalPrCreate`）と `publish-pr.mjs`（`decidePr` が `ctx` を渡す）の 2 つで、試験で内部経路が従来どおり通ること、外部経路が拒否になることを両方確かめる。
+  - `ctx.origin === "brw-publish"`: 従来の判定（禁止・適合・確認省略）を使う。**`publish-pr.mjs` の `decidePr`（実行時）と `publish.mjs` の `issuePlan`（計画時。`gh pr create` 相当を評価している箇所）の 2 か所**だけがこれを渡す。計画時に渡し忘れると PR が計画から除外され、実行時に `plan-pr-missing` で止まる。
+  - 既定が拒否なので、渡し忘れは安全側に倒れる。変更対象は `operation-decision.mjs`（`evaluateAll`・`evalPrCreate`）、`publish-pr.mjs`、`publish.mjs` の 3 つ。試験で内部経路（計画と実行）が従来どおり通ること、外部経路（フック・MCP・`brw guard`）が拒否になることを両方確かめる。
+  - **`brw guard`**: 現在の `guard` は旧来の `judgeCommand`（commit・push の判定）だけを呼び、PR 作成を見ない。`guard` を、まず共通の判定（`classifyCommand` の分類に `evaluateAll`、既定の origin）を呼び、PR 作成が含まれていれば拒否を表示し、無ければ従来の `judgeCommand` へ進む形に変える（`brw-branch-gate` の作成・再開の拒否も同じ入口を使うため、先に実装する側が作り、他方は再利用する）。
 - 確認省略（`autoApprove.pullRequest`）は `brw pr` の公開段階の承認にだけ使い、`gh` 経由の判定には使わない。
 
 ### フック（`scripts/agent-hooks.mjs`）
