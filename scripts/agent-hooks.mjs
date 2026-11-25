@@ -16,7 +16,8 @@
 import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { git, sanitize } from "./lib.mjs";
+import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
+import { git, loadConfig, redactSecrets, sanitize } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
@@ -245,13 +246,51 @@ function restrictionsFor(cwd) {
 
 const decisionOf = (d) => ({ verdict: "deny", reason: [d.reason, d.alternative].filter(Boolean).join(" "), code: d.code });
 
+/**
+ * 作成・再開（kind: create）の拒否を、ゲートの計画で置き換え（rewrite）か、案内の書式の拒否にする。
+ * 作成の拒否でなければ null。置き換えに使う書式付きの拒否は guided: true（複数行の書式を保って応答する）。
+ * @param {object} cls classifyCommand の結果
+ * @param {object} d evaluateAll の拒否の判定
+ */
+function gateJudge(cls, d, command, cwd, host, toolInput) {
+  if (d.kind !== "create") return null;
+  // 拒否の原因になった作成の操作を特定する
+  const op = cls.operations.filter((o) => o.kind === "create").find((o) => evaluateAll({ operations: [o] }, {}).verdict === "deny");
+  if (!op) return null;
+  const opCwd = op.cwd ?? cwd;
+  if (d.code === "branch-create" || d.code === "branch-resume") {
+    const config = op.root ? loadConfig(op.root).config : null;
+    if (config) {
+      const facts = opCwd ? gatherFacts(opCwd) : null;
+      const plan = planGate({ host, command, toolInput, op, config, facts, hasLeadingCd: stripCd(command).dir !== null, unresolved: op.unresolved ?? [] });
+      if (plan.verdict === "rewrite") return { verdict: "rewrite", command: plan.command, reason: plan.reason, code: "gate-rewrite", toolInput };
+      if (plan.verdict === "deny") return { verdict: "deny", reason: plan.reason, code: plan.code, guided: true };
+      return PASS; // 保護・分岐元への切り替えなど、通常の承認に任せる
+    }
+  }
+  // 対象を確定できない拒否など。既存の理由に、共通の案内の見出しと次のコマンドの行を付ける
+  const reason = [d.reason, d.alternative].filter(Boolean).join(" ");
+  return {
+    verdict: "deny",
+    code: d.code,
+    guided: true,
+    reason: guidance({
+      outcome: "拒否",
+      conclusion: "ブランチ・worktree の作成や切り替えを確定できないため、操作を止めます",
+      commands: [`node ${shellQuote(BRW_CLI)} create <名前>`],
+      workdir: null,
+      notes: `${reason}\n作成は brw create <名前>、既存の開発ブランチの再開は brw resume <ブランチ> を実行してください。`,
+    }),
+  };
+}
+
 /** Bash の入力を判定する。 */
-function judgeBash(command, cwd) {
+function judgeBash(command, cwd, host = "claude", toolInput = {}) {
   const pub = publishCall(command, cwd);
   if (pub) return decidePublish(pub);
   const cls = classifyCommand(command, cwd);
   const d = evaluateAll(cls, restrictionsFor(cwd));
-  if (d.verdict === "deny") return decisionOf(d);
+  if (d.verdict === "deny") return gateJudge(cls, d, command, cwd, host, toolInput) ?? decisionOf(d);
   if (cls.operations.some((o) => o.repoState === "managed") && refMovingIn(command))
     return { verdict: "ask", reason: "ブランチや参照を直接動かす操作のため、利用者の確認を求めます。BRW の手順（brw create・brw resume など）を優先してください。", code: "ref-moving" };
   // 送り先（別のリモートを含む）が信頼できない push は、確認省略しない（通常の承認に任せる）
@@ -268,7 +307,11 @@ function judgeBash(command, cwd) {
 export function denyOfCommand(command, cwd) {
   const cls = classifyCommand(command, cwd);
   const d = evaluateAll(cls, restrictionsFor(cwd));
-  return d.verdict === "deny" ? { ...decisionOf(d), kinds: cls.operations.map((o) => o.kind) } : null;
+  if (d.verdict !== "deny") return null;
+  // 手順書の経路（Codex）は入力を書き換えられないため、作成・再開は案内つきの拒否（次のコマンドを含む）にする
+  const g = gateJudge(cls, d, command, cwd, "codex", {});
+  if (g?.verdict === "pass") return null;
+  return { ...(g?.verdict === "deny" ? g : decisionOf(d)), kinds: cls.operations.map((o) => o.kind) };
 }
 
 /** ホストの入力（オブジェクトまたは JSON 文字列）を判定する。判定できない入力は PASS（確認省略しない）。 */
@@ -287,7 +330,11 @@ export function decideHook(host, event, input) {
       if (!ti || typeof ti.command !== "string") return PASS;
       // 作業ディレクトリが不明でも、git・gh を含まないコマンドは対象外
       if (cwd === null && !TOOLS_RE.test(ti.command)) return PASS;
-      return judgeBash(ti.command, cwd);
+      return judgeBash(ti.command, cwd, host, ti);
+    }
+    if (tool === "EnterWorktree") {
+      const r = judgeEnterWorktree(ti, cwd);
+      return r.verdict === "deny" ? { verdict: "deny", reason: r.reason, code: r.code, guided: true } : PASS;
     }
     if (typeof tool === "string" && tool.startsWith("mcp__")) {
       // MCP の書き込みは拒否だけを返す。確認省略は、公開計画を経た Bash の publish に限る
@@ -297,7 +344,9 @@ export function decideHook(host, event, input) {
     return PASS;
   } catch {
     // 判定の途中で例外が起きたら、Git・GitHub の操作だけは止める（安全側）
-    return TOOLS_RE.test(typeof input === "string" ? input : JSON.stringify(input ?? "")) ? { verdict: "deny", reason: "フックの判定で内部エラーが起きたため、操作を止めます。", code: "internal-error" } : PASS;
+    const raw = typeof input === "string" ? input : JSON.stringify(input ?? "");
+    if (/"EnterWorktree"/.test(raw)) return { verdict: "deny", reason: "フックの判定で内部エラーが起きたため、操作を止めます。", code: "internal-error" };
+    return TOOLS_RE.test(raw) ? { verdict: "deny", reason: "フックの判定で内部エラーが起きたため、操作を止めます。", code: "internal-error" } : PASS;
   }
 }
 
@@ -307,7 +356,13 @@ export function decideHook(host, event, input) {
  */
 export function responseOf(host, event, d) {
   if (!d || d.verdict === "pass") return null;
-  const reason = PREFIX + sanitize(d.reason);
+  // 案内の書式（複数行）は、行を保つ（資格情報らしい値だけを伏せる）。それ以外は 1 行にする
+  const reason = d.guided === true ? redactSecrets(d.reason) : PREFIX + sanitize(d.reason);
+  if (d.verdict === "rewrite") {
+    // 置き換えは Claude Code の PreToolUse だけ（入力を書き換えて許可する）。書き換え後は BRW 自身の CLI の呼び出しだけで、確認は求めない
+    if (host !== "claude" || event !== "PreToolUse" || typeof d.command !== "string") return null;
+    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: reason, updatedInput: { ...(d.toolInput ?? {}), command: d.command } } };
+  }
   if (event === "PermissionRequest") {
     if (d.verdict === "deny") return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: reason } } };
     if (d.verdict === "allow") return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } };

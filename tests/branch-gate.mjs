@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "../scripts/branch-gate.mjs";
+import { decideHook, responseOf } from "../scripts/agent-hooks.mjs";
 import { classifyCommand } from "../scripts/operation-policy.mjs";
 import { normalizeConfig } from "../scripts/lib.mjs";
 
@@ -407,5 +408,50 @@ const runPlanGateChecks = async (eq) => {
     byName.reason.split("\n")[1], byName.reason.split("\n")[0].startsWith("[branch-release-workflow] "), CALLER_WORDS.test(byName.reason),
     enter({ path: outWt }, er).reason === enter({ path: outWt }, er).reason,
   ], ["BRW 案内: 拒否", true, false, true]);
+
+
+  // ---- フックへの接続（decideHook・responseOf）: 実際の一時リポジトリで確かめる ----
+  const hr = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-hook-")));
+  const hg = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", hr, ...a], { stdio: "ignore" });
+  execFileSync("git", ["init", "-q", "-b", "develop", hr], { stdio: "ignore" });
+  writeFileSync(join(hr, ".branch-release-workflow.json"), JSON.stringify({ workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop", namePattern: "^dev/[a-z0-9-]+$" }));
+  hg("add", "."); hg("commit", "-q", "-m", "init");
+  hg("branch", "dev/existing"); hg("branch", "main");
+  const hook = (host, tool, input) => decideHook(host, "PreToolUse", { tool_name: tool, tool_input: input, cwd: hr });
+  const bash = (host, command) => hook(host, "Bash", { command });
+  const hwt = join(hr, ".claude", "worktrees", "dev-foo");
+  const rw = bash("claude", "git switch -c dev/foo");
+  const rwResp = responseOf("claude", "PreToolUse", rw);
+  eq("brw-branch-gate/1.1 Claude Code は作成を、書き換えを含む許可にする", [rw.verdict, rwResp.hookSpecificOutput.permissionDecision, rwResp.hookSpecificOutput.updatedInput.command.startsWith(`cd ${q(hr)} && node ${q(BRW)} create 'dev/foo' && cd ${q(hwt)} && printf `)], ["rewrite", "allow", true]);
+  eq("brw-branch-gate/1.1 書き換えは元の入力のほかの項目を保つ", responseOf("claude", "PreToolUse", bash("claude", "git switch -c dev/foo")).hookSpecificOutput.updatedInput.command !== "git switch -c dev/foo", true);
+  const keep = decideHook("claude", "PreToolUse", { tool_name: "Bash", tool_input: { command: "git switch -c dev/foo", description: "作る", timeout: 5000 }, cwd: hr });
+  eq("brw-branch-gate/1.1 updatedInput は元の tool_input の他の項目（説明・タイムアウト）を保つ", (({ description, timeout }) => [description, timeout])(responseOf("claude", "PreToolUse", keep).hookSpecificOutput.updatedInput), ["作る", 5000]);
+  const cx = bash("codex", "git switch -c dev/foo");
+  const cxResp = responseOf("codex", "PreToolUse", cx);
+  eq("brw-branch-gate/1.6 Codex は同じ入力を、次のコマンドを含む拒否にする（書き換えない）", [cx.verdict, cx.code, cxResp.hookSpecificOutput.permissionDecision, cxResp.hookSpecificOutput.permissionDecisionReason.includes("次のコマンド: ")], ["deny", "gate-host-no-rewrite", "deny", true]);
+  eq("brw-branch-gate/4.2 拒否の応答は、案内の 4 行の書式を改行ごと保つ", cxResp.hookSpecificOutput.permissionDecisionReason.split("\n").slice(0, 4).map((l) => l.split(" ")[0]), ["[branch-release-workflow]", "BRW", "次のコマンド:", "作業場所:"]);
+  eq("brw-branch-gate/1.6 Codex の PermissionRequest でも、書き換えず拒否を返す", responseOf("codex", "PermissionRequest", cx).hookSpecificOutput.decision.behavior, "deny");
+  const rs = bash("claude", "git switch dev/existing");
+  eq("brw-branch-gate/3.1 既存の開発ブランチへの切り替えは、brw resume への書き換えになる", [rs.verdict, responseOf("claude", "PreToolUse", rs).hookSpecificOutput.updatedInput.command.includes(`resume 'dev/existing'`)], ["rewrite", true]);
+  eq("brw-branch-gate/3.2 保護ブランチへの切り替えは、書き換えも拒否もせず通常の承認に任せる", [bash("claude", "git switch main").verdict, responseOf("claude", "PreToolUse", bash("claude", "git switch main"))], ["pass", null]);
+  const un = bash("claude", 'git switch -c "$X"');
+  eq("brw-branch-gate/4.2 対象を確定できない拒否にも、案内の見出しと次のコマンドの行を付ける", [un.verdict, responseOf("claude", "PreToolUse", un).hookSpecificOutput.permissionDecisionReason.split("\n")[1], responseOf("claude", "PreToolUse", un).hookSpecificOutput.permissionDecisionReason.includes("次のコマンド: ")], ["deny", "BRW 案内: 拒否", true]);
+  eq("brw-branch-gate/1.4 規則外の名前は書き換えず拒否し、理由と次のコマンドを示す", [bash("claude", "git switch -c Foo").code, responseOf("claude", "PreToolUse", bash("claude", "git switch -c Foo")).hookSpecificOutput.permissionDecisionReason.includes("次のコマンド: ")], ["gate-name-invalid", true]);
+  eq("brw-branch-gate/5.5 照会だけの git コマンドは妨げない", [bash("claude", "git status").verdict, bash("claude", "git branch --list").verdict, bash("claude", "git worktree list").verdict], ["pass", "pass", "pass"]);
+  const eh = hook("claude", "EnterWorktree", { name: "dev/bar" });
+  eq("brw-branch-gate/2.1 EnterWorktree の name 指定は、2 手の案内つきで拒否する", [eh.verdict, eh.code, responseOf("claude", "PreToolUse", eh).hookSpecificOutput.permissionDecisionReason.includes("次のコマンド: 1) ")], ["deny", "gate-enter-name", true]);
+  const pre = join(hr, ".claude", "worktrees", "dev-pre");
+  hg("worktree", "add", "-q", "-b", "dev/pre", pre);
+  eq("brw-branch-gate/2.2 BRW の worktree への path 指定は、応答なしで通す", [hook("claude", "EnterWorktree", { path: pre }).verdict], ["pass"]);
+  eq("brw-branch-gate/5.3 宣言の無いリポジトリでは、作成も EnterWorktree も何も返さない", (() => {
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), "brw-gate-hook-plain-")));
+    execFileSync("git", ["init", "-q", "-b", "develop", plain], { stdio: "ignore" });
+    const h = (tool, input) => decideHook("claude", "PreToolUse", { tool_name: tool, tool_input: input, cwd: plain });
+    return [h("Bash", { command: "git switch -c foo" }).verdict, h("EnterWorktree", { name: "x" }).verdict];
+  })(), ["pass", "pass"]);
+  eq("brw-branch-gate/5.4 同じ入力の判定結果（置き換え可否を除く）は、Claude Code と Codex で同じ", [
+    bash("claude", "git switch -c Foo").code === bash("codex", "git switch -c Foo").code,
+    bash("claude", "git switch -c dev/a && git push").code === bash("codex", "git switch -c dev/a && git push").code,
+  ], [true, true]);
 
 };
