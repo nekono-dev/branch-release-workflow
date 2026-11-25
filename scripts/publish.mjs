@@ -12,7 +12,7 @@
 // PR 本文・資格情報は保存しない。保存するのは決まった項目だけで、自由文は秘密らしい値を伏せて長さを制限する。
 import { randomBytes, createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { classifyBranch, configMatchesHead, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
 import { classifyCommand } from "./operation-policy.mjs";
@@ -147,6 +147,35 @@ export function acquire(lockFile, waitMs) {
     } catch { /* 読めなければ次の周回で再試行 */ }
     if (Date.now() >= until) return null;
     sleep(20);
+  }
+}
+
+/**
+ * 状態ファイルを直接指して、この作業の記録だけを取り除く（worktree が消えた後でも使える）。
+ * 他の記録が 1 つでも残るときはファイルを残し、残らなければファイルを削除する。壊れた状態には触れない。
+ * @returns {{ok: true, removedFile: boolean} | {ok: false, error: {kind: string, message: string}}}
+ */
+export function removeWorkRecordAt(file, workId, { lockWaitMs = 3000 } = {}) {
+  const lock = `${file}.lock`;
+  if (!existsSync(file)) return { ok: true, removedFile: false };
+  if (!acquire(lock, lockWaitMs)) return fail("conflict", "別の処理が作業状態を更新中です。");
+  try {
+    const { state, error } = load(file);
+    if (error) return fail("conflict", error);
+    delete state.works[workId];
+    if (state.current === workId) state.current = null;
+    if (Object.keys(state.works).length > 0) {
+      save(file, state);
+      return { ok: true, removedFile: false };
+    }
+    rmSync(file, { force: true });
+    return { ok: true, removedFile: true };
+  } catch (e) {
+    return fail("conflict", `作業状態を削除できません: ${e.code ?? e.message}`);
+  } finally {
+    rmSync(lock, { force: true });
+    // 状態ファイルが無くなったときは、公開の実行ロックの残りも片付ける
+    if (!existsSync(file)) rmSync(`${file}.run.lock`, { force: true });
   }
 }
 

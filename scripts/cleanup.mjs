@@ -3,7 +3,9 @@
 // 安全確認（finishBlocker）と削除（removeBranch）を置く。brw.mjs を import しない（brw.mjs がこのファイルを使う）。外部依存なし。
 import { execFileSync, spawnSync } from "node:child_process";
 import { classifyBranch, git, matchesAny } from "./lib.mjs";
-import { remoteNameOf } from "./publish.mjs";
+import { bodyPathOf } from "./pr-template.mjs";
+import { removeWorkRecordAt, remoteNameOf, stateFileOf } from "./publish.mjs";
+import { existsSync, rmSync } from "node:fs";
 
 // 作業ブランチが片付けてよい状態か。切り出し元へ取り込まれた、または保護ブランチへの PR がある、のどれかを満たすと done。
 // 取り込みは commit の祖先関係のほか、squash merge を見込んで「ブランチで変えたファイルが切り出し元で同じ内容」でも判定する
@@ -71,3 +73,75 @@ export function removeBranch(main, others, branch) {
   return wt;
 }
 
+
+const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+/** 手動の `brw finish` の成功後に、片付けを自動側が始めていた作業の状態を同じ手順で削除する（branch.<ブランチ>.brwState・brwWork の記録がある場合だけ）。 */
+export function recordedState(mainPath, branch) {
+  const file = git(mainPath, "config", `branch.${branch}.brwState`);
+  const workId = git(mainPath, "config", `branch.${branch}.brwWork`);
+  return file && workId ? { file, workId } : null;
+}
+
+/**
+ * PR 作成後の自動片付け。作成した PR の事実（known）と作業状態の公開記録を使い、安全を確かめてから worktree・ローカルブランチ・本文ファイルを削除し、
+ * 最後に作業状態の記録を取り除く。確認できない・遠隔に無い・先端が違うときは何も消さず kept を返す。削除後は子プロセスを実行しない。
+ * @param {{main: {path: string, branch: string|null}, others: {path: string, branch: string|null}[], config: object, branch: string, workId: string,
+ *   known: {url: string, base: string, oid: string, remote: string}|null}} opts
+ * @returns {{kind: "cleaned", branch: string, worktree: string, main: string, stateRemoved: boolean, stateNote: string|null}
+ *   | {kind: "kept", branch: string, reason: string}}
+ */
+export function cleanupAfterPr({ main, others, config, branch, workId, known }) {
+  const keep = (reason) => ({ kind: "kept", branch, reason });
+  if (!known || typeof known.oid !== "string" || !/^[0-9a-f]{40,64}$/.test(known.oid) || !REMOTE_NAME.test(known.remote ?? "") || !known.url || !known.base)
+    return keep("公開記録（push 先のリモート・公開した OID・PR の URL・取り込み先）を確認できないため、片付けません。");
+  if (classifyBranch(config, branch) !== "development") return keep(`'${branch}' は開発ブランチではないため、片付けません。`);
+  const wt = others.find((w) => w.branch === branch) ?? null;
+  if (!wt) return keep("作業ブランチの worktree が見つからないため、片付けません。");
+  if (main.branch === branch) return keep(`本体の作業ツリーが ${branch} を使っているため、片付けません。`);
+  // (a) ローカルの先端が、公開した OID と同じ（公開後に追加のコミットが無い）
+  const tip = git(main.path, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`);
+  if (tip === null) return keep(`ローカルに ${branch} が無いため、片付けません。`);
+  if (tip !== known.oid) return keep(`公開した後に ${branch} へ新しいコミットがあるため、片付けません（公開 ${known.oid.slice(0, 12)}・現在 ${tip.slice(0, 12)}）。`);
+  // (b) 記録された push 先のリモートに、同じ OID のブランチがある（存在しない・照会できない・違うときは片付けない）
+  const ls = spawnSync("git", ["ls-remote", "--heads", known.remote, `refs/heads/${branch}`], { cwd: main.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (ls.status !== 0) return keep(`リモート ${known.remote} の状態を確認できないため、片付けません。`);
+  const remoteOid = (ls.stdout.split("\n")[0] ?? "").split("\t")[0];
+  if (remoteOid === "") return keep(`リモート ${known.remote} に ${branch} が無いため、片付けません。`);
+  if (remoteOid !== known.oid) return keep(`リモート ${known.remote} の ${branch} の先端が公開した OID と違うため、片付けません。`);
+  // (c) worktree に未コミットの変更が無い
+  const status = git(wt.path, "status", "--porcelain");
+  if (status === null) return keep("worktree の状態を確認できないため、片付けません。");
+  if (status !== "") return keep(`worktree ${wt.path} に commit していない変更があるため、片付けません。`);
+
+  // 削除の前に、状態ファイルと本文ファイルの場所を求め、状態の場所を残す（途中で止まっても brw finish で回復できる）
+  const stateFile = stateFileOf(wt.path);
+  const bodyFile = bodyPathOf(main.path, branch);
+  if (stateFile) {
+    // 回復用の記録を書けないまま削除を始めると、途中で止まったとき brw finish が状態を取り除けない。書けなければ削除前に止める
+    const wrote = git(main.path, "config", `branch.${branch}.brwState`, stateFile) !== null && git(main.path, "config", `branch.${branch}.brwWork`, workId) !== null;
+    if (!wrote) return keep("回復用の記録（作業状態の場所）を書けなかったため、片付けません。");
+  }
+  try {
+    removeBranch(main, others, branch);
+  } catch (error) {
+    // 削除後の確認は、子プロセスではなくファイルの有無で行う（git の子プロセスは本体のパスを cwd に明示したものだけ）
+    const gone = !existsSync(wt.path);
+    return keep(`${gone ? "worktree は削除しましたが、" : ""}ブランチの削除に失敗しました（${String(error.message).split("\n")[0]}）。本体（${main.path}）で brw finish ${branch} を実行して片付けてください。`);
+  }
+  // 以降は子プロセスを実行しない（worktree が消えた後の作業ディレクトリを引き継ぐ子プロセスは失敗する。research.md #6）
+  const notes = [];
+  try {
+    rmSync(bodyFile, { force: true });
+  } catch (error) {
+    notes.push(`片付けは済みましたが、本文ファイル ${bodyFile} を削除できませんでした（${error.code ?? error.message}）。手で削除してください。`);
+  }
+  let stateRemoved = false;
+  if (stateFile) {
+    let r;
+    try { r = removeWorkRecordAt(stateFile, workId); } catch (error) { r = { ok: false, error: { message: error.code ?? error.message } }; }
+    if (r.ok) stateRemoved = true;
+    else notes.push(`片付けは済みましたが、作業状態の記録を取り除けませんでした（${r.error.message}）。状態ファイル ${stateFile} から作業 ${workId} の記録を削除してください。`);
+  }
+  return { kind: "cleaned", branch, worktree: wt.path, main: main.path, stateRemoved, stateNote: notes.length > 0 ? notes.join("\n") : null };
+}

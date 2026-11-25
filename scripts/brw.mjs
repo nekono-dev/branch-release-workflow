@@ -36,7 +36,8 @@ import { denyOfCommand } from "./agent-hooks.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { carryChanges } from "./carry.mjs";
-import { finishBlocker, removeBranch } from "./cleanup.mjs";
+import { finishBlocker, recordedState, removeBranch } from "./cleanup.mjs";
+import { removeWorkRecordAt } from "./publish.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
@@ -526,8 +527,14 @@ function finish(args) {
   const base = baseArg ?? baseOf(main.path, config, branch);
   const why = finishBlocker(main, others, config, branch, base);
   if (why) fail(`${why}\n  ${branch} は片付けません。worktree は、切り出し元（${base}）へのマージか、保護ブランチへの PR 作成の後に片付けます。`);
+  const recorded = recordedState(main.path, branch); // ブランチを消すと設定も消えるので、先に読む
   const wt = removeBranch(main, others, branch);
   console.log(`片付けました: ${branch}${wt ? `（worktree: ${wt.path}）` : ""}`);
+  // 自動の片付けが途中で止まっていた作業の状態も、同じ手順で取り除く
+  if (recorded) {
+    const r = removeWorkRecordAt(recorded.file, recorded.workId);
+    console.log(r.ok ? "作業状態の記録も取り除きました。" : `注意: 作業状態の記録を取り除けませんでした（${r.error.message}）: ${recorded.file}`);
+  }
   console.log(`同じブランチで続けるときは \`brw resume ${branch}\`、新しい作業は \`brw create <名前>\` で、リモートから取得し直して作ります。`);
 }
 
