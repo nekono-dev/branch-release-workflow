@@ -24,7 +24,7 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 
 #### Acceptance Criteria
 1. When エージェントが BRW 導入済みのリポジトリで `git switch -c`・`git checkout -b`・`git branch <名前>`・`git worktree add -b` による作業ブランチの作成を実行しようとし、名前が宣言の命名規則に合い、追跡済みファイルの未コミットの変更が無いとき, the BRW shall その操作を `brw create` による作成に置き換えて実行する。
-2. When 置き換えを実行したとき, the BRW shall 作成された worktree へ作業場所を移し、続くコマンドが worktree の中で実行されるようにする。
+2. When 置き換えを実行したとき, the BRW shall 作成された worktree へ作業場所を移し、続くコマンドが worktree の中で実行されるようにする。ただし `git branch <名前>` のようにブランチを切り替えない操作は、ブランチだけを作り、作業場所を移さない。
 3. When 置き換えを実行したとき, the BRW shall 何が何に置き換えられたかと、作業場所が移ったことを自然文で表示する。
 4. If 名前が宣言の命名規則に合わない、分岐元を確定できない、または操作が他のコマンドと組み合わされていて対象を確定できないとき, then the BRW shall 置き換えず操作を拒否し、理由と実行すべき `brw create` の例を表示する。
 5. If 操作が `brw create` の配置先（リポジトリ本体の `.claude/worktrees/` の配下）以外の場所を指している、または作業場所の移動を確認できない実行環境であるとき, then the BRW shall 置き換えを行わず、拒否して `brw create` の使い方を案内する。

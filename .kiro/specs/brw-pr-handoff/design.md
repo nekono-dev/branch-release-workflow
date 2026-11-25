@@ -94,7 +94,8 @@ scripts/
 ├── brw.mjs            # 変更: pr・pr-template を振り分け、finish が cleanup.mjs を使う
 ├── publish-cli.mjs    # 変更: 本文ファイルの読み取り先に BRW の本文置き場を許可
 ├── agent-hooks.mjs    # 変更: 信頼済みの brw pr を確認省略の対象にし、本文置き場を許可
-├── operation-decision.mjs # 変更: evalPrCreate が規則に合う場合も拒否して brw pr を案内
+├── operation-decision.mjs # 変更: evaluateAll に origin を追加。agent 起点の PR 作成は規則に合っても拒否して brw pr を案内
+├── publish-cli.mjs / publish-pr.mjs # 変更: decidePr が origin: "brw-publish" を渡す
 ├── lib.mjs            # 変更: 宣言の検証・既定値に afterPublish・pullRequest を追加
 └── setup-cli.mjs      # 変更: 宣言の新規作成時に afterPublish.cleanup: true を書く
 assets/
@@ -199,10 +200,10 @@ sequenceDiagram
 - 引数: `--title`・`--body-file`（省略時は既定の本文置き場）・`--completion`・`--verification`・`--failed`・`--target`・`--work`（省略可）。
 - 順序（各段階の前に再入の判定を行う）:
   1. 事前確認: 導入済み・現在のブランチが開発ブランチ。無ければ理由を表示して止まる。
-  2. 作業の特定: `--work` か、現在のブランチの未公開の作業。無ければ `work start` 相当で開始。
+  2. 作業の特定: `--work` か、現在のブランチの作業。探索は「現在の作業（未公開）」を先に、無ければ**公開済みで片付けが残っている作業**（`published` で、この worktree の現在のブランチと一致するもの）を対象にする。公開済みの作業が見つかったときは、準備・公開を飛ばして片付けだけを行う。どちらも無ければ `work start` 相当で開始。公開後に片付けが止まり worktree を出てしまった場合は、本体から `brw finish <ブランチ>`（案内に出す）で回復する。
   3. 本文の確認: 新規 PR になりうるとき、本文ファイルが無ければ `brw pr-template` を案内して止まる（副作用の前）。
   4. `tidy`（別コミット）。失敗・停止なら以降へ進まない。
-  5. `work ready`（`--completion`・`--verification`）→ `work plan` → `publish`。承認待ち・禁止・失敗は既存の案内をそのまま返す。
+  5. `work ready`（`--completion`・`--verification`）→ `work plan` → `publish`。承認待ち・禁止・失敗は既存の案内をそのまま返す。準備の後に HEAD が変わっていた（`tidy` が再試行で新しい別コミットを作った場合など）ときは、既存の `stale` の扱いに従い、作業を再開して準備をやり直す（承認済みの計画は失効するので計画も取り直す）。通常の承認が必要で利用者の端末での実行を求められたときは、`brw pr` に `--confirmed` を付けた全文を案内し、`brw pr --confirmed`（利用者の端末）を同じ段階から続け、成功後に片付けまで進む。
   6. 成功（PR の作成または再利用）なら `cleanup`（設定が有効なとき）。無効なら手動の `brw finish` を案内。
 - 既存の段階は `runWork`・`runPublish` を、出力を捕捉する `io` で呼び、作業 ID と計画 ID を読む（出力の形は既存の契約）。
 - 公開が `push` 完了の取り込み（開発ブランチ宛）のときは、片付けず `brw merge` の案内を返す。
@@ -236,7 +237,7 @@ function previewTidy(worktree: string): { files: string[]; secretLike: string[] 
 const TIDY_SUBJECT = "chore: 作業外の変更（ボーイスカウト）";
 const SECRET_PATTERNS: RegExp[]; // .env*, *.pem, *.key, id_rsa*, *credentials*, *secret*, *.p12, *.pfx
 ```
-- 対象は `git status --porcelain=v1 -z` の全項目（ignore 対象は元から現れない）。1 件でも `SECRET_PATTERNS` に当たれば、何も commit せず `blocked`（2.4）。
+- 対象は `git status --porcelain=v1 -z --untracked-files=all` の全項目（ignore 対象は元から現れない）。未追跡のディレクトリは個々のファイルに展開し、改名（`R`・`C`）は旧名と新名の両方を検査・列挙し、既にステージ済みの変更も同じ一覧に含める。1 件でも `SECRET_PATTERNS` に当たれば、何も commit せず `blocked`（2.4）。
 - コミットは対象のファイルを明示して `git add -- <files>` し、`git commit -m <TIDY_SUBJECT> -m <ファイル一覧>`。フックは回避しない（失敗なら `failed`、2.7）。
 
 ### 本文（`scripts/pr-template.mjs`）
@@ -247,6 +248,7 @@ function bodyPathOf(mainPath: string, branch: string): string; // <本体>/.clau
 function buildTemplate(ctx: TemplateContext): string;           // 雛形に作業外の変更・検証を差し込んだ本文
 function instruction(ctx: TemplateContext): string;             // 自己完結した短い記入指示
 ```
+- 本文ファイルの名前は `aliasOf(branch)`（`/` を `-` に置換）。作業ブランチの名前は `namePattern` で接頭辞以外に `/` を含められないため、異なるブランチで衝突しない。
 - 優先順位: `.github/PULL_REQUEST_TEMPLATE.md`（worktree の作業ツリー）→ 同梱の `assets/pr-template.<language>.md`。
 - 差し込み: 「作業外の変更」の節へ `previewTidy` の一覧と、ブランチ内の既存の別コミット（件名が `TIDY_SUBJECT`）のファイル一覧。「検証」の節へ `--verification`・`--failed`（未通過なら冒頭に「検証未通過」）。リポジトリ側の雛形には節が無いことがあるため、差し込みは節の見出しが見つかったときだけ行い、無ければ末尾に追記する。
 - `brw pr-template` は本文ファイルを `bodyPathOf` に書き出し（既に記入済みなら上書きせず、そのパスを案内）、標準出力に記入指示を出す。指示は次を含み、BRW・特定の呼び出し側の事前知識を要しない: 本文ファイルのパス、各節に書くこと（事実のみ・推測しない・読み手は人）、参照すべき情報（`git log <base>..HEAD`・`git diff --stat <base>`）、書き終えた後に実行する `brw pr` のコマンド。
@@ -262,12 +264,18 @@ function finishBlocker(main, others, config, branch, base, known?: KnownPr): str
 function removeBranch(main, others, branch): { worktree: string | null };
 function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; known: KnownPr }): CleanupResult;
 ```
-- 順序（4.2・4.11）: ① 削除前に状態ファイル（`.json`・`.json.lock`）と本文ファイルのパスを求める → ② `finishBlocker`（`known` を渡して、`gh` の検索に依存しない）→ ③ `removeBranch`（git は `cwd` に本体のパスを明示。research.md #6）→ ④ 状態ファイルと本文ファイルを削除 → ⑤ 案内の出力。②で止まったときは何も消さず、状態は `published` のまま残す（4.6）。
+- 順序（4.2・4.11）: ① 削除前に状態ファイル（`.json`・`.json.lock`）と本文ファイルのパスを求める → ② 安全確認（下記）→ ③ `removeBranch`（git は `cwd` に本体のパスを明示。research.md #6）→ ④ 状態の削除（下記）と本文ファイルの削除 → ⑤ 案内の出力。②で止まったときは何も消さず、状態は `published` のまま残す（4.6）。
+- **安全確認（②）**: `KnownPr` に公開した**OID と push 先のリモート名**を含める（公開計画が固定した値）。確認は次のすべて。(a) 作業ブランチのローカルの先端が公開した OID と同じ（公開後の追加コミットが無い）。(b) そのリモートのブランチが存在し、先端が同じ OID（**存在しない・照会できない・OID が違うときは片付けない**。`finishBlocker` の「遠隔に無ければ片付けてよい」は手動の `brw finish` だけで使い、`known` を渡す自動側には適用しない）。(c) worktree に未コミットの変更が無い。(d) 本体が作業ブランチを使っていない。`origin` 以外の push 先でも、記録されたリモート名で確認する。
+- **状態の削除（④）**: ロックを取得し、この作業の記録だけを取り除く。状態ファイルに、未完了（`published` 以外）の別の作業が残っていなければファイルとロックを削除し、残っていればその作業の記録だけを消して、ファイルは残す。worktree は 1 つの状態ファイルに結び付くので、通常は全記録が完了済みで、ファイルごと削除される。
+- **部分的な失敗の回復**: ③で worktree は消えたがブランチの削除が失敗したときは、「本体で `brw finish <ブランチ>` を実行する」と案内し、状態は残す（手動の `finish` は worktree が無くても動く）。④の途中で失敗したときは、片付けは済んでいるが状態が残っていることを表示する（孤児の状態は次の同名の `brw create` で作業 ID が衝突しない。既存の公開は `published` を現在の作業から外す）。
 - 案内: 本体のパスと「次の作業は `brw create <名前>`」。作業場所が消えた後のコマンドは、ホストが本体へ戻して実行する（research.md #1）。
 
 ### 判定層（`scripts/operation-decision.mjs`）
 
-- `evalPrCreate` は、`gh pr create`・GitHub API・MCP による PR 作成を、規則に適合する場合も `deny`（コード `pr-create-use-brw`）にし、案内は `ALT_PR_FLOW`（`brw pr-template` で本文を用意し、`brw pr` で作成する）。`brw guard` は同じ判定を共有するため、Codex と手順書の経路でも止まる（1.6）。不適合の拒否の案内は変えない。
+- **衝突の回避**: `scripts/publish-pr.mjs` の `decidePr` は、作成の可否と承認を `gh pr create` 相当のコマンド文字列で `evaluateAll` に判定させている（禁止・適合・確認省略の判断を共通判定に任せる設計）。`evalPrCreate` を一律に拒否すると、BRW 自身の PR 作成も拒否になる。そこで `evaluateAll(classified, restrictions, ctx)` に `ctx.origin`（`"agent"` が既定、`"brw-publish"` は内部）を追加する。
+  - `ctx.origin === "agent"`（フック・`brw guard`・MCP の判定。既定）: `gh pr create`・GitHub API・MCP による PR 作成を、規則に適合する場合も `deny`（コード `pr-create-use-brw`）にし、案内は `ALT_PR_FLOW`（`brw pr-template` で本文を用意し、`brw pr` で作成する）。不適合の拒否の案内は変えない。
+  - `ctx.origin === "brw-publish"`: 従来の判定（禁止・適合・確認省略）を使う。`decidePr` だけがこれを渡す。
+  - 既定が拒否なので、渡し忘れは安全側に倒れる。変更対象は `operation-decision.mjs`（`evaluateAll`・`evalPrCreate`）と `publish-pr.mjs`（`decidePr` が `ctx` を渡す）の 2 つで、試験で内部経路が従来どおり通ること、外部経路が拒否になることを両方確かめる。
 - 確認省略（`autoApprove.pullRequest`）は `brw pr` の公開段階の承認にだけ使い、`gh` 経由の判定には使わない。
 
 ### フック（`scripts/agent-hooks.mjs`）
