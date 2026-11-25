@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// ブランチ作成・再開のゲート（brw-branch-gate）。ここでは案内の書式（guidance）だけを置く。
-// 置き換えの計画（planGate）と EnterWorktree の判定（judgeEnterWorktree）は後続のタスクで同じファイルに追加する。
+// ブランチ作成・再開のゲート（brw-branch-gate）。案内の書式（guidance）と、作成の置き換えの計画（planGate）を置く。
+// EnterWorktree の判定（judgeEnterWorktree）は後続のタスクで同じファイルに追加する。
+// planGate は git を呼ばない純粋な関数。git の状態は gatherFacts（呼び出し側が作る）から受け取る。
 // 外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
-import { isAbsolute } from "node:path";
-import { redactSecrets, sanitize } from "./lib.mjs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { aliasOf, checkName, classifyBranch, configRel, currentBranch, git, redactSecrets, sanitize, worktrees } from "./lib.mjs";
 
 const HEADING = "[branch-release-workflow]";
 const OUTCOMES = ["置き換え", "拒否"];
@@ -53,4 +55,273 @@ export function guidance({ outcome, conclusion, commands, workdir, notes }) {
     `作業場所: ${place}`,
     ...body,
   ].join("\n");
+}
+
+// ---- 作成の置き換え（planGate） -----------------------------------------------
+
+// BRW の CLI（brw.mjs）の絶対パス。このファイルと同じ scripts/ にある
+const BRW_CLI = join(dirname(fileURLToPath(import.meta.url)), "brw.mjs");
+// 置き換えの組み立てに使ってよいブランチ名・パスの文字。これ以外は組み立てず、拒否の案内にする
+const SAFE_VALUE = /^[A-Za-z0-9._/-]+$/;
+// 作成の入口ごとに許す指定。ここに無い指定は、BRW の作成と同じ結果にならないため置き換えない
+const VIA_OPTIONS = {
+  switch: { value: "-c", allowed: ["-c", "--no-track", "-q", "--quiet"] },
+  checkout: { value: "-b", allowed: ["-b", "--no-track", "-q", "--quiet"] },
+  branch: { value: null, allowed: ["--no-track"] },
+  worktree: { value: "-b", allowed: ["-b", "-q", "--quiet"] },
+};
+
+/** 値を 1 つのシェルの単語にする。単一引用符で囲み、中の単一引用符は '\'' にする（シェルに解釈させると元の値に戻る）。 */
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * 1 行のコマンドを、`&&` で区切られた語の列に分ける。引用の外の記号（; & | ( ) < > $ ` \ * ? [ ] ~ { } # と改行）があれば null。
+ * 二重引用符の中の $ ` \ も展開されるため null にする。確定できないコマンドは null（安全側）。
+ * @returns {string[][] | null} 区切りごとの語の列
+ */
+export function splitWords(command) {
+  const segments = [];
+  let words = [];
+  let word = null;
+  const endWord = () => {
+    if (word !== null) {
+      words.push(word);
+      word = null;
+    }
+  };
+  const endSegment = () => {
+    endWord();
+    segments.push(words);
+    words = [];
+  };
+  let i = 0;
+  while (i < command.length) {
+    const c = command[i];
+    if (c === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0) return null;
+      word = (word ?? "") + command.slice(i + 1, end);
+      i = end + 1;
+    } else if (c === '"') {
+      let end = i + 1;
+      while (end < command.length && command[end] !== '"') {
+        if (/[$`\\]/.test(command[end])) return null;
+        end++;
+      }
+      if (end >= command.length) return null;
+      word = (word ?? "") + command.slice(i + 1, end);
+      i = end + 1;
+    } else if (c === " " || c === "\t") {
+      endWord();
+      i++;
+    } else if (c === "&" && command[i + 1] === "&") {
+      endSegment();
+      i += 2;
+    } else if (/[;&|()<>$`\\*?[\]~{}#\r\n]/.test(c)) {
+      return null;
+    } else {
+      word = (word ?? "") + c;
+      i++;
+    }
+  }
+  endSegment();
+  return segments.some((s) => s.length === 0) ? null : segments;
+}
+
+/**
+ * 作業ツリーの git の状態を集める（planGate の入力）。本体の作業ツリーや状態を読めないときは null（確定できない）。
+ * @param {string} cwd 操作の作業ディレクトリ
+ */
+export function gatherFacts(cwd) {
+  const list = worktrees(cwd);
+  const mainRoot = list[0]?.path ?? null;
+  const status = git(cwd, "status", "--porcelain");
+  if (mainRoot === null || status === null) return null;
+  const lines = status.split("\n").filter((l) => l !== "");
+  const untracked = lines.filter((l) => l.startsWith("??")).length;
+  const exists = (ref) => git(cwd, "show-ref", "--verify", "--quiet", ref) !== null;
+  return {
+    cwd,
+    mainRoot,
+    currentBranch: currentBranch(cwd),
+    trackedChanges: lines.length - untracked,
+    untrackedChanges: untracked,
+    branchExists: (name) => ({ local: exists(`refs/heads/${name}`), origin: exists(`refs/remotes/origin/${name}`) }),
+    declaredAt: (ref) => git(cwd, "cat-file", "-e", `${ref}:${configRel(mainRoot)}`) !== null,
+  };
+}
+
+// 拒否の結果。理由は案内の書式で組み立て、次のコマンドを含める
+const denied = (code, conclusion, commands, notes, workdir = null) => ({
+  verdict: "deny",
+  code,
+  reason: guidance({ outcome: "拒否", conclusion, commands, workdir, notes: notes.join("\n") }),
+});
+
+// 作成の置き換え（rewrite）か拒否を決める本体。git は呼ばない
+function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
+  const branch = op.branch ?? null;
+  const safe = (v) => typeof v === "string" && v !== "" && SAFE_VALUE.test(v);
+  const name = safe(branch) ? branch : "<名前>";
+  const main = facts?.mainRoot ?? "<本体>";
+  const flags = op.branchOnly === true ? " --branch-only" : "";
+  // 操作の作業ディレクトリ（移動元の作業ツリー）。--carry の移動元と一致させるため、本体ではなくここへ移動してから実行する
+  const dir = facts?.cwd ?? main;
+  // brw create の 1 件のコマンド
+  const cmd = (extra = "") => `cd ${shellQuote(dir)} && node ${shellQuote(BRW_CLI)} create ${shellQuote(name)}${extra}${flags}`;
+
+  if (!facts || !facts.mainRoot) return denied("gate-unresolved", "作業場所を確定できないため、置き換えられません", [cmd()], ["git の状態（本体の作業ツリー）を読めません。git リポジトリの中で実行してください。"]);
+  if (unresolved.length > 0) return denied("gate-unresolved", "対象を確定できないため、置き換えられません", [cmd()], [`対象を確定できません: ${unresolved.join(" ")}`]);
+
+  // 単独の git 操作か（先頭の cd を除く）
+  const segments = splitWords(command);
+  const compound = () => denied("gate-compound", "単独の git 操作として確定できないため、置き換えられません", [cmd()], ["他のコマンドと組み合わせた操作や、展開・記号を含むコマンドは置き換えません。brw create を単独で実行してください。"]);
+  if (segments === null) return compound();
+  const lead = hasLeadingCd ? 1 : 0;
+  if (segments.length !== lead + 1) return compound();
+  if (hasLeadingCd && (segments[0].length !== 2 || segments[0][0] !== "cd")) return compound();
+  const words = segments[lead];
+  const unsupported = (conclusion, notes) => denied("gate-action-unsupported", conclusion, [cmd()], notes);
+
+  // 指定の形（switch -c・checkout -b・branch・worktree add -b の各形だけを扱う）
+  if (words[0] !== "git") return unsupported("git の操作ではないため、置き換えられません", ["BRW の作成に置き換えられるのは git の操作だけです。"]);
+  const k = words[1] === "-C" ? 3 : 1; // -C の作業ディレクトリは op.cwd に反映済み
+  const sub = words[k];
+  if (sub === undefined || !Object.hasOwn(VIA_OPTIONS, sub)) return unsupported(`この git の操作（${sub ?? "なし"}）は BRW の作成に置き換えられません`, ["ブランチを作る形（switch -c・checkout -b・branch・worktree add -b）だけを置き換えます。"]);
+  const spec = VIA_OPTIONS[sub];
+  const operands = [];
+  let flagSeen = false;
+  let flagValue = null;
+  let rest = words.slice(k + 1);
+  if (sub === "worktree") {
+    // worktree の形は「worktree add ...」だけを扱う（分類と同じ）
+    if (rest[0] !== "add") return unsupported("worktree の操作は add だけを置き換えます", ["worktree add の形で作ってください。"]);
+    rest = rest.slice(1);
+  }
+  for (let j = 0; j < rest.length; j++) {
+    const w = rest[j];
+    if (!w.startsWith("-")) {
+      operands.push(w);
+      continue;
+    }
+    if (!spec.allowed.includes(w)) return unsupported(`オプション ${w} は BRW の作成と同じ結果にならないため、置き換えられません`, ["このオプションを外すか、brw create を使ってください。"]);
+    if (w === spec.value) {
+      flagSeen = true;
+      flagValue = rest[j + 1] ?? null;
+      j++;
+    }
+  }
+
+  // 開始点と、ブランチ名の位置
+  let start = null;
+  if (sub === "switch" || sub === "checkout") {
+    if (!flagSeen) {
+      const target = operands[0];
+      return denied("gate-action-unsupported", `既存のブランチ${target ? ` '${target}'` : ""}への切り替えは、この入口では置き換えられません`, [safe(target) ? `cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(target)}` : cmd()], ["既存のブランチの再開は brw resume で行ってください。"]);
+    }
+    if (operands.length > 1 || flagValue !== branch) return unsupported("ブランチ名または開始点を確定できません", ["ブランチ名と開始点を 1 つずつ書いた形で作ってください。"]);
+    start = operands[0] ?? null;
+  } else if (sub === "branch") {
+    if (operands.length < 1 || operands.length > 2 || operands[0] !== branch) return unsupported("ブランチ名または開始点を確定できません", ["ブランチ名と開始点を 1 つずつ書いた形で作ってください。"]);
+    start = operands[1] ?? null;
+  } else if (flagSeen) {
+    if (operands.length < 1 || operands.length > 2 || flagValue !== branch) return unsupported("ブランチ名または配置先を確定できません", ["配置先とブランチ名を 1 つずつ書いた形で作ってください。"]);
+    start = operands[1] ?? null;
+  } else if (operands.length !== 1) {
+    return unsupported("配置先を確定できません", ["配置先だけを書いた形は、brw create で作ってください。"]);
+  }
+  if ((op.start ?? null) !== start) return unsupported("開始点を確定できません", ["開始点を 1 つに確定できる形で作ってください。"]);
+
+  // 操作の種類（作成だけを置き換える）
+  if (op.action === "resume") {
+    return denied("gate-action-unsupported", `ブランチ '${branch}' は既に存在するため、作成ではなく再開です`, [safe(branch) ? `cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}` : cmd()], ["既存のブランチの再開は brw resume で行ってください。"]);
+  }
+  if (op.action !== "create") return unsupported(`この操作（${op.action}）は BRW の作成に置き換えられません`, [op.action === "rename" || op.action === "copy" ? "ブランチの名前変更・複製は置き換えません。" : "BRW の作成は分岐元からの新規作成だけを扱います。"]);
+
+  // ブランチ名は宣言の開発ブランチとして有効なものだけ（接頭辞は補わない）
+  const cls = branch ? classifyBranch(config, branch) : "undeclared";
+  if (!safe(branch) || cls !== "development") {
+    if (cls === "protected" || cls === "base") return denied("gate-name-invalid", `'${branch}' は${cls === "protected" ? "保護ブランチ" : "恒常的な分岐元"}のため、作業ブランチとして作れません`, [cmd()], ["保護ブランチと分岐元は作業ブランチの名前にできません。"]);
+    const why = safe(branch) ? checkName(config, branch) ?? `'${branch}' は workBranches（${config.workBranches.join(", ")}）に一致しません。` : "記号や空白を含む名前は置き換えません。";
+    return denied("gate-name-invalid", `ブランチ名 '${branch ?? ""}' は作業ブランチの命名規則に合わないため、置き換えられません`, [cmd()], [why, "接頭辞（dev/ など）は補いません。宣言の作業ブランチと命名規則に合う名前で、brw create を実行してください。"]);
+  }
+  const existing = facts.branchExists(branch);
+  if (existing.local || existing.origin) return denied("gate-action-unsupported", `ブランチ '${branch}' は既に存在するため、作成ではなく再開です`, [`cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}`], ["既存のブランチの再開は brw resume で行ってください。"]);
+
+  // 配置先（本体の .claude/worktrees/ の配下。brw create が作る場所と一致すること）
+  const base = config.baseBranch;
+  const wt = join(main, ".claude", "worktrees", aliasOf(branch));
+  if (op.via === "worktree" && (op.path === undefined || op.path === null || resolve(op.path) !== resolve(wt)))
+    return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の配置先（${wt}）ではないため、置き換えられません`, [cmd()], ["BRW は本体の .claude/worktrees/ の配下にだけ worktree を作ります。brw create で作ってください。"]);
+
+  // 開始点は分岐元（baseBranch か origin/baseBranch）に限る。現在のブランチから作る操作は分岐元からの作成と結果が違う
+  if (start === null) {
+    if (facts.currentBranch !== base) {
+      const cur = facts.currentBranch;
+      return denied("gate-start-unsupported", `現在のブランチ（${cur ?? "なし"}）から分岐する操作のため、置き換えられません`, [safe(cur) ? cmd(` --base ${shellQuote(cur)}`) : cmd()], [`brw create は分岐元（${base}）から作ります。結果が変わるため、置き換えません。`, safe(cur) ? `分岐元を ${cur} にするなら --base で指定してください。` : "分岐元を指定しない作成は、brw create の既定（分岐元）だけです。"]);
+    }
+  } else if (start !== base && start !== `origin/${base}`) {
+    const b = start.replace(/^origin\//, "");
+    const e = safe(b) ? facts.branchExists(b) : { local: false, origin: false };
+    const isBranch = e.local || e.origin;
+    return denied("gate-start-unsupported", `開始点 '${start}' は分岐元（${base}）ではないため、置き換えられません`, [isBranch ? cmd(` --base ${shellQuote(b)}`) : cmd()], [isBranch ? `--base で ${b} を指定すると、同じ開始点から作れます。` : "開始点がコミットなどの場合、brw create では指定できません。分岐元から作ってください。"]);
+  }
+
+  // 追跡済みの未コミットの変更は、ブランチを切り替える作成だけ移さず拒否する（git branch は作業ツリーに触れないので置き換える）
+  if (facts.trackedChanges > 0 && op.branchOnly !== true) {
+    return denied("gate-dirty", "追跡済みのファイルに未コミットの変更があるため、置き換えられません", [cmd(), cmd(" --carry")], [
+      "1) そのまま作る: 変更は元の作業ツリーに残り、作業場所は新しい worktree に移ります。",
+      "2) --carry で移す: 変更を新しい worktree へ移し、元の作業ツリーからは取り除きます。",
+      "どちらを選ぶかは、変更が今の作業のものかで決めてください。",
+    ]);
+  }
+
+  // 置き換え: brw create の実行、作業場所の移動、案内の表示をつないだコマンド
+  const branchOnly = op.branchOnly === true;
+  const createCommand = cmd();
+  const notes = [
+    // brw create は fetch 後の最新の origin/<分岐元> から作る。ローカルの分岐元が古くても、この点は元の git switch -c と違うので案内する
+    `分岐元は、brw create が選ぶ開始点（取得できた最新の origin/${base} の先端。取得できないときは、手元に残っている origin/${base}、無ければ手元の ${base}）から作ります。`,
+    branchOnly ? "ブランチだけを作りました。作業場所は移していません。" : `作業場所を新しい worktree（${wt}）に移しました。続けて、この worktree で作業してください。`,
+  ];
+  if (facts.untrackedChanges > 0) notes.push(`未追跡のファイル ${facts.untrackedChanges} 件は元の作業ツリー（${facts.cwd}）に残ります。`);
+  const startRef = facts.branchExists(base).origin ? `origin/${base}` : base;
+  if (!facts.declaredAt(startRef)) notes.push(branchOnly ? "宣言ファイルは分岐元に未登録です。この作業ブランチで commit して登録してください。" : "宣言ファイルは分岐元に未登録のため、brw create は未追跡の宣言ファイルを新しい worktree へ移します。この作業ブランチで commit して登録してください。");
+  const conclusion = `ブランチ '${branch}' の作成を BRW の作成に置き換えました`;
+  const workdir = branchOnly ? null : wt;
+  const text = guidance({ outcome: "置き換え", conclusion, commands: [createCommand], workdir, notes: notes.join("\n") });
+  const print = `printf '%s\\n' ${shellQuote(text)}`;
+  // branchOnly は作業場所を変えないようサブシェルで実行する（cd が呼び出し側に残らない）。それ以外は worktree へ移動してから案内を表示する
+  const replaced = branchOnly ? `( ${createCommand} && ${print} )` : `${createCommand} && cd ${shellQuote(wt)} && ${print}`;
+  return { verdict: "rewrite", command: replaced, reason: conclusion, notice: notes, createCommand, worktree: workdir, branchOnly };
+}
+
+/**
+ * 作成（kind: create の操作）を、置き換えか拒否に決める。副作用なし・git を呼ばない。
+ * @param {object} input
+ * @param {"claude"|"codex"} input.host 入口のホスト。置き換え（書き換え）は claude だけ
+ * @param {string} input.command 元の Bash コマンド
+ * @param {object} input.op operation-policy の分類結果（action・via・branch・path・start・branchOnly・cwd）
+ * @param {object} input.config 正規化済みの宣言
+ * @param {object|null} input.facts gatherFacts の結果（null は確定できない）
+ * @param {boolean} [input.hasLeadingCd] 先頭が `cd <dir> &&` か
+ * @param {string[]} [input.unresolved] 分類で確定できなかった理由
+ * @returns {{verdict: "rewrite", command: string, reason: string, notice: string[]} | {verdict: "deny", code: string, reason: string}}
+ */
+export function planGate(input) {
+  const { host, op, facts } = input;
+  if (!op || op.kind !== "create") throw new Error("ゲートの計画には作成の操作（kind: create）が必要です");
+  const plan = planCore({ ...input, unresolved: input.unresolved ?? op.unresolved ?? [], facts: facts ?? null, hasLeadingCd: input.hasLeadingCd === true });
+  if (plan.verdict === "deny" || host === "claude") return plan;
+  // Claude Code 以外は入力を書き換えられない。同じ作成と作業場所の移動を、次のコマンドとして示す拒否にする
+  // branchOnly は作業場所を移さないので、案内を実行しても作業ディレクトリが変わらないようサブシェルで囲む（Claude の置き換えと同じ形）
+  const cmdText = plan.worktree
+    ? `${plan.createCommand} && cd ${shellQuote(plan.worktree)}`
+    : plan.branchOnly ? `( ${plan.createCommand} )` : plan.createCommand;
+  return denied("gate-host-no-rewrite", `この環境（${host}）では操作を書き換えられないため、置き換えず拒否します`, [cmdText], [
+    "この環境では元の操作を BRW の手順に書き換えられません。次のコマンドを実行してください。",
+    "次のコマンドは、Claude Code で置き換えた場合と同じ作成と作業場所の移動を行います。",
+  ], plan.worktree);
 }
