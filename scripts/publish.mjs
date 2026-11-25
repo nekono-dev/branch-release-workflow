@@ -557,7 +557,7 @@ export function issuePlan(cwd, workId, { repository, existing, lockWaitMs } = {}
     if (publication === "pr" && reuse === null) {
       if (!pushAvailable) excluded.push({ operation: "pr", code: "push-not-planned", approval: "notApplicable" });
       else {
-        const d = evaluateAll(classifyCommand(`gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${g.branch} --title brw`, cwd), restrictions);
+        const d = evaluateAll(classifyCommand(`gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${g.branch} --title brw`, cwd), restrictions, { origin: "brw-publish" });
         if (d.verdict === "eligibleForApproval") writes.push({ operation: "pr", base, head: g.branch, repositoryId: repository.id });
         else excluded.push({ operation: "pr", code: d.code, approval: d.approval });
       }

@@ -101,7 +101,7 @@ function decidePr(cwd, w, { base, branch, title, repository }, confirmed) {
   const restrictions = restrictionsOf(w);
   if (restrictions.noPr) return { kind: "prohibited" };
   const cmd = `gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${branch} --title ${shellQuote(title)}`;
-  const d = evaluateAll(classifyCommand(cmd, cwd), restrictions);
+  const d = evaluateAll(classifyCommand(cmd, cwd), restrictions, { origin: "brw-publish" });
   if (d.approval === "prohibited") return { kind: "prohibited" };
   if (d.verdict === "deny" || d.compliance !== "compliant") return { kind: "denied", code: CODE.test(d.code) ? d.code : "pr-denied" };
   if (d.verdict === "eligibleForApproval") return { kind: "proceed", execution: "auto" };

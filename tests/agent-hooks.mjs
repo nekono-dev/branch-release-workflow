@@ -36,6 +36,7 @@ const repoOf = ({ branch = "dev/foo", config = CONFIG, register = true } = {}) =
 
 /** 応答を取り出す。Claude の PreToolUse は permissionDecision、PermissionRequest は decision.behavior。 */
 const preOf = (host, command, cwd) => handleHook(host, "PreToolUse", hookInput(host, "PreToolUse", { cwd, command }))?.hookSpecificOutput?.permissionDecision ?? null;
+const preReasonOf = (host, command, cwd) => handleHook(host, "PreToolUse", hookInput(host, "PreToolUse", { cwd, command }))?.hookSpecificOutput?.permissionDecisionReason ?? "";
 const permOf = (host, command, cwd) => handleHook(host, "PermissionRequest", hookInput(host, "PermissionRequest", { cwd, command }))?.hookSpecificOutput?.decision?.behavior ?? null;
 const bothOf = (command, cwd) => ({ claude: preOf("claude", command, cwd), codex: preOf("codex", command, cwd), codexPerm: permOf("codex", command, cwd) });
 const mcpOf = (toolInput, cwd) => handleHook("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd, tool: "mcp__github__create_pull_request", toolInput }))?.hookSpecificOutput?.permissionDecision ?? null;
@@ -85,7 +86,7 @@ export const runAgentHookChecks = async (eq) => {
   {
     const r = repoOf();
     eq("enforcement/6.1 開発ブランチへの通常 push は確認省略の対象（両ホスト）", bothOf("git push origin dev/foo", r.dir), { claude: "allow", codex: null, codexPerm: "allow" });
-    eq("enforcement/6.1 開発ブランチから保護対象への PR 作成は確認省略の対象", bothOf("gh pr create --base main --head dev/foo --title t --body b", r.dir).claude, "allow");
+    eq("brw-pr-handoff/1.1 開発ブランチから保護対象への直接の PR 作成も、確認省略せず拒否して brw pr を案内する", [bothOf("gh pr create --base main --head dev/foo --title t --body b", r.dir).claude, preReasonOf("claude", "gh pr create --base main --head dev/foo --title t --body b", r.dir).includes("brw pr")], ["deny", true]);
     eq("enforcement/6.1 確認省略の応答に PR の本文・タイトルや資格情報を含めない", (() => {
       const text = JSON.stringify(handleHook("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: r.dir, command: `gh pr create --base main --head dev/foo --title "${SECRET}" --body b` })));
       return [text.includes(SECRET), text.includes("--body")];
@@ -107,7 +108,7 @@ export const runAgentHookChecks = async (eq) => {
     eq("enforcement/6.1 保護対象への直接 push と開発間でない merge は拒否する", ["git push origin HEAD:main", "git merge main"].map((c) => preOf("claude", c, r.dir)), ["deny", "deny"]);
     eq("enforcement/6.1 開発ブランチへの PR 作成（開発間）は拒否する", preOf("claude", "gh pr create --base dev/other --head dev/foo --title t --body b", r.dir), "deny");
     eq("enforcement/6.1 GitHub 上のマージと自動マージ予約は拒否する", ["gh pr merge 5", "gh pr merge 5 --auto --squash"].map((c) => preOf("claude", c, r.dir)), ["deny", "deny"]);
-    eq("enforcement/6.1 MCP の PR 作成は、保護対象への作成でも確認省略せず、開発間の作成は拒否する", [mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, r.dir), mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "dev/other" }, r.dir)], [null, "deny"]);
+    eq("brw-pr-handoff/1.1 MCP の PR 作成は、保護対象への作成も開発間の作成も拒否する", [mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, r.dir), mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "dev/other" }, r.dir)], ["deny", "deny"]);
     eq("enforcement/6.1 MCP の必須入力が欠ける PR 作成は拒否する", mcpOf({ owner: "acme", title: "t", head: "dev/foo", base: "main" }, r.dir), "deny");
     r.cleanup();
   }

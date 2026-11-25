@@ -29,6 +29,7 @@ const CLASS_LABEL = {
 const ALT_CREATE = "ブランチや worktree は `brw create <名前>` で作成してください（既存のブランチは `brw resume <名前>`）。";
 const ALT_RESUME = "既存の開発ブランチは `brw resume <名前>` で再開してください。";
 const ALT_MERGE = "開発ブランチ間の取り込みは PR を作らず、ローカルで `brw merge <取り込み元>` を使ってください。";
+const ALT_PR_FLOW = "PR の作成は `brw pr-template` で本文の下書きを用意し、本文を書いたうえで `brw pr` を実行してください（`gh pr create`・GitHub の API・MCP による直接の作成は使えません）。";
 const ALT_PR = "保護対象への反映は、開発ブランチから分岐元へ PR を作成し、GitHub 上でリポジトリの条件を満たす利用者が squash マージしてください。";
 
 function decide(op, fields) {
@@ -103,7 +104,7 @@ export function evaluate(op, ctx) {
     case "commit": return evalCommit(op, config);
     case "push": return evalPush(op, config, auto, registered, restrictions);
     case "merge": return evalMerge(op, config, registered);
-    case "pr-create": return evalPrCreate(op, config, auto, registered, restrictions);
+    case "pr-create": return evalPrCreate(op, config, auto, registered, restrictions, ctx.origin ?? "agent");
     case "unsupported-write":
       if (op.refWrite)
         return deny(op, "unsupported-ref-write", `BRW が対応しない書き込み（${op.area ?? "不明"} の ${op.action ?? "変更"}）で、ブランチやタグの先を直接動かしうるため拒否します。`, { compliance: "violation", alternative: "ブランチの更新は BRW の手順（commit と通常の push）で行ってください。" });
@@ -167,7 +168,15 @@ function evalMerge(op, config, registered) {
   return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: "開発ブランチ同士のローカルマージです（PR は不要）。確認を省略できます。" });
 }
 
-function evalPrCreate(op, config, auto, registered, restrictions) {
+// PR 作成の判定。起点が "agent"（既定。フック・brw guard・MCP の判定）のときは、規則に適合する作成も拒否して brw pr を案内する。
+// BRW 自身の公開（計画時と実行時）だけが "brw-publish" を渡し、従来の判定（禁止・適合・確認省略）を使う。渡し忘れは拒否側に倒れる
+function evalPrCreate(op, config, auto, registered, restrictions, origin) {
+  const r = evalPrCreateRules(op, config, auto, registered, restrictions);
+  if (origin === "brw-publish" || r.verdict === "deny") return r;
+  return deny(op, "pr-create-use-brw", "エージェントによる PR の直接の作成は行えません。PR は brw pr で作成します。", { compliance: r.compliance, alternative: ALT_PR_FLOW, targets: r.targets, facts: r.facts });
+}
+
+function evalPrCreateRules(op, config, auto, registered, restrictions) {
   const head = op.head;
   const baseName = op.base;
   if (!op.repository || op.repoMatchesCwd !== true)
@@ -201,9 +210,10 @@ function evalPrCreate(op, config, auto, registered, restrictions) {
  * 確認省略は、コマンド全体の対象が検証できる場合に限る（実際の実行内容の網羅はフック側の責務）。
  * @param {{operations: object[]}} classified
  * @param {{noPush?: boolean, noPr?: boolean}} [restrictions]
+ * @param {{origin?: "agent"|"brw-publish"}} [ctx] 操作の起点。既定はエージェント（直接の PR 作成を拒否する）。BRW 自身の公開だけが "brw-publish" を渡す
  */
-export function evaluateAll(classified, restrictions = {}) {
-  const decisions = classified.operations.filter((o) => o.kind !== "query").map((o) => evaluate(o, contextFor(o, restrictions)));
+export function evaluateAll(classified, restrictions = {}, { origin = "agent" } = {}) {
+  const decisions = classified.operations.filter((o) => o.kind !== "query").map((o) => evaluate(o, { ...contextFor(o, restrictions), origin }));
   const denied = decisions.find((d) => d.verdict === "deny");
   const decider = denied
     ?? (decisions.length > 0 && decisions.every((d) => d.verdict === "eligibleForApproval") ? decisions[0] : decisions.find((d) => d.verdict === "pass" && d.approval !== "skip"));
