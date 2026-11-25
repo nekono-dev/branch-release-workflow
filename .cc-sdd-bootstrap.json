@@ -8,5 +8,6 @@
   "codex": {
     "enabled": true
   },
-  "models": {}
+  "models": {},
+  "subagents": {}
 }

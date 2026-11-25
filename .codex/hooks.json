@@ -1,0 +1,86 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/install-cc-sdd.mjs\" session-start --tool codex",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" session-start --tool codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/install-cc-sdd.mjs\" user-prompt-submit --tool codex",
+            "timeout": 600
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" user-prompt-submit --tool codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" pre-tool-use --tool codex",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/subagent-check.mjs\" pre-tool-use --tool codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" post-tool-use --tool codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" stop --tool codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
