@@ -14,6 +14,7 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 ### Non-Goals
 
 - 既存履歴の書き換え、GitHub 全体へのマージ方式の一律変更、組織向け Global MCP サービスの配備。
+- 宣言（`.branch-release-workflow.json`）への SSH 別名の記載。個人の SSH 設定が commit され、他の人の clone や貢献者の PR のノイズになるため採らない。`insteadOf` の展開前の URL を読む運用も、実際の送り先と違う URL を検査することになるため採らない。
 - フックによる push の実行（フックは判定と案内だけを行い、副作用を起こさない）。commit 直後の push の案内（PostToolUse）も採らない。Codex では `additionalContext` がモデルに届くことを実機で確認したが（Claude は未確認）、利用者が残余リスクを許容した（下記）ため、本 spec の範囲に含めない。
 - 利用者の依頼（「commit して」「push して」）で扱う中断。区切りの規則が担保するのは、トークンの使い切りと作業の停止による中断に備えた、直前の区切りまでの push。それ以外の契機での中断は対象にしない。
 
@@ -24,6 +25,7 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 - ルートの BRW 宣言を基にしたブランチの分類、フックが処理する操作、確認省略、作業完了と開発ブランチ間のマージの判定。
 - BRW が作成または再利用する PR と、導入担当者が選択した対象への Ruleset の導入・整合検査。
 - エージェントごとのフック導入状態、実効 Ruleset、復旧に必要な情報の CLI 表示。
+- リモートの URL を GitHub のリポジトリとして読む規則（SSH の別名ホストの解決と、確定できないときの案内。要件 1.6〜1.8）。
 - 作業ブランチの区切りごとの commit・push の規則（指示の文面と、commit の確認省略）、および応答の終了時に作業ブランチの未コミットの変更・未 push の commit を検出して案内する Stop の処理（要件 2.9〜2.16）。
 
 ### Out of Boundary
@@ -36,11 +38,12 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 
 ### Allowed Dependencies
 
-- Node.js 22 以上の標準モジュールと既存の ESM、Git と `gh`、Claude Code と Codex のフック（届け方は harness-plugin-unification の対応表に従う）、GitHub REST API。既存の宣言読み込み、命名規則、worktree とプレビュー操作を利用する。
+- Node.js 22 以上の標準モジュールと既存の ESM、Git と `gh`、OpenSSH の `ssh -G`（設定の読み取りのみ。無くても拒否側に倒れる）、Claude Code と Codex のフック（届け方は harness-plugin-unification の対応表に従う）、GitHub REST API。既存の宣言読み込み、命名規則、worktree とプレビュー操作を利用する。
 
 ### Revalidation Triggers
 
 - フックのイベント形式、ツール名・実行ディレクトリ、確認省略または信頼登録の仕様が変わった場合。
+- `ssh -G` の出力形式（`hostname` 行）や OpenSSH の設定の解釈が変わった場合。
 - 宣言の `autoApprove` の項目（`commit` の追加を含む）、作業の制限（`noPush`）、Stop イベントの登録が変わった場合。
 - ブランチの分類、分岐元の解決、導入確認の対象、GitHub の権限や実効ルールの契約が変わった場合。ブランチ作成、終了処理、片付け、プレビューの CI トリガーも再検証する。
 
@@ -87,16 +90,17 @@ flowchart LR
 |---|---|---|
 | `scripts/lib.mjs` | 更新 | 宣言の互換読み込み・検証、恒常的な分岐元、現在の ref、個別の分岐元解決。追加: `autoApprove.commit`（検証と `autoApproveOf`） |
 | `scripts/operation-policy.mjs` | 新規 | シェル・対応する GitHub ツール入力の操作への変換、ref 分類 |
-| `scripts/github-operations.mjs` | 新規 | `gh` コマンド・MCP ツール入力からの GitHub 書き込み経路（PR 作成・マージ・自動マージ予約など）の識別。operation-policy から呼ぶ |
+| `scripts/github-operations.mjs` | 新規 | `gh` コマンド・MCP ツール入力からの GitHub 書き込み経路（PR 作成・マージ・自動マージ予約など）の識別。operation-policy から呼ぶ 更新: `remoteRepos`・`parseRepoSpec` の scp・ssh 形式のホストを `remote-url.mjs` で正規化し、SSH の別名が `github.com` に解決できれば GitHub を指す remote として扱う（要件 1.6, 1.7） |
+| `scripts/remote-url.mjs` | 新規 | リモートの URL から GitHub の所有者・リポジトリ名を読む唯一の入口。scp・ssh 形式のホストが SSH の別名なら `ssh -G` で `github.com` に解決する（読み取りのみ・通信なし）。確定できない理由の文言（別名ホストの案内を含む）を作る（要件 1.6〜1.8） |
 | `scripts/operation-decision.mjs` | 新規 | 操作・登録済み宣言・作業の禁止から、拒否・通す・確認省略の可否を決める共通判定（ホストの入出力の形は持たない） |
 | `scripts/agent-hooks.mjs` | 新規・更新 | イベントとホスト応答の変換、終了時の作業状態の案内。更新: Stop に作業ブランチの残りの案内を統合する |
 | `scripts/work-remainder.mjs` | 新規（追加） | 作業ブランチの未コミットの変更と未 push の commit の検出、案内文の作成（読み取り専用・ネットワークに依存しない） |
 | `scripts/hook-install.mjs` | 新規 → 削除 | harness-plugin-unification で削除される（Claude の登録検査は `hook-registry.mjs` へ移る） |
 | `scripts/hook-diagnose.mjs` | 新規 | フックの稼働と対応経路の診断（読み取り専用。合成入力による動作検査） |
 | `scripts/github-client.mjs` | 新規 | 固定した GitHub ホスト・リポジトリへの API 呼び出し、対象の照合、応答とエラーの検証、PR・Ruleset の照会と追加 |
-| `scripts/publish.mjs` | 新規 | 作業 ID・完了申告・公開計画・push の実行と、途中・完了の状態管理 |
+| `scripts/publish.mjs` | 新規 | 作業 ID・完了申告・公開計画・push の実行と、途中・完了の状態管理 更新: `githubRepoOf` を `remote-url.mjs` へ移し再エクスポートする（呼び出し側の互換を保つ）。push 先を確定できない失敗文言を `remote-url.mjs` の共通文言にする（要件 1.6〜1.8） |
 | `scripts/publish-pr.mjs` | 新規 | 保護対象への PR の再利用・作成と、応答不確実時の再取得による照合 |
-| `scripts/publish-cli.mjs` | 新規 | `brw work`・`brw publish`・`brw pause` の入口（引数の検査、文言、次の操作の案内） |
+| `scripts/publish-cli.mjs` | 新規 | `brw work`・`brw publish`・`brw pause` の入口（引数の検査、文言、次の操作の案内） 更新: push 先を確定できない失敗文言を共通文言にする（要件 1.8） |
 | `scripts/ruleset-choice.mjs` | 新規 | 導入先と分岐元ごとの Ruleset の採否の保存と再利用 |
 | `scripts/ruleset-preflight.mjs` | 新規 | 導入前の読み取り検査（認証・導入権限・プラン・squash 設定・既存ルール） |
 | `scripts/ruleset-apply.mjs` | 新規 | 既存ルールの再利用、不足分だけの Ruleset 追加、応答不確実時の照合 |
@@ -107,6 +111,7 @@ flowchart LR
 | `SKILL.md`、`references/setup.md`、`references/config.md`、`assets/config.example.json` | 更新 | ゲートで求めるワークフロー、導入・移行・復旧と対応範囲、宣言例。追加: SKILL.md の「作業の区切りの commit・push」（「してよい」を「行う」に改める）、`references/config.md` の `autoApprove.commit` と push 禁止の扱い |
 | `CLAUDE.md`（このリポジトリ） | 更新 | このリポジトリで cc-sdd の各フェーズ・各タスクの区切りに commit・push する指示（`kiro-*` スキルは書き換えられないため） |
 | `tests/work-remainder.mjs`、`tests/agent-hooks-session.mjs`、`tests/branch-ops.mjs`、`tests/decision.mjs` | 新規・更新 | 残りの検出、Stop の統合、commit の確認省略、リモートからの再開の契約テスト |
+| `tests/remote-url.mjs` | 新規 | 別名ホストの解決・拒否・文言の契約テスト。`PATH` の先頭に置いた偽の `ssh` で `ssh -G` の出力を固定する。`tests/publish-plan.mjs`・`tests/decision.mjs` に別名 origin での公開準備と `gh pr create -R` の判定を足す（要件 1.6〜1.8） |
 | `tests/selftest.mjs` と `tests/*.mjs`（モジュール別の契約テスト・`integration-*.mjs`）、`tests/support/`、`tests/real-env/` | 更新・新規 | 既存 CLI の互換性、新しい操作・導入契約の統合テスト、テスト補助（一時リポジトリ・偽の GitHub）、実環境検証の補助 |
 
 ## System Flows
@@ -175,6 +180,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 |---|---|---|
 | 1.1, 1.2, 1.3 | 操作判定、フック変換、CLI | 共通宣言、ブランチ分類、作成・再開・直接変更の拒否 |
 | 1.4, 1.5 | 操作判定、フック変換 | 曖昧な更新の拒否、未導入時の通過 |
+| 1.6, 1.7, 1.8 | 送り先リモートの読み取り、操作判定、完了公開 | SSH 別名の `ssh -G` による解決、解決不能時の拒否、原因と対処の文言 |
 | 2.1, 2.6, 2.8 | 操作判定、フック変換 | 送り先の検証と確認省略、明示制限の優先 |
 | 2.2, 2.3, 2.4, 2.5 | 完了公開、フック変換 | 状態と push・保護対象への PR 作成・再利用 |
 | 2.7 | 完了公開、GitHub クライアント | 失敗の報告、push 後および作成応答消失時の復旧 |
@@ -220,6 +226,26 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 - `protectedBranches` と恒常的な分岐元は、エージェント操作上の保護対象とする。対応するフック経路で直接の PR 作成も同じ分類を使い、宣言済み開発ブランチから保護対象への PR だけを BRW の公開操作として許可する。開発ブランチ間はローカルマージを案内し、宣言外への PR 作成は拒否する。保護対象への PR は作成または再利用まで行い、利用者に GitHub 上の PR URL、base、squash の案内を返す。エージェントからの GitHub マージと自動マージ予約、および非開発ブランチへのローカルマージは、対応するフック経路で拒否する。BRW は GitHub のマージ API を呼ばない。GitHub 側の直接更新とマージ方式の制限は、選択して適用した Ruleset の対象 ref に効く。
 
 - Claude・Codex へのフックの届け方（プラグインの配布、フック定義、信頼の登録、診断）は harness-plugin-unification の設計に従う。本 spec は、届いたフックのイベントごとの判定と応答を定める。許可と拒否の両方について、対応する実行環境でフックが届くことの稼働検査は、同 spec の受け入れ確認で行う。
+
+### 送り先リモートの読み取り
+
+`scripts/remote-url.mjs` が、リモートの URL から GitHub の所有者・リポジトリ名を読む唯一の入口になる（要件 1.6〜1.8）。`publish.mjs` の `githubRepoOf` と `github-operations.mjs` の `parseRepoSpec`・`remoteRepos` は、ここを通して読む。
+
+```ts
+type GithubRepo = { owner: string; name: string };
+// https・ssh・scp 形式。認証情報付きは null。別名ホストは解決できたときだけ読む
+function githubRepoOf(url: string | null): GithubRepo | null;
+// scp・ssh 形式のホストを正規化する。別名が github.com に解決できれば "github.com"、それ以外は入力のまま
+function canonicalSshHost(host: string, user?: string): string;
+// 確定できない理由の文言。URL は出力しない（秘密値を含みうる）。ホスト名だけを示す
+function unknownDestinationText(remote: string, url: string | null): string;
+```
+
+- **解決の条件**　URL が scp 形式（`user@host:path`）または `ssh://` 形式で、`host` が `github.com` ではなく、`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$` に一致するときだけ `ssh -G -l <user> -- <host>` を実行する。出力の `hostname` が `github.com` なら、`host` を `github.com` として読む。実行は `spawnSync`（シェルを介さない引数配列、標準入力なし、タイムアウト 3 秒）。結果は同じプロセスの中で別名ごとに覚える（失敗も）。
+- **拒否する場合**　`ssh` が無い・失敗・タイムアウト、`hostname` が `github.com` 以外（GHES など。`github-operations.mjs` の別ホスト指定は従来どおり）、別名の形が不正、認証情報付きの URL。いずれも null（確定できない）とし、要件 1.4 の拒否に従う。
+- **文言（1.8）**　読めなかった URL が scp・ssh 形式でホストが別名の形なら、「ホスト `<名前>` は SSH の別名で、`github.com` に解決できませんでした。GitHub を指す https の remote を足すか、`~/.ssh/config` の `HostName` を確認してください」の形にする。それ以外は従来どおり「GitHub のリポジトリとして確定できません」。呼び出し側（`publish.mjs` の 3 か所、`publish-cli.mjs` の 2 か所）はこの関数の戻りを使う。フックの PR 作成先の拒否理由（`operation-decision.mjs` の `pr-create-repository`）も、cwd の remote が別名で読めなかった場合に同じ案内を足す。
+- **判定の性質**　`git remote get-url`（`insteadOf` の展開後）の URL を読む現行の方針は変えない。`ssh -G` は接続せず、`~/.ssh/config` の記述だけで答えるため、GitHub などへの通信はない。宣言への別名の記載は設けない。
+- **安全**　`ssh -G` は設定の `Match exec` を評価し、利用者自身のコマンドを実行する。別名はリポジトリ側の remote から来るため、上の文字種の検査を `%h` 展開などへの注入の防止も兼ねる条件とし、`-` で始まる値は拒否し `--` で引数と分ける。
 
 ### 完了公開と状態
 
@@ -296,6 +322,7 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 
 ## Error Handling
 
+- 送り先を確定できない拒否は、原因が SSH の別名ホストと判別できるとき、別名ホストのため読めなかったことと対処（https の remote を足す、`HostName` の確認）を示す（1.8）。`ssh` が使えない・時間切れのときも同じく拒否し、別名の解決に失敗したことを示す。
 - 拒否時はリポジトリ、対象ブランチ、判定理由と BRW の代替操作を返す。外部コマンドの stderr は秘密値を除いて必要な部分だけ表示する。
 - 権限エラー、SSO 制約、プラン不明などは、確認できた範囲を示して設定の変更を保留する。適用成功後に確認できない場合は Ruleset ID または候補を表示し、実効設定を再取得できるようにする。
 - フック検査は設定の有無と実際の応答を区別する。無害な BRW 検査呼び出しへのホストからのイベント到達を確認し、未導入・未信頼・非対応・検査不能を表示する。未導入と未信頼は登録状況またはホストの信頼状態を確認できた場合に判定し、フックが届かなかっただけの場合は検査不能を返す。Work Cloud のクラウドオーケストレーションは管理対象の Global MCP フックが前提となるため、リポジトリのコマンドフックだけの構成は非対応と表示する。
@@ -314,6 +341,7 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 
 ## Security Considerations
 
+- SSH の別名の解決（`ssh -G`）は、別名の文字種を限定し、シェルを介さず、タイムアウトを付けて実行する。結果が `github.com` と確認できたときだけ読み、それ以外は拒否する側に倒す。拒否の文言には URL を出さずホスト名だけを示す。
 - 設定用の管理者資格情報は導入操作で使用し、通常作業の資格情報は Ruleset を編集・迂回できないものを使用する。適用や検査に使う資格情報の値は出力しない。
 - 対応するフック経路の同一性、実行ディレクトリ、操作対象を検査する。リポジトリや worktree が供給する未登録の宣言や CLI パス変更で、確認省略や書き込みの許可範囲が広がらないようにする。
 - フックの信頼の登録は harness-plugin-unification の `brw setup` が BRW のフックに限って行う（利用者の決定で、従来の「製品の確認に任せる」を改めた）。設定だけで強制を保証できない経路は導入診断で明示する。
@@ -330,3 +358,4 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 2026-11-21: 利用者の決定（仕様変更）により、Ruleset の既定を「導入する」から「導入しない（既定 off の任意の追加事項）」へ改訂した。承認済みの文書への改訂で、要件 4.1〜4.3 と対話の既定・非対話の未指定の扱いを変更した（`--ruleset on` と保存済みの導入の挙動は不変）。
 - 2026-11-23: 要件 2.9〜2.16（区切りごとの commit・push と、応答終了時の残りの検出）を追加した。commit の確認省略（`evalCommit`・`plainOperation`・`autoApprove.commit`。検証で `brw.mjs` ではなく実際の経路に改めた）、Stop の統合（`work-remainder.mjs`）、指示の文面を設計した。Codex へのフックの届け方は harness-plugin-unification に委ね、`hook-install.mjs`・`install-codex.mjs` の記述を削除対象へ改めた。
 - 2026-11-23（再生成）: Codex 0.167 の実機検証の結果を反映した。`PermissionRequest` による commit の確認省略（対話相当）、非対話での `.git` 書き込み許可の要否、Stop の案内への従い方（案内文に「この作業で生じた変更か」の判断を含める）、PostToolUse の追加文脈（Codex で到達。本 spec では採らない）。利用者が `autoApprove.push: false` の解釈と残余リスク（中断の契機はトークンの使い切りと作業の停止）を確認・許容した。
+- 2026-11-25: 要件 1.6〜1.8（SSH の別名ホストの origin で brw が GitHub のリポジトリを確定できない問題）を追加した。`remote-url.mjs` を新設して URL の読み取りを一本化し、`ssh -G` で別名を解決する。宣言への別名の記載は採らない（利用者の決定）。要件・設計・タスクの承認は外した（タスクは再生成が必要）。

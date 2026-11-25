@@ -199,3 +199,27 @@ harness-plugin-unification の research.md の同名の節に、検証の条件�
 - 設計では commit の確認省略を `brw.mjs` の `autoApprovable`（`safePush` と同じ作法）に足す案にしていたが、フックの実際の経路は `agent-hooks.mjs` の `judgeBash` → `operation-decision.mjs` の `evaluateAll`（`eligibleForApproval`）→ `plainOperation` だった（`autoApprovable` は手動実行用の旧経路）。設計を、`evalCommit`・`operation-policy.mjs` の flags・`plainOperation` の複合コマンドへの対応に改めた。
 - `plainOperation` は変更操作がちょうど 1 つの `git`・`gh` だけを許す。`git add` は読み取り扱いのため、`git add … && git commit …` を含む複合は現状では確認省略されない。この点も設計に含めた。
 - 既存の `stopGuidance` は、セッション ID や状態ファイルが無いと先頭で `null` を返す。残りの案内はこれと独立に評価する構造に改めた。
+
+## 設計時の調査: SSH 別名ホストの origin（要件 1.6〜1.8）（2026-11-25）
+
+### 事象
+`origin` が `~/.ssh/config` の別名（例: `git@github.com.nekono:owner/repo.git`）だと、`githubRepoOf`（`publish.mjs`）と `parseRepoSpec`・`remoteRepos`（`github-operations.mjs`）が `github.com` 固定の読み取りで null になり、`brw work ready`・`plan`・フック下の `gh pr create -R` が「確定できません」で止まる。
+
+### 実測（このリポジトリの環境）
+- `ssh -G git@github.com.nekono` は `hostname github.com` を返す。接続はしない。
+- `gh repo view` は別名を解決して成功する（通信が必要なため、フックの判定には使わない）。
+- `url.<別名>.insteadOf` で `https://github.com/` を別名へ書き換えると、`git config --get remote.origin.url` は https のまま、`git remote get-url` と実際の接続は別名になる。brw は `get-url`（展開後）を読むため、この運用は解決にならない。展開前を読むと実際の送り先と違うものを検査することになる。
+
+### 選択肢と判断
+| 案 | 判断 |
+|---|---|
+| `ssh -G` で別名を `github.com` に解決する | 採用。利用者の設定で決まる実際の接続先と同じ情報で、リポジトリには何も足さない。通信なし。 |
+| 宣言に別名と GitHub の対応を書く | 不採用（利用者の決定）。個人の SSH 設定が commit され、他の人・貢献者のノイズになる。 |
+| `gh` に問い合わせる | 不採用。通信が要り、フックの判定が遅く不安定になる。 |
+| 展開前の URL を読む | 不採用。実際の送り先を検査しない。 |
+
+### 持ち越し・リスク
+- `ssh -G` は `Match exec` を評価する。別名は remote 由来のため、文字種の検査と `--` で注入を防ぎ、設定の実行そのものは利用者自身のものとして受け入れる。
+- フックの 1 回の判定で複数の remote を読むため、結果を同じプロセスで別名ごとに覚える。
+- `ssh.github.com`（443 番）など `hostname` が `github.com` 以外の GitHub 接続先は、要件の範囲外として拒否のままにする。
+
