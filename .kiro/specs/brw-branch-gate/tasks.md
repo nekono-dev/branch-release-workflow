@@ -60,7 +60,7 @@
   - _Boundary: judgeBash, responseOf_
   - _Depends: 2.2, 2.3, 2.4_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.6, 1.7, 2.1, 2.2, 2.3, 4.2, 5.1, 5.3, 5.4, 5.5_
-- [ ] 3.2 (P) フックの登録と導入検査に EnterWorktree を加える
+- [x] 3.2 (P) フックの登録と導入検査に EnterWorktree を加える
   - プラグインのフック定義と、導入検査が期待するフックの一覧に、EnterWorktree の入口を加える（Codex の一覧は変えない）。
   - 入口の欠けた導入を検査すると、対象外の入口と有効にする手順が報告され、揃っていれば何も報告されない。
   - _Boundary: hook-install, hooks.json_
