@@ -307,6 +307,18 @@ export function checkName(config, branch) {
 
 // ---- workflow 走査 -------------------------------------------------------
 
+/** 資格情報らしい値（URL の資格情報・GitHub トークン様の値）だけを伏せる。空白や長さは変えない。 */
+export function redactSecrets(text) {
+  return String(text ?? "")
+    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, "$1***@")
+    .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, "***");
+}
+
+/** 理由や応答に出す文字列。資格情報らしい値を伏せ、空白を詰めて長さを制限する。 */
+export function sanitize(text) {
+  return redactSecrets(text).replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
 // on.push.branches を簡易的に取り出す（flow / block 形式に対応。YAML 完全対応ではない）
 export function parsePushBranches(text) {
   const lines = text.split(/\r?\n/).map((l) => l.replace(/\s+#.*$/, "").replace(/^#.*$/, ""));

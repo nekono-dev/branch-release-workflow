@@ -16,7 +16,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { git } from "./lib.mjs";
+import { git, sanitize } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
@@ -82,15 +82,8 @@ function stripCd(command) {
   return { ok: true, dir: w[0], rest: command.slice(m[0].length).trim() };
 }
 
-/** 理由や応答に出す文字列。URL の資格情報・トークン様の値を伏せ、長さを制限する。 */
-export function sanitize(text) {
-  return String(text ?? "")
-    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, "$1***@")
-    .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, "***")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 500);
-}
+// sanitize は scripts/lib.mjs に置く（branch-gate.mjs と共有し、循環 import を避ける）。ここからも従来どおり参照できる。
+export { sanitize };
 
 // ---- 信頼済み BRW の公開（publish） ----
 

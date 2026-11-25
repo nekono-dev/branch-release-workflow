@@ -13,6 +13,7 @@ import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
 import { runSupportChecks } from "./support/selftest-support.mjs";
 import { runEnforcementChecks } from "./enforcement.mjs";
+import { runBranchGateChecks } from "./branch-gate.mjs";
 import { runDecisionChecks } from "./decision.mjs";
 import { runGithubWriteChecks } from "./github-write.mjs";
 import { runGithubClientChecks } from "./github-client.mjs";
@@ -550,6 +551,7 @@ await runSupportChecks(eq);
 
 // ---- 操作の分類と対象の確定（brw-enforcement 2.1） ----
 await runEnforcementChecks(eq);
+await runBranchGateChecks(eq);
 await runGithubWriteChecks(eq);
 
 // ---- 操作可否の共通判定（brw-enforcement 2.3） ----
