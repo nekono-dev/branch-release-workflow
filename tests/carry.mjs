@@ -3,7 +3,13 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { carryChanges, carryRefOf } from "../scripts/carry.mjs";
+
+const BRW = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "brw.mjs");
+const brw = (cwd, ...a) => spawnSync("node", [BRW, ...a], { cwd, encoding: "utf8" });
 
 const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", cwd, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const tryGit = (cwd, ...a) => { try { return git(cwd, ...a); } catch (e) { return `ERR:${e.stderr ?? e.message}`; } };
@@ -143,4 +149,60 @@ export const runCarryChecks = async (eq) => {
   tryGit(unmerged.src, "merge", "side");
   const um = carryChanges({ source: unmerged.src, worktree: unmerged.wt, startOid: git(unmerged.src, "rev-parse", "HEAD").trim(), branch: "dev/carry2" });
   eq("brw-branch-gate/1.11 解決していない競合があるときは failed で、元は変わらない", [um.kind, git(unmerged.src, "ls-files", "-u").trim() !== ""], ["failed", true]);
+
+  // ---- brw create --carry（実際の CLI） ----
+  const mk = (withDecl) => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "brw-carry-cli-")));
+    execFileSync("git", ["init", "-q", "-b", "develop", d], { stdio: "ignore" });
+    const decl = JSON.stringify({ workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" });
+    writeFileSync(join(d, ".branch-release-workflow.json"), decl);
+    writeFileSync(join(d, "a.txt"), "a\n");
+    git(d, "add", withDecl ? "." : "a.txt");
+    git(d, "commit", "-q", "-m", "i");
+    return d;
+  };
+  const c1 = mk(true);
+  writeFileSync(join(c1, "a.txt"), "a2\n");
+  writeFileSync(join(c1, "u.txt"), "u\n");
+  const r1 = brw(c1, "create", "foo", "--carry");
+  const wt1 = join(c1, ".claude", "worktrees", "dev-foo");
+  eq("brw-branch-gate/1.10 brw create --carry は変更を新しい worktree へ移し、元から取り除く", [r1.status, readFileSync(join(wt1, "a.txt"), "utf8"), git(c1, "status", "--porcelain").includes("a.txt")], [0, "a2\n", false]);
+  eq("brw-branch-gate/1.13 --carry は移さなかった未追跡のファイルを表示し、worktree の置き場は含めない", [r1.stdout.includes("u.txt"), r1.stdout.includes("- .claude/worktrees/"), r1.stdout.includes("git stash apply refs/brw/carry/dev/foo")], [true, false, true]);
+  // 連携 worktree から実行しても、配置先は本体の .claude/worktrees/（入れ子にしない）
+  writeFileSync(join(wt1, "a.txt"), "a3\n");
+  const r2 = brw(wt1, "create", "bar", "--carry");
+  eq("brw-branch-gate/1.1 連携 worktree から実行しても配置先は本体の配下で、入れ子にしない", [r2.status, existsSync(join(c1, ".claude", "worktrees", "dev-bar")), existsSync(join(wt1, ".claude", "worktrees"))], [0, true, false]);
+  eq("brw-branch-gate/1.10 --carry を付けない brw create は従来どおり変更を移さない", (() => {
+    writeFileSync(join(c1, "a.txt"), "keep\n");
+    const r = brw(c1, "create", "plain");
+    return [r.status, readFileSync(join(c1, "a.txt"), "utf8"), readFileSync(join(c1, ".claude", "worktrees", "dev-plain", "a.txt"), "utf8")];
+  })(), [0, "keep\n", "a\n"]);
+  eq("brw-branch-gate/1.11 --carry と --branch-only の併用は終了コード 2", brw(c1, "create", "x", "--carry", "--branch-only").status, 2);
+  // 失敗の巻き戻し: 宣言ファイルが分岐元に未登録で、開始点が元の HEAD と異なる（--carry が失敗する）
+  const c2 = mk(false);
+  git(c2, "checkout", "-q", "-b", "side");
+  writeFileSync(join(c2, "a.txt"), "side\n");
+  git(c2, "commit", "-qam", "side");
+  writeFileSync(join(c2, "a.txt"), "dirty\n");
+  const r3 = brw(c2, "create", "foo", "--carry");
+  eq("brw-branch-gate/1.11 --carry の失敗は worktree とブランチを残さず、宣言ファイルを元の場所に戻し、元の変更を保つ", [
+    r3.status !== 0, existsSync(join(c2, ".claude", "worktrees", "dev-foo")), tryGit(c2, "rev-parse", "--verify", "--quiet", "refs/heads/dev/foo").startsWith("ERR"),
+    existsSync(join(c2, ".branch-release-workflow.json")), readFileSync(join(c2, "a.txt"), "utf8"), r3.stderr.includes("元の作業ツリーは変更していません"),
+  ], [true, false, true, true, "dirty\n", true]);
+  eq("brw-branch-gate/5.2 失敗のあと、同じ名前でもう一度作れる（作りかけが残っていない）", (() => {
+    git(c2, "checkout", "-q", "-f", "develop");
+    const r = brw(c2, "create", "foo");
+    return [r.status, existsSync(join(c2, ".claude", "worktrees", "dev-foo", ".branch-release-workflow.json"))];
+  })(), [0, true]);
+
+
+  // 配置先が worktree として登録されている（ディレクトリは消えている）ときは、何も消さずに止まる
+  const c3 = mk(true);
+  git(c3, "worktree", "add", "-q", "-b", "other", join(c3, ".claude", "worktrees", "dev-foo"));
+  rmSync(join(c3, ".claude", "worktrees", "dev-foo"), { recursive: true });
+  const r4 = brw(c3, "create", "foo");
+  eq("brw-branch-gate/5.2 配置先が登録済みの worktree のときは、止まり、既存の登録とブランチを消さない", [
+    r4.status !== 0, git(c3, "worktree", "list", "--porcelain").includes("dev-foo"), tryGit(c3, "rev-parse", "--verify", "--quiet", "refs/heads/other").startsWith("ERR"),
+  ], [true, true, false]);
+
 };

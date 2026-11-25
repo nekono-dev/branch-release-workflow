@@ -52,8 +52,8 @@ export function carryChanges({ source, worktree, startOid, branch, exclude = [],
   if (wtHead !== start) return fail("新しい worktree の HEAD が開始点と異なるため、移しません。");
   if (run(source, ["ls-files", "-u"]).out.trim() !== "") return fail("解決していない競合があるため、変更を移せません。");
 
-  // 移さない未追跡のファイル（無視されるファイルは対象外）
-  const skipped = nulList(run(source, ["ls-files", "-z", "--others", "--exclude-standard"]).out).filter((p) => !exclude.includes(p));
+  // 移さない未追跡のファイル（無視されるファイルと、BRW の worktree の置き場は対象外）
+  const skipped = nulList(run(source, ["ls-files", "-z", "--others", "--exclude-standard"]).out).filter((p) => !exclude.includes(p) && !p.startsWith(".claude/worktrees/"));
 
   // ① 変更を表すコミット S（退避の置き場には記録されない）。出力が空なら移す変更は無い
   const created = run(source, ["stash", "create"]);

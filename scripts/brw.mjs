@@ -2,7 +2,7 @@
 // branch-release-workflow の CLI。サブコマンド:
 //   hook                       旧経路の PreToolUse フック（手動実行用。標準入力の JSON を判定して deny/ask/allow を返す）。
 //                              現行のフック登録は agent-hooks.mjs（Claude Code・Codex 共通）が行い、このサブコマンドは登録しない
-//   create <名前> [--base b] [--branch-only]   作業ブランチ（と worktree）を命名規則に従って作成
+//   create <名前> [--base b] [--branch-only|--carry]   作業ブランチ（と worktree）を命名規則に従って作成（--carry は追跡済みの未コミットの変更も新しい worktree へ移す）
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
@@ -35,6 +35,7 @@ import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
 import { denyOfCommand } from "./agent-hooks.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
+import { carryChanges } from "./carry.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
@@ -366,17 +367,63 @@ function branchPrefix(config) {
   return g ? g.replace(/\*+$/, "") : null;
 }
 
+// 作成の途中で失敗したときの後始末。作りかけの worktree とブランチを消す（無いものは無視する）
+// 消すのは、このブランチ用に登録された worktree だけ（ブランチは作成前に存在しないと確かめてある。既存のほかの worktree には触れない）
+function cleanupCreated(main, wt, branch) {
+  if (worktrees(main).some((w) => w.path === wt && w.branch === branch)) git(main, "worktree", "remove", "--force", wt);
+  git(main, "branch", "-D", branch);
+}
+
+// worktree を作った後の失敗の巻き戻し。宣言ファイルを worktree へ移していれば、先に元の場所へ戻す。
+// 戻せたときだけ worktree とブランチを消す（未追跡の宣言ファイルを失わない）。戻せないときは worktree を残して手順を示す。常に終了する
+function rollbackCreate({ root, main, wt, branch, rel, moved, why }) {
+  if (moved) {
+    try {
+      // 元の場所に別のファイルができていれば上書きしない（失わないよう、worktree を残して手動の復旧を案内する）
+      if (existsSync(join(root, rel))) throw new Error(`${join(root, rel)} に別のファイルが既にあります`);
+      renameSync(join(wt, rel), join(root, rel));
+    } catch (error) {
+      fail(`${why}。さらに宣言ファイルを元の場所へ戻せなかったため、worktree は削除していません。\n  ${join(wt, rel)} を ${join(root, rel)} へ手で戻してから、\`git worktree remove --force ${wt}\` と \`git branch -D ${branch}\` で片付け、もう一度 brw create を実行してください。（${error.message}）`);
+    }
+  }
+  cleanupCreated(main, wt, branch);
+  fail(`${why}。作成した worktree とブランチは残していません。原因を直して、もう一度 brw create を実行してください。`);
+}
+
+// --carry: 元の作業ツリーの追跡済みの未コミットの変更を新しい worktree へ移し、結果を表示する。失敗は巻き戻す（元は変わらない）
+function carryInto({ root, main, wt, branch, start, rel, moved }) {
+  const startOid = git(root, "rev-parse", "--verify", "--quiet", `${start}^{commit}`);
+  let r;
+  try {
+    r = startOid ? carryChanges({ source: root, worktree: wt, startOid, branch, exclude: moved ? [rel] : [] }) : { kind: "failed", reason: "開始点のコミットを確認できません。" };
+  } catch (error) {
+    r = { kind: "failed", reason: `変更を移す処理で例外が起きました: ${error.message}` };
+  }
+  if (r.kind === "failed") rollbackCreate({ root, main, wt, branch, rel, moved, why: `変更を移せませんでした: ${r.reason}（元の作業ツリーは変更していません）` });
+  const list = (items) => items.map((f) => `    - ${f}`).join("\n");
+  if (r.kind === "none") console.log("移す未コミットの変更（追跡済みのファイル）はありませんでした。");
+  else {
+    console.log(`未コミットの変更を新しい worktree へ移しました（${r.files.length} 件）。ステージ済みの変更はステージ済みのまま移ります。`);
+    if (r.kind === "keptBoth")
+      console.log(`注意: 元の作業ツリーで内容が変わっていた次のファイルは、元から取り除いていません（元にも残っています）:\n${list(r.kept)}\n取り除いたファイル:\n${list(r.removed)}`);
+    console.log(`移した内容は、次のコマンドで再び取り出せます（作業を確認した後、brw finish が参照を削除します）: git stash apply ${r.recoveryRef}`);
+  }
+  if (r.skipped.length > 0) console.log(`未追跡のファイルは移していません（元の作業ツリーに残っています）:\n${list(r.skipped)}`);
+}
+
 function create(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
-  let name, base = config.baseBranch, branchOnly = false;
+  let name, base = config.baseBranch, branchOnly = false, carry = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--base") base = args[++i] ?? fail("--base に値が必要です。", 2);
     else if (args[i] === "--branch-only") branchOnly = true;
+    else if (args[i] === "--carry") carry = true;
     else if (!name) name = args[i];
     else fail("引数が不正です。", 2);
   }
-  if (!name) fail("使い方: create <名前> [--base <ブランチ>] [--branch-only]", 2);
+  if (!name) fail("使い方: create <名前> [--base <ブランチ>] [--branch-only | --carry]", 2);
+  if (carry && branchOnly) fail("--carry と --branch-only は同時に使えません（--carry は新しい worktree へ変更を移すため、worktree を作る形だけです）。", 2);
   const prefix = branchPrefix(config);
   const branch = matchesAny(config.workBranches, name) ? name : prefix ? prefix + name : fail(`workBranches（${config.workBranches.join(", ")}）に新規作成できるパターン（xxx/*）がありません。`);
   // 作れるのは共通判定で開発ブランチと分類されるものだけ（保護・分岐元・命名規則違反は拒否）
@@ -400,16 +447,33 @@ function create(args) {
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
     if (unregistered) console.log(`注意: ${rel} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
-    const wt = join(root, ".claude/worktrees", aliasOf(branch));
-    mkdirSync(join(root, ".claude/worktrees"), { recursive: true });
-    execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
-    console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
-    hooksForWorktree(worktrees(root)[0]?.path ?? root, wt);
-    if (unregistered) {
-      mkdirSync(dirname(join(wt, rel)), { recursive: true });
-      renameSync(join(root, rel), join(wt, rel));
-      console.log(`${rel} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+    // 配置先は常にリポジトリ本体の .claude/worktrees/（連携 worktree から実行しても入れ子にしない）
+    const main = worktrees(root)[0]?.path ?? root;
+    const wt = join(main, ".claude/worktrees", aliasOf(branch));
+    if (existsSync(wt) || worktrees(root).some((w) => w.path === wt))
+      fail(`配置先 ${wt} が既に存在する、または worktree として登録されているため、worktree を作りません（既存のものは変更していません）。`);
+    mkdirSync(join(main, ".claude/worktrees"), { recursive: true });
+    try {
+      execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
+    } catch (error) {
+      // 作成の途中で失敗したときは、作りかけの worktree とブランチを残さない
+      cleanupCreated(main, wt, branch);
+      fail(`worktree の作成に失敗しました（${error.message.split("\n")[0]}）。作りかけのものは残していません。原因を直して、もう一度 brw create を実行してください。`);
     }
+    console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
+    hooksForWorktree(main, wt);
+    let moved = false;
+    if (unregistered) {
+      try {
+        mkdirSync(dirname(join(wt, rel)), { recursive: true });
+        renameSync(join(root, rel), join(wt, rel));
+        moved = true;
+        console.log(`${rel} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+      } catch (error) {
+        rollbackCreate({ root, main, wt, branch, rel, moved: false, why: `宣言ファイルを worktree へ移せませんでした（${error.message}）` });
+      }
+    }
+    if (carry) carryInto({ root, main, wt, branch, start, rel, moved });
   }
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
   const url = previewUrl(config, branch);
@@ -493,6 +557,7 @@ function removeBranch(main, others, branch) {
   // 変更が無いことは確かめてある。submodule を含む worktree は --force が無いと消せないため付ける
   if (wt) execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: main.path, stdio: "inherit" });
   execFileSync("git", ["branch", "-D", branch], { cwd: main.path, stdio: "inherit" });
+  git(main.path, "update-ref", "-d", `refs/brw/carry/${branch}`); // --carry の復旧用の参照（無ければ何もしない）
   return wt;
 }
 
