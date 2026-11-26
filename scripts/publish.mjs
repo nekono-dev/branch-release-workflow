@@ -370,6 +370,12 @@ export function githubRepoOf(url) {
 }
 
 /** 作業ブランチの push 先リモート名（pushRemote → remote.pushDefault → 追跡先 → origin の順）。 */
+/** 本体（最初の worktree）のパス。確定できなければ null。 */
+export const worktreeMainOf = (cwd) => {
+  const out = git(cwd, "worktree", "list", "--porcelain");
+  return out?.match(/^worktree (.+)$/m)?.[1] ?? null;
+};
+
 export const remoteNameOf = (cwd, branch) => git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
 
 /** 完了申告・検証・対象リポジトリの入力を検査する。Git の状態は見ない（作業の状態とともに後で確認する）。 */

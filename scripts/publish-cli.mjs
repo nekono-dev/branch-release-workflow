@@ -7,7 +7,7 @@
 // 外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
 import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { branchBase, classifyBranch, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
 import { createGitHubSession } from "./github-client.mjs";
 import * as publish from "./publish.mjs";
@@ -265,14 +265,25 @@ async function cmdPlan(args, d) {
 
 // ---- work（まとめ）・publish ----
 
-/** 本文ファイルを読む。作業ディレクトリの配下の通常ファイルに限る（フックの信頼判定と同じ基準）。 */
+/**
+ * 本文ファイルを読む。次のどちらかの通常ファイルに限る（フックの信頼判定と同じ基準: 実体パスで配下を確認し、`..`・配下の外へのリンクは拒否）。
+ *   - 作業ディレクトリ配下の相対パス
+ *   - 本体の worktree 置き場（<本体>/.claude/worktrees/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）
+ */
 function readBody(cwd, file) {
-  const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスで指定してください。" };
-  if (file === "" || isAbsolute(file) || file.split(/[\\/]/).includes("..")) return bad;
+  const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.claude/worktrees/.brw/）の配下の絶対パスで指定してください。" };
+  if (file === "" || file.includes("\0") || file.split(/[\\/]/).includes("..")) return bad;
   try {
-    const dirReal = realpathSync(cwd);
+    let root;
+    if (isAbsolute(file)) {
+      const main = publish.worktreeMainOf(cwd);
+      if (!main) return bad;
+      root = realpathSync(join(main, ".claude", "worktrees", ".brw"));
+    } else {
+      root = realpathSync(cwd);
+    }
     const real = realpathSync(resolve(cwd, file));
-    if (!real.startsWith(dirReal + sep) || !statSync(real).isFile()) return bad;
+    if (!real.startsWith(root + sep) || !statSync(real).isFile()) return bad;
     return { text: readFileSync(real, "utf8") };
   } catch {
     return { error: "本文ファイルを読めません。" };

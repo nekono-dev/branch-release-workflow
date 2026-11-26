@@ -2,7 +2,7 @@
 // 実際のホストは呼ばず、入力の形（fixture）と応答の形を確かめる。
 // 公開計画の検証は一時リポジトリの計画を使い、遠隔（bare remote）には触れない。
 import { spawnSync } from "node:child_process";
-import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as publish from "../scripts/publish.mjs";
@@ -141,6 +141,29 @@ export const runAgentHookChecks = async (eq) => {
     eq("enforcement/6.1 PR を作る計画で件名が無いと確認を省略しない", preOf("claude", publishCmd(id, plan.planId), dir), null);
     eq("enforcement/6.1 件名が不正（改行を含む）だと確認を省略しない", preOf("claude", publishCmd(id, plan.planId, `--title "a
 b"`), dir), null);
+    // brw-pr-handoff 6.1: 信頼済みの brw pr だけが確認省略の対象
+    {
+      const pr = (extra = "") => `node ${BRW} pr --title "${TITLE}" --completion "完了した" --verification "確認した" ${extra}`.trim();
+      const bodyDir = join(dir, ".claude", "worktrees", ".brw");
+      mkdirSync(bodyDir, { recursive: true });
+      writeFileSync(join(bodyDir, "dev-foo.md"), "本文\n");
+      writeFileSync(join(dir, "outside.md"), "別の場所\n");
+      eq("brw-pr-handoff/6.1 信頼済みの brw pr は、宣言が push と PR の確認省略を有効にしているとき確認を省略する（Claude）", preOf("claude", pr(), dir), "allow");
+      eq("brw-pr-handoff/6.1 本文置き場の絶対パスの --body-file も許可する", preOf("claude", pr(`--body-file ${join(bodyDir, "dev-foo.md")}`), dir), "allow");
+      eq("brw-pr-handoff/6.1 本文置き場の外の絶対パス・.. を含むパスの --body-file は確認を省略しない", [
+        preOf("claude", pr(`--body-file ${join(dir, "outside.md")}`), dir), preOf("claude", pr(`--body-file ${join(bodyDir, "..", "..", "..", "outside.md")}`), dir),
+      ], [null, null]);
+      eq("brw-pr-handoff/6.1 --confirmed・未知のオプション・値の欠落・重複は確認を省略しない（通常の承認に任せる）", [
+        preOf("claude", pr("--confirmed"), dir), preOf("claude", pr("--bogus x"), dir), preOf("claude", pr("--title"), dir), preOf("claude", pr(`--title "二つ目"`), dir),
+        preOf("claude", `node ${BRW} pr --title --confirmed --completion c --verification v`, dir), preOf("claude", `node ${BRW} pr --title --unknown --completion c --verification v`, dir),
+      ], [null, null, null, null, null, null]);
+      eq("brw-pr-handoff/6.1 信頼できない BRW のパスの pr は確認を省略しない", preOf("claude", `node /tmp/nonexistent-brw/scripts/brw.mjs pr --title "${TITLE}" --completion c --verification v`, dir), null);
+      eq("brw-pr-handoff/6.1 Codex は PreToolUse では応答せず、PermissionRequest でだけ許可する", [preOf("codex", pr(), dir), permOf("codex", pr(), dir)], [null, "allow"]);
+      eq("brw-pr-handoff/6.1 他の連結コマンドを含む brw pr は確認を省略しない", preOf("claude", `${pr()} && echo x`, dir), null);
+      // 後続の試験が「未コミットの変更なし」を前提にするため、置いたファイルを片付ける
+      rmSync(join(dir, ".claude"), { recursive: true, force: true });
+      rmSync(join(dir, "outside.md"), { force: true });
+    }
     eq("enforcement/6.1 信頼できない BRW のパスでは確認を省略しない", preOf("claude", `node /tmp/nonexistent-brw/scripts/brw.mjs publish --work ${id} --plan ${plan.planId} --title "${TITLE}"`, dir), null);
     eq("enforcement/6.1 計画に無い引数（強制など）が付くと確認を省略しない", preOf("claude", publishCmd(id, plan.planId, `--title "${TITLE}" --force`), dir), null);
     eq("enforcement/6.1 publish と他のコマンドを続けると確認を省略しない", preOf("claude", `${publishCmd(id, plan.planId, `--title "${TITLE}"`)} && git push origin dev/foo`, dir), null);

@@ -17,7 +17,7 @@ import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
-import { git, loadConfig, redactSecrets, sanitize } from "./lib.mjs";
+import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoRoot, sanitize } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
@@ -101,9 +101,15 @@ const validTitle = (t) => typeof t === "string" && t.trim() !== "" && t.trim().l
  * 絶対パス・`..`・配下の外を指すシンボリックリンク（realpath で確認）・デバイスやディレクトリは認めない。
  */
 const bodyFileOk = (dir, f) => {
-  if (f === "" || isAbsolute(f) || f.split(/[\\/]/).includes("..")) return false;
+  if (f === "" || f.includes("\0") || f.split(/[\\/]/).includes("..")) return false;
   try {
-    const root = realpathSync(dir);
+    // 絶対パスは、本体の worktree 置き場（.claude/worktrees/.brw/）の配下だけ。相対パスは作業ディレクトリの配下
+    let root;
+    if (isAbsolute(f)) {
+      const main = (git(dir, "worktree", "list", "--porcelain") ?? "").match(/^worktree (.+)$/m)?.[1];
+      if (!main) return false;
+      root = realpathSync(join(main, ".claude", "worktrees", ".brw"));
+    } else root = realpathSync(dir);
     const real = realpathSync(resolve(dir, f));
     return real.startsWith(root + sep) && statSync(real).isFile();
   } catch {
@@ -164,6 +170,49 @@ function publishCall(command, cwd) {
   }
   if (opts["--work"] === undefined || opts["--plan"] === undefined) return { bad: true };
   return { bad: false, dir, workId: opts["--work"], planId: opts["--plan"], title: opts["--title"], bodyFile: opts["--body-file"] };
+}
+
+const PR_VALUED = ["--title", "--body-file", "--completion", "--verification", "--target", "--work"];
+
+/**
+ * コマンドが信頼済み BRW の `pr` の呼び出しか（`node <brw.mjs の実体> pr` と、既知のオプション・値だけ。--confirmed は含めない）。
+ * 戻り値: null（pr ではない・信頼できない）| { bad: true } | { bad: false, dir, bodyFile }
+ */
+function prCall(command, cwd) {
+  const cd = stripCd(command);
+  if (!cd.ok) return null;
+  const w = scanWords(cd.rest);
+  if (!w || w[0] !== "node" || w[2] !== "pr") return null;
+  const dir = cd.dir === null ? cwd : cwd === null ? null : resolve(cwd, cd.dir);
+  if (dir === null || w[1] === undefined) return null;
+  if (!isTrustedCli(resolve(dir, w[1]))) return null;
+  const opts = {};
+  for (let i = 3; i < w.length; i++) {
+    const k = w[i];
+    if (k === "--failed") { if (opts[k] !== undefined) return { bad: true }; opts[k] = true; continue; }
+    const v = w[i + 1];
+    // 値は次の語。`--` で始まる語は値にしない（CLI の引数の検査と同じ）
+    if (!PR_VALUED.includes(k) || v === undefined || v.startsWith("--") || opts[k] !== undefined) return { bad: true };
+    opts[k] = v;
+    i++;
+  }
+  return { bad: false, dir, bodyFile: opts["--body-file"] };
+}
+
+/**
+ * 信頼済みの `brw pr` の確認を省略するか。宣言（登録済み）が push と PR 作成の確認省略をともに有効にしているときだけ。
+ * 承認の要否・禁止は `brw pr` の内部の公開（計画・状態）が改めて判定するため、ここではホストの確認を省くだけ。それ以外は応答を返さない。
+ */
+function decidePrCall(p) {
+  if (p.bad) return PASS;
+  if (p.bodyFile !== undefined && !bodyFileOk(p.dir, p.bodyFile)) return PASS;
+  const root = repoRoot(p.dir);
+  if (!root) return PASS;
+  const { config, error } = loadConfig(root);
+  if (error || !config) return PASS;
+  const auto = autoApproveOf(config, configMatchesHead(root));
+  if (!auto.push || !auto.pullRequest) return PASS;
+  return { verdict: "allow", reason: "信頼済み BRW の brw pr です。公開の承認の要否と禁止は、brw pr の内部で改めて判定されます。", code: "pr-flow" };
 }
 
 /**
@@ -288,6 +337,8 @@ function gateJudge(cls, d, command, cwd, host, toolInput) {
 function judgeBash(command, cwd, host = "claude", toolInput = {}) {
   const pub = publishCall(command, cwd);
   if (pub) return decidePublish(pub);
+  const prc = prCall(command, cwd);
+  if (prc) return decidePrCall(prc);
   const cls = classifyCommand(command, cwd);
   const d = evaluateAll(cls, restrictionsFor(cwd));
   if (d.verdict === "deny") return gateJudge(cls, d, command, cwd, host, toolInput) ?? decisionOf(d);

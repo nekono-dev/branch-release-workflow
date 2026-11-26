@@ -4,6 +4,9 @@
 //                              現行のフック登録は agent-hooks.mjs（Claude Code・Codex 共通）が行い、このサブコマンドは登録しない
 //   create <名前> [--base b] [--branch-only|--carry]   作業ブランチ（と worktree）を命名規則に従って作成（--carry は追跡済みの未コミットの変更も新しい worktree へ移す）
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
+//   pr-template                PR 本文の雛形（本文置き場のファイル）と記入指示を出す。本文は、書き手が記入する
+//   pr --completion <申告> --verification <要約> [--title <タイトル>] [--body-file <ファイル>] [--failed] [--target <取り込み先>]
+//                              PR 作成の入口。作業外の変更の別コミット・準備・計画・公開・片付け（宣言で有効なとき）を順に行う
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
 //   work start                 変更作業を始め、作業 ID を 1 つ出力する（調査だけの依頼では使わない）
@@ -40,6 +43,10 @@ import { finishBlocker, recordedState, removeBranch } from "./cleanup.mjs";
 import { removeWorkRecordAt } from "./publish.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
+import { runPr } from "./pr-flow.mjs";
+import { bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { previewTidy } from "./tidy.mjs";
+import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
@@ -620,6 +627,33 @@ function resume(args) {
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
 }
 
+// PR 本文の雛形を本文置き場に書き出し、記入指示を出力する（記入そのものは書き手が行う。書き終えた本文は上書きしない）
+function prTemplate(args) {
+  if (args.length > 0) fail("使い方: brw pr-template（引数はありません）", 2);
+  const cwd = process.cwd();
+  const root = repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
+  const config = need(root);
+  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチの worktree で実行してください。");
+  if (classifyBranch(config, branch) !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。`);
+  const main = worktrees(cwd)[0]?.path ?? root;
+  const base = branchBase(cwd, config, branch);
+  const language = config.pullRequest.language;
+  // 検証の要約が記録されていれば差し込む（準備の前は無い）
+  const cur = publishState.currentWork(cwd);
+  const ver = cur.ok ? cur.work?.ready?.verification : null;
+  const planned = previewTidy(cwd);
+  if (planned?.secretLike.length) fail(`秘密情報らしい名前のファイルが未コミットの変更に含まれます: ${planned.secretLike.join(", ")}。コミットしないなら .gitignore に追加するか削除してください（含まれたままでは brw pr が止まります）。`);
+  const path = bodyPathOf(main, branch);
+  const r = prepareBody(path, { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false });
+  if (r.filled) {
+    console.log(`本文は記入済みです（上書きしません）: ${path}`);
+    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
+    return;
+  }
+  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
+  console.log(instruction({ bodyPath: path, base, language }));
+}
+
 function url(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
@@ -740,7 +774,8 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSyn
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
   const cmds = {
-    guard, hook, create, finish, resume, merge, url, "gen-workflow": genWorkflow,
+    guard, hook, create, finish, resume, merge, url, "pr-template": prTemplate,
+    pr: async (a) => { process.exitCode = await runPr(a); }, "gen-workflow": genWorkflow,
     // 導入・移行と状態検査（7.3）。終了コードは各関数が返す
     check: async (a) => { process.exitCode = await check(a); },
     setup: async (a) => { process.exitCode = await runSetup(a); }, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler,
