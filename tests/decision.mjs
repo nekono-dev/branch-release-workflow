@@ -20,9 +20,10 @@ export const runDecisionChecks = async (eq) => {
   gitOut(d, "remote", "set-url", "origin", "https://github.com/acme/app.git");
   gitOut(d, "remote", "set-url", "--push", "origin", r.remote);
   // 判定の入口。コマンドを分類し、宣言と作業の禁止を照合して 1 件目の操作の判定を返す
-  const ev = (cmd, restrictions = {}, cwd = d) => {
+  // origin は操作の起点。PR 作成の規則（適合・確認省略）は BRW 自身の公開の起点（brw-publish）で確かめ、既定（エージェント）の拒否は別に確かめる
+  const ev = (cmd, restrictions = {}, cwd = d, origin = "brw-publish") => {
     const op = classifyCommand(cmd, cwd).operations[0];
-    return evaluate(op, contextFor(op, restrictions));
+    return evaluate(op, { ...contextFor(op, restrictions), origin });
   };
   const all = (cmd, restrictions = {}, cwd = d) => evaluateAll(classifyCommand(cmd, cwd), restrictions);
   const sig = (x) => [x.verdict, x.compliance, x.approval, x.code];
@@ -97,7 +98,7 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/2.6 登録済み宣言の autoApprove.pullRequest=false は PR 作成の確認省略を外す", (() => {
     const op = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: { pullRequest: false } } });
     gitOut(op.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
-    const o = classifyCommand("gh pr create --head dev/foo --base main -t t -b b", op.dir).operations[0]; const x = evaluate(o, contextFor(o));
+    const o = classifyCommand("gh pr create --head dev/foo --base main -t t -b b", op.dir).operations[0]; const x = evaluate(o, { ...contextFor(o), origin: "brw-publish" });
     op.cleanup();
     return [...sig(x), x.approvalWhy];
   })(), ["pass", "compliant", "normal", "pr-create-protected", "opt-out"]);
@@ -139,12 +140,23 @@ export const runDecisionChecks = async (eq) => {
     const x = pr("dev/foo", "main"); const y = ev("gh pr create --head dev/foo --base main -t t -b b", { noPush: true });
     const op = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: { push: false } } });
     gitOut(op.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
-    const o = classifyCommand("gh pr create --head dev/foo --base main -t t -b b", op.dir).operations[0]; const z = evaluate(o, contextFor(o));
+    const o = classifyCommand("gh pr create --head dev/foo --base main -t t -b b", op.dir).operations[0]; const z = evaluate(o, { ...contextFor(o), origin: "brw-publish" });
     op.cleanup();
     return [x.verdict, y.verdict, y.approvalWhy, z.verdict, z.approvalWhy];
   })(), ["eligibleForApproval", "pass", "work-restriction-push", "pass", "opt-out-push"]);
+  // brw-pr-handoff 1.1・1.7・6.3: 起点が既定（エージェント）の直接の PR 作成は、規則に適合しても拒否して brw pr を案内する
+  eq("brw-pr-handoff/1.1 エージェント起点の gh pr create・REST・MCP は、適合する作成も pr-create-use-brw で拒否し、brw pr を案内する", (() => {
+    const agent = (cmd) => ev(cmd, {}, d, "agent");
+    const gh = agent("gh pr create --head dev/foo --base main --title t --body b");
+    const rest = agent("gh api repos/acme/app/pulls -f title=t -f head=dev/foo -f base=main");
+    const mcp = (() => { const op = classifyMcpCall("mcp__github__create_pull_request", { owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, d).operations[0]; return evaluate(op, { ...contextFor(op), origin: "agent" }); })();
+    return [gh, rest, mcp].map((x) => [x.verdict, x.code, x.alternative.includes("brw pr-template") && x.alternative.includes("brw pr")]);
+  })(), Array(3).fill(["deny", "pr-create-use-brw", true]));
+  eq("brw-pr-handoff/1.1 起点を渡さない判定（既定）も拒否側になる（渡し忘れが安全側）", sig(evaluateAll(classifyCommand("gh pr create --head dev/foo --base main --title t --body b", d))).slice(0, 2).concat(evaluateAll(classifyCommand("gh pr create --head dev/foo --base main --title t --body b", d)).code), ["deny", "compliant", "pr-create-use-brw"]);
+  eq("brw-pr-handoff/1.1 不適合の PR 作成の拒否の理由と案内は従来のまま（brw pr に置き換えない）", (() => { const x = ev("gh pr create --head dev/foo --base dev/other --title t --body b", {}, d, "agent"); return [x.verdict, x.code]; })(), ["deny", "pr-create-development"]);
+  eq("brw-pr-handoff/1.7 内部の公開の起点（brw-publish）は従来の判定を使い、確認省略の対象になる", (() => { const x = ev("gh pr create --head dev/foo --base main --title t --body b", {}, d, "brw-publish"); return sig(x); })(), ["eligibleForApproval", "compliant", "skip", "pr-create-protected"]);
   eq("enforcement/3.3 REST の PR 作成（push を伴わない）は確認省略の対象", (() => { const x = ev("gh api repos/acme/app/pulls -f title=t -f head=dev/foo -f base=main"); return sig(x); })(), ["eligibleForApproval", "compliant", "skip", "pr-create-protected"]);
-  eq("enforcement/3.3 MCP の PR 作成も同じ判定", (() => { const op = classifyMcpCall("mcp__github__create_pull_request", { owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, d).operations[0]; return sig(evaluate(op, contextFor(op))); })(), ["eligibleForApproval", "compliant", "skip", "pr-create-protected"]);
+  eq("enforcement/3.3 MCP の PR 作成も同じ判定", (() => { const op = classifyMcpCall("mcp__github__create_pull_request", { owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, d).operations[0]; return sig(evaluate(op, { ...contextFor(op), origin: "brw-publish" })); })(), ["eligibleForApproval", "compliant", "skip", "pr-create-protected"]);
   eq("enforcement/3.3 開発ブランチ間の PR 作成は拒否し、ローカルマージを案内する", (() => { const x = pr("dev/foo", "dev/other"); return [x.verdict, x.code, /brw merge/.test(x.alternative)]; })(), ["deny", "pr-create-development", true]);
   eq("enforcement/3.3 宣言外への PR 作成は拒否する", [pr("dev/foo", "other/z"), pr("dev/foo", "feature/q")].map((x) => [x.verdict, x.code]), Array(2).fill(["deny", "pr-create-undeclared"]));
   eq("enforcement/3.3 取り込み元が開発ブランチでない PR 作成は拒否する", [pr("main", "develop"), pr("other/z", "main"), pr("develop", "main")].map((x) => [x.verdict, x.code]), Array(3).fill(["deny", "pr-create-head"]));

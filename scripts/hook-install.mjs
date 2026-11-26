@@ -23,6 +23,7 @@ export const CODEX_HOOKS = [
 /** Claude プラグインの hooks/hooks.json に必要な登録（プラグインのイベントを agent-hooks.mjs へ渡す）。 */
 const CLAUDE_HOOKS = [
   { event: "PreToolUse", matcher: "Bash" },
+  { event: "PreToolUse", matcher: "EnterWorktree" },
   { event: "PreToolUse", matcher: "mcp__.*" },
   { event: "PostToolUse", matcher: "Bash" },
   { event: "Stop", matcher: null },

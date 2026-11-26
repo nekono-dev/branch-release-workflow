@@ -13,6 +13,12 @@ import { getProvider, previewUrl } from "../scripts/providers/index.mjs";
 import * as cloudflare from "../scripts/providers/cloudflare-previews.mjs";
 import { runSupportChecks } from "./support/selftest-support.mjs";
 import { runEnforcementChecks } from "./enforcement.mjs";
+import { runBranchGateChecks } from "./branch-gate.mjs";
+import { runCarryChecks } from "./carry.mjs";
+import { runCleanupChecks } from "./cleanup.mjs";
+import { runPrFlowChecks } from "./pr-flow.mjs";
+import { runPrTemplateChecks } from "./pr-template.mjs";
+import { runTidyChecks } from "./tidy.mjs";
 import { runDecisionChecks } from "./decision.mjs";
 import { runGithubWriteChecks } from "./github-write.mjs";
 import { runGithubClientChecks } from "./github-client.mjs";
@@ -36,6 +42,8 @@ import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
+import { decideHook } from "../scripts/agent-hooks.mjs";
+import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
 // gh で GitHub Variables を読まない（結果を手元の環境に左右させない）。子プロセスにも引き継ぐ
 process.env.BRW_NO_GH = "1";
@@ -98,6 +106,32 @@ eq("branch-guard/AC-12 旧パスの宣言を後方互換で読める", loadConfi
 eq("branch-guard/AC-13 Codex guard は作業ブランチを許可", run(shared, "guard", "git push origin dev/foo").status, 0);
 eq("branch-guard/AC-13 Codex guard は保護ブランチへの送り先を拒否", run(shared, "guard", "git push origin HEAD:main").status, 1);
 eq("branch-guard/AC-13 Codex guard は不明な操作を確認扱いで停止", run(shared, "guard", "git push --all").status, 1);
+// 1.6: 手順書の経路も作成・再開の拒否を共通の判定で止める（commit・push の従来の結果は変えない）
+g(shared, "branch", "dev/other");
+const guardCreate = run(shared, "guard", "git switch -c dev/x");
+eq("brw-branch-gate/1.6 guard は作成の拒否を終了コード 1 で返す", guardCreate.status, 1);
+eq("brw-branch-gate/1.6 guard の作成の拒否は BRW の手順を示す", [guardCreate.stdout.includes("[deny]"), guardCreate.stdout.includes("brw create")], [true, true]);
+eq("brw-branch-gate/1.6 guard は再開の拒否を終了コード 1 で返す", run(shared, "guard", "git switch dev/other").status, 1);
+eq("brw-branch-gate/1.6 guard は作業ブランチの commit を従来どおり許可", run(shared, "guard", "git commit -m x").status, 0);
+// 1.6: 作成先が展開で決まる作成は、判定不能として guard でも拒否する（フックと同じ）
+eq("brw-branch-gate/1.6 guard は作成先を確定できない作成（判定不能）を終了コード 1 で拒否する", run(shared, "guard", 'git switch -c "$X"').status, 1);
+// 1.6: 宣言ファイルが壊れていると、作成は guard とフックの両方で拒否する（一致させる）
+const brokenDecl = mkRepoWithRemote({ branch: "main", config: cfg, register: false });
+writeFileSync(join(brokenDecl.dir, ".branch-release-workflow.json"), "{ 壊れた");
+const brokenHook = decideHook("claude", "PreToolUse", { tool_name: "Bash", tool_input: { command: "git switch -c dev/x" }, cwd: brokenDecl.dir });
+eq("brw-branch-gate/1.6 宣言が壊れていると、フックは作成を拒否する", brokenHook.verdict, "deny");
+eq("brw-branch-gate/1.6 宣言が壊れていると、guard も作成を終了コード 1 で拒否する（フックと一致）", run(brokenDecl.dir, "guard", "git switch -c dev/x").status, 1);
+brokenDecl.cleanup();
+// 1.6: PR 作成の拒否（開発ブランチ間の取り込み）を guard が終了コード 1 で返す
+const prRepo = mkRepoWithRemote({ branch: "dev/foo", config: cfg });
+gitOut(prRepo.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
+const guardPr = run(prRepo.dir, "guard", "gh pr create --base dev/bar --head dev/foo --title t");
+eq("brw-branch-gate/1.6 guard は PR 作成の拒否を終了コード 1 で返す", [guardPr.status, guardPr.stdout.includes("[deny]")], [1, true]);
+// brw-pr-handoff 1.1・1.6: 規則に適合する直接の PR 作成も、guard が終了コード 1 で拒否し、brw pr を案内する
+const guardPrOk = run(prRepo.dir, "guard", "gh pr create --base develop --head dev/foo --title t --body b");
+eq("brw-pr-handoff/1.6 guard は規則に適合する直接の PR 作成も拒否し、brw pr-template と brw pr を案内する", [guardPrOk.status, guardPrOk.stdout.includes("[deny]"), guardPrOk.stdout.includes("brw pr-template"), guardPrOk.stdout.includes("brw pr")], [1, true, true, true]);
+eq("brw-pr-handoff/6.3 直接の gh pr create を試みた呼び出し側に、BRW を知らなくても辿れる brw pr への案内を返す（guard の拒否）", [guardPrOk.status, guardPrOk.stdout.includes("brw pr-template"), guardPrOk.stdout.includes("brw pr")], [1, true, true]);
+prRepo.cleanup();
 const newSetup = mkRepo("develop", null);
 writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
 eq("branch-guard/AC-12 未登録の共通宣言で worktree を作成できる", run(newSetup, "create", "shared-setup").status, 0);
@@ -257,6 +291,18 @@ const autoUp = mkRepo("develop", autoCfg);
 g(autoUp, "config", "branch.develop.merge", "refs/heads/main");
 g(autoUp, "config", "push.default", "upstream");
 eq("branch-guard/AC-14 送り先を省き、追跡先が別名なら省かない", [aa("git push", autoUp), aa("git push origin develop", autoUp)], [false, true]);
+eq("brw-pr-handoff/5.1 宣言ファイルは、片付けの有効・無効を表す設定（afterPublish.cleanup）を持てる", [validateConfig({ ...autoCfg, afterPublish: { cleanup: false } }), validateConfig({ ...autoCfg, afterPublish: { cleanup: true } })], [[], []]);
+eq("brw-pr-handoff/5.2 片付けの設定が省略された宣言は有効として読まれ、false の明示だけが無効になる", [normalizeConfig(autoCfg).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: {} }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: true } }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: false } }).afterPublish.cleanup], [true, true, true, false]);
+eq("brw-pr-handoff/5.4 設定の無い既存の宣言も検証を通り、片付け有効・日本語で読まれる", [validateConfig(autoCfg), normalizeConfig(autoCfg).pullRequest.language], [[], "ja"]);
+eq("brw-pr-handoff/5.6 片付けの設定の型違い・未知のキー・オブジェクト以外は宣言の不正として報告する", [
+  validateConfig({ ...autoCfg, afterPublish: { cleanup: "yes" } }).length, validateConfig({ ...autoCfg, afterPublish: { cleanups: true } }).length,
+  validateConfig({ ...autoCfg, afterPublish: true }).length, validateConfig({ ...autoCfg, afterPublish: null }).length, validateConfig({ ...autoCfg, afterPublish: [] }).length,
+], [1, 1, 1, 1, 1]);
+eq("brw-pr-handoff/5.7 本文の言語は ja・en だけを受け付け、省略は ja になる", [
+  validateConfig({ ...autoCfg, pullRequest: { language: "en" } }), normalizeConfig({ ...autoCfg, pullRequest: { language: "en" } }).pullRequest.language,
+  validateConfig({ ...autoCfg, pullRequest: { language: "fr" } }).length, validateConfig({ ...autoCfg, pullRequest: { lang: "ja" } }).length, validateConfig({ ...autoCfg, pullRequest: "ja" }).length,
+], [[], "en", 1, 1, 1]);
+eq("brw-pr-handoff/5.3 導入の記入例は片付けを有効にする既定値を持ち、検証を通る", (() => { const ex = JSON.parse(readFileSync(new URL("../assets/config.example.json", import.meta.url), "utf8")); return [ex.afterPublish, ex.pullRequest, validateConfig(ex)]; })(), [{ cleanup: true }, { language: "ja" }, []]);
 eq("branch-guard/AC-14 autoApprove の値が真偽値でない・未知のキーなら不正", [validateConfig({ ...autoCfg, autoApprove: { push: "yes" } }).length, validateConfig({ ...autoCfg, autoApprove: { merge: true } }).length, validateConfig({ ...autoCfg, autoApprove: true }).length], [1, 1, 1]);
 const onDevAuto = mkRepo("dev/feat", autoCfg);
 const ap = (cmd, repo = onDevAuto) => autoApprovable(cmd, repo);
@@ -526,6 +572,12 @@ await runSupportChecks(eq);
 
 // ---- 操作の分類と対象の確定（brw-enforcement 2.1） ----
 await runEnforcementChecks(eq);
+await runBranchGateChecks(eq);
+await runCarryChecks(eq);
+await runTidyChecks(eq);
+await runPrTemplateChecks(eq);
+await runCleanupChecks(eq);
+await runPrFlowChecks(eq);
 await runGithubWriteChecks(eq);
 
 // ---- 操作可否の共通判定（brw-enforcement 2.3） ----

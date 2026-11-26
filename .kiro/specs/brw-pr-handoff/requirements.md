@@ -1,0 +1,101 @@
+# 要件定義書
+
+## 概要
+
+BRW 導入リポジトリで作業する開発者と、その指示で動くエージェントが、作業の完了から PR 作成、作業場所の片付けまでを 1 つの決まった流れで終えられるようにする。現状は PR の作成が任意の手順で、本文の書き方も作業ごとにばらつき、片付けは利用者が「片付けて」と指示しない限り行われない。また、`gh pr create` を直接使うと BRW の手順を通らない。この仕様は、PR の作成口を `brw pr`（`brw publish` の別名）に一本化し、本文の雛形と記入指示を提供し、作成の直後に作業場所を自動で片付けることで、次の作業（`brw create`）へ続けて進めるようにする。経緯と検証の記録は [brief.md](brief.md) と [research.md](research.md) に置く。
+
+## Boundary Context
+
+- **In scope**: PR 作成の入口の一本化と直接作成の拒否、作業外の変更の別コミット化、PR 本文の雛形と記入指示の提供、PR 作成後の自動片付け（worktree・ローカルブランチ・作業状態）、片付けの設定と既定値、利用者向けの案内と資料。
+- **Out of scope**: PR 本文の文章そのものの生成（書くのは呼び出し側のエージェント）、cc-sdd-bootstrap と kiro 系スキルの変更、リモートブランチの削除、プレビューの後始末、GitHub 側でのマージ・自動マージ、保護規則・Ruleset の変更。
+- **Adjacent expectations**: 作業 ID・計画・承認・状態記録・push と PR 作成の既存の流れ（brw-enforcement）に従い、その結果を使う。BRW は cc-sdd や `.kiro` を知らず、将来 cc-sdd-bootstrap が `brw pr-template` と `brw pr` を呼ぶことだけを想定する。BRW を導入していないリポジトリの操作には干渉しない。
+
+## 用語
+
+- **作業外の変更**: 依頼された作業とは別に、作業ツリーに残っている変更。
+- **片付け**: 作業ブランチの worktree、ローカルブランチ、BRW の作業状態の記録を削除すること。リモートのブランチとプレビューは含まない。
+- **BRW の作業状態**: 作業 ID ごとに BRW が記録している、完了申告・計画・公開の進み具合。
+
+## Requirements
+
+### Requirement 1: PR の作成口を `brw pr` に一本化する
+
+**Objective:** As a 開発者, I want PR を作る手順を 1 つに統一したい, so that 計画・状態の記録・本文・片付けが毎回同じ流れを通る
+
+#### Acceptance Criteria
+1. When エージェントが BRW 導入済みのリポジトリで `gh pr create` または GitHub の API による PR 作成を実行しようとしたとき, the BRW shall 操作を実行前に拒否し、`brw pr` の使い方を案内する。
+2. When 利用者またはエージェントが `brw pr` を実行したとき, the BRW shall `brw publish` と同じ計画・承認・状態記録の流れで push と PR 作成を行う。
+3. When 作業 ID を指定せずに `brw pr` が実行されたとき, the BRW shall 現在のブランチに結び付いた作業を使い、無ければ作業を新たに記録して処理を進める。
+4. If 現在のブランチが開発ブランチではない、または PR の作成元・作成先を確定できないとき, then the BRW shall PR を作成せず、理由と取るべき手順を表示する。
+5. If 同じブランチの PR が既に存在するとき, then the BRW shall PR を重複して作成せず、既存の PR の URL を示して後続の処理に進む。
+6. Where Claude Code のフックが無効、または Codex を使用しているとき, the BRW shall 手順書の事前確認（`brw guard`）でも直接の PR 作成を同じ判定で止める。
+7. Where BRW を導入していないリポジトリ, the BRW shall `gh pr create` を拒否しない。
+
+### Requirement 2: 作業外の変更を別コミットとして残す
+
+**Objective:** As a 開発者, I want 作業に無関係な変更も作業の履歴と区別して残したい, so that 未コミットの変更が原因で片付けや公開が止まらず、PR で作業外の変更を見分けられる
+
+#### Acceptance Criteria
+1. When `brw pr` の push の前に作業ツリーに未コミットの変更があるとき, the BRW shall それらを、作業のコミットとは別の 1 つのコミットとして作業ブランチに追加する。
+2. The BRW shall 作業外の変更のコミットのメッセージを `chore: 作業外の変更（ボーイスカウト）` で始め、本文に含めたファイルの一覧を書く。
+3. The BRW shall `.gitignore` の対象となるファイルを別コミットに含めない。
+4. If 未コミットの変更に、秘密情報らしい名前の一覧（`.env`・`*.pem`・`*credentials*` など）に当たるファイルが含まれるとき, then the BRW shall そのファイルを含めず、コミットも公開も行わずに、対象のファイル名と取るべき手順を表示して止まる。
+5. When 作業外の変更のコミットを作成したとき, the BRW shall PR の本文の「作業外の変更」の節に、含めたファイルの一覧を載せられる情報を提供する。
+6. While 作業ツリーに未コミットの変更が無い, the BRW shall 別コミットを作成しない。
+7. If 別コミットの作成に失敗したとき, then the BRW shall push と PR 作成に進まず、理由を表示する。
+
+### Requirement 3: PR 本文の雛形と記入指示を提供する
+
+**Objective:** As a 開発者, I want 人が読んで意味の分かる PR 本文を統一した形で書かせたい, so that 本文は機械的な生成でなく、書き手が内容を理解して記入した文章になる
+
+#### Acceptance Criteria
+1. When `brw pr-template` が実行されたとき, the BRW shall 本文の雛形と、各節に何をどう書くかの記入指示を出力する。
+2. The BRW shall 既定の雛形に、日本語で「概要」「変更内容」「検証」「作業外の変更」の 4 つの節を持たせる。
+3. Where リポジトリに PR 本文の雛形（`.github/PULL_REQUEST_TEMPLATE.md`）があるとき, the BRW shall その雛形を既定の雛形より優先して出力する。
+4. Where 宣言で本文の言語が指定されているとき, the BRW shall その言語の既定雛形と記入指示を出力する。
+5. When 雛形を出力するとき, the BRW shall 作業外の変更があれば、その一覧を「作業外の変更」の節へ差し込める形で含める。
+6. When 作業の検証の要約が記録されているとき, the BRW shall それを「検証」の節へ差し込める形で含める。検証が未通過として記録されているときは、未通過であることを明記できる形にする。
+7. The BRW shall 本文の記入そのものを行わず、記入指示は最も単価の低いエージェントにも渡せる、自己完結した短い指示として出力する。
+8. When `brw pr` が本文のファイルを受け取らずに実行されたとき, the BRW shall `brw pr-template` で雛形を得て記入するよう案内する。
+9. The BRW shall PR の本文ファイルを作業ツリーの外に置く運用を案内し、作業ツリーを汚さない。
+
+### Requirement 4: PR 作成と同時に作業場所を自動で片付ける
+
+**Objective:** As a 開発者, I want PR を作ったら作業場所が自動で片付いてほしい, so that 「片付けて」と指示せずに、セッションを続けて次の作業に進められる
+
+#### Acceptance Criteria
+1. When PR の作成が成功し、片付けが有効であるとき, the BRW shall その作業ブランチの worktree とローカルブランチを削除する。
+2. When 片付けが完了したとき, the BRW shall その作業の BRW の作業状態の記録も削除する。
+3. The BRW shall 片付けでリモートのブランチとプレビューを削除しない。
+4. If 作業ブランチにリモートへ push していない commit があるとき, then the BRW shall 片付けを行わず、残した理由を表示する。
+5. If worktree に未コミットの変更があるとき, then the BRW shall 片付けを行わず、残した理由を表示する。
+6. If 片付けが止まったとき, then the BRW shall PR が作成済みであることを示し、作業状態の記録を残して、同じ作業で片付けを再試行できるようにする。
+7. When 既存の PR を再利用して進んだ場合でも, the BRW shall 作成の成功と同じ条件で片付けを判定する。
+8. When 片付けが完了したとき, the BRW shall リポジトリ本体のパスと、次の作業を始める `brw create` の使い方を表示する。
+9. When 片付けが完了したとき, the BRW shall 作業場所が消えた後も、続く操作がリポジトリ本体で実行できる状態にする。
+10. If 片付けの途中で失敗したとき, then the BRW shall PR の作成結果を取り消さず、失敗した段階と再試行の方法を表示する。
+11. The BRW shall 片付けの削除を、worktree とローカルブランチの削除が成功した後にだけ作業状態の記録の削除へ進める。
+
+### Requirement 5: 片付けの設定と既定値
+
+**Objective:** As a リポジトリの管理者, I want 片付けを既定で有効にし、必要なら無効にできるようにしたい, so that 運用を統一しつつ、合わないリポジトリでは外せる
+
+#### Acceptance Criteria
+1. The BRW shall 宣言ファイルに、PR 作成後の片付けを有効にするか無効にするかの設定を持てるようにする。
+2. The BRW shall 設定が省略された宣言では片付けを有効として扱い、`false` を明示した場合だけ無効にする。
+3. When 導入手順（setup）が宣言ファイルを新規に作るとき, the BRW shall 片付けを有効にする既定値を書き込む。
+4. Where 宣言の既存の導入先で設定が省略されているとき, the BRW shall 次回の PR 作成から片付けを有効として扱う。
+5. Where 片付けが無効のとき, the BRW shall PR 作成後に何も削除せず、手順書の片付けの手順を案内する。
+6. If 設定に不正な値があるとき, then the BRW shall 宣言を不正として報告し、片付けを行わない。
+7. The BRW shall 本文の言語を宣言で指定でき、省略時は日本語とする。
+
+### Requirement 6: 他の仕組みを知らずに連携できる
+
+**Objective:** As a 将来の呼び出し側（cc-sdd-bootstrap など）, I want BRW の入口だけを呼んで PR を作らせたい, so that 互いの内部を知らなくても運用が成立する
+
+#### Acceptance Criteria
+1. The BRW shall PR の作成と本文の雛形の入口を、`brw pr` と `brw pr-template` の 2 つに限る。
+2. The BRW shall cc-sdd、kiro、`.kiro` 配下のファイルを前提にせず、参照しない。
+3. When 呼び出し側が直接 `gh pr create` を実行しようとしたとき, the BRW shall 呼び出し側が BRW を知らなくても `brw pr` へ誘導できる案内を返す。
+4. When 検証が失敗した状態で PR を作る運用を呼び出し側が選んだとき, the BRW shall 検証の未通過を記録し、PR の本文に反映できる。
+5. The BRW shall 利用者向けの資料に、本文の下書き生成から片付けまでの一連の手順を記載する。

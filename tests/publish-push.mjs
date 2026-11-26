@@ -94,7 +94,8 @@ export const runPublishPushChecks = async (eq) => {
       eq("enforcement/4.4 計画どおりの push が成功し、結果は success（自動の確認省略）", [x.ok, x.outcome, x.execution], [true, "success", "auto"]);
       eq("enforcement/4.4 push 後、遠隔の対象 ref が準備時の OID を指す（ls-remote 相当の読み取りで確認）", remoteRef(remote, "refs/heads/dev/foo"), head);
       const w = publish.readWork(dir, id).work;
-      eq("enforcement/4.4 push の成功を結果として記録し、作業の状態を pushed にする", [w.results.push, w.status], [{ outcome: "success", code: null }, "pushed"]);
+      eq("enforcement/4.4 push の成功を結果として記録し、作業の状態を pushed にする", [{ outcome: w.results.push.outcome, code: w.results.push.code }, w.status], [{ outcome: "success", code: null }, "pushed"]);
+      eq("brw-pr-handoff/4.4 push の成功時に、push 先のリモート名と公開した OID を公開記録として保存する", [w.results.push.remote, w.results.push.oid], ["origin", head]);
       eq("enforcement/4.4 操作の開始を記録し、開始の OID は準備時の OID と一致する", w.started?.push?.oid, head);
       eq("enforcement/4.4 状態ファイルに URL・資格情報を残さない", [stateText(dir).includes("github.com"), stateText(dir).includes("ghp_")], [false, false]);
     });

@@ -41,7 +41,23 @@ const pluginWith = (doc) => {
 
 export const runHookInstallChecks = async (eq) => {
   // ---- Claude プラグインの登録（hooks/hooks.json）----
-  eq("hook-install/6.3 同梱の hooks/hooks.json は Claude の 4 件の登録を満たす", checkClaudeHooks(root).status, "registered");
+  eq("hook-install/6.3 同梱の hooks/hooks.json は Claude の 5 件の登録（EnterWorktree を含む）を満たす", checkClaudeHooks(root).status, "registered");
+  {
+    // EnterWorktree の入口が欠けた導入は、対象外の入口を報告する（brw-branch-gate 6.1・6.2）。揃っていれば何も報告しない
+    const cmd = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/agent-hooks.mjs" claude PreToolUse';
+    const doc = JSON.parse(readFileSync(join(root, "hooks/hooks.json"), "utf8"));
+    const without = { ...doc, hooks: { ...doc.hooks, PreToolUse: doc.hooks.PreToolUse.filter((g) => g.matcher !== "EnterWorktree") } };
+    const p = pluginWith(without);
+    try {
+      const r = checkClaudeHooks(p.dir);
+      eq("brw-branch-gate/6.2 EnterWorktree の入口が欠けた導入は、対象外の入口を不足として報告する", [r.status, r.missing], ["missing", ["PreToolUse(EnterWorktree)"]]);
+      eq("brw-branch-gate/6.1 入口が揃っていれば不足は報告されない", checkClaudeHooks(root).missing, []);
+      eq("brw-branch-gate/6.1 同梱の hooks/hooks.json は Bash と EnterWorktree の入口を判定の対象にしている", [
+        doc.hooks.PreToolUse.some((g) => g.matcher === "Bash" && g.hooks[0].command === cmd),
+        doc.hooks.PreToolUse.some((g) => g.matcher === "EnterWorktree" && g.hooks[0].command === cmd),
+      ], [true, true]);
+    } finally { p.cleanup(); }
+  }
   {
     // 旧 brw.mjs hook が残っていると二重判定になるため、衝突として報告する
     const p = pluginWith({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/brw.mjs" hook' }] }] } });

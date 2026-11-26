@@ -12,7 +12,7 @@
 // PR 本文・資格情報は保存しない。保存するのは決まった項目だけで、自由文は秘密らしい値を伏せて長さを制限する。
 import { randomBytes, createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { classifyBranch, configMatchesHead, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
 import { classifyCommand } from "./operation-policy.mjs";
@@ -147,6 +147,35 @@ export function acquire(lockFile, waitMs) {
     } catch { /* 読めなければ次の周回で再試行 */ }
     if (Date.now() >= until) return null;
     sleep(20);
+  }
+}
+
+/**
+ * 状態ファイルを直接指して、この作業の記録だけを取り除く（worktree が消えた後でも使える）。
+ * 他の記録が 1 つでも残るときはファイルを残し、残らなければファイルを削除する。壊れた状態には触れない。
+ * @returns {{ok: true, removedFile: boolean} | {ok: false, error: {kind: string, message: string}}}
+ */
+export function removeWorkRecordAt(file, workId, { lockWaitMs = 3000 } = {}) {
+  const lock = `${file}.lock`;
+  if (!existsSync(file)) return { ok: true, removedFile: false };
+  if (!acquire(lock, lockWaitMs)) return fail("conflict", "別の処理が作業状態を更新中です。");
+  try {
+    const { state, error } = load(file);
+    if (error) return fail("conflict", error);
+    delete state.works[workId];
+    if (state.current === workId) state.current = null;
+    if (Object.keys(state.works).length > 0) {
+      save(file, state);
+      return { ok: true, removedFile: false };
+    }
+    rmSync(file, { force: true });
+    return { ok: true, removedFile: true };
+  } catch (e) {
+    return fail("conflict", `作業状態を削除できません: ${e.code ?? e.message}`);
+  } finally {
+    rmSync(lock, { force: true });
+    // 状態ファイルが無くなったときは、公開の実行ロックの残りも片付ける
+    if (!existsSync(file)) rmSync(`${file}.run.lock`, { force: true });
   }
 }
 
@@ -341,6 +370,12 @@ export function githubRepoOf(url) {
 }
 
 /** 作業ブランチの push 先リモート名（pushRemote → remote.pushDefault → 追跡先 → origin の順）。 */
+/** 本体（最初の worktree）のパス。確定できなければ null。 */
+export const worktreeMainOf = (cwd) => {
+  const out = git(cwd, "worktree", "list", "--porcelain");
+  return out?.match(/^worktree (.+)$/m)?.[1] ?? null;
+};
+
 export const remoteNameOf = (cwd, branch) => git(cwd, "config", `branch.${branch}.pushRemote`) || git(cwd, "config", "remote.pushDefault") || git(cwd, "config", `branch.${branch}.remote`) || "origin";
 
 /** 完了申告・検証・対象リポジトリの入力を検査する。Git の状態は見ない（作業の状態とともに後で確認する）。 */
@@ -557,7 +592,7 @@ export function issuePlan(cwd, workId, { repository, existing, lockWaitMs } = {}
     if (publication === "pr" && reuse === null) {
       if (!pushAvailable) excluded.push({ operation: "pr", code: "push-not-planned", approval: "notApplicable" });
       else {
-        const d = evaluateAll(classifyCommand(`gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${g.branch} --title brw`, cwd), restrictions);
+        const d = evaluateAll(classifyCommand(`gh pr create --repo ${repository.owner}/${repository.name} --base ${base} --head ${g.branch} --title brw`, cwd), restrictions, { origin: "brw-publish" });
         if (d.verdict === "eligibleForApproval") writes.push({ operation: "pr", base, head: g.branch, repositoryId: repository.id });
         else excluded.push({ operation: "pr", code: d.code, approval: d.approval });
       }
@@ -702,14 +737,15 @@ function finish(cwd, workId, { outcome, code, lockWaitMs }) {
 }
 
 /** 成功（遠隔の ref が準備時の OID を指す）を記録し、作業を pushed にする。記録できなかった場合は recorded: false で知らせる。 */
-function finishSuccess(cwd, workId, { execution, oid, lockWaitMs }) {
+function finishSuccess(cwd, workId, { execution, oid, remote, lockWaitMs }) {
   const code = execution === "auto" ? null : execution;
   // 結果の記録と「準備済み → pushed」の遷移を 1 回の状態ロックで行い、片方だけ残らないようにする
   const rec = update(cwd, (state) => {
     const w = state.works[workId];
     if (!w) return fail("invalidInput", `作業 ${workId} はこの worktree に記録がありません。`);
     w.results = w.results && typeof w.results === "object" ? w.results : {};
-    w.results.push = { outcome: "success", code };
+    // 公開記録: push 先のリモート名と公開した OID（片付けが遠隔の先端を確かめるために使う）
+    w.results.push = { outcome: "success", code, remote, oid };
     if (w.status === "ready") w.status = "pushed";
     w.updatedAt = now();
     return { ok: true, work: w };
@@ -760,7 +796,7 @@ function pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWait
   const { head, branch } = v.g;
   const before = remoteOidOf(cwd, pre.remote, branch);
   // 既に同じ OID が遠隔にあれば push は要らない（禁止の作業でも、PR 側の処理は進めてよい）
-  if (!before.error && before.oid === head) return finishSuccess(cwd, workId, { execution: "already-published", oid: head, lockWaitMs });
+  if (!before.error && before.oid === head) return finishSuccess(cwd, workId, { execution: "already-published", oid: head, remote: pre.remote, lockWaitMs });
   if (d.kind === "prohibited") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
   if (d.kind === "needsApproval") return finish(cwd, workId, { ...outcomeOf(d), lockWaitMs });
   if (before.error) return finish(cwd, workId, { outcome: "failed", code: "remote-unreadable", lockWaitMs });
@@ -798,7 +834,7 @@ function pushLocked(cwd, file, workId, { planId, repository, confirmed, lockWait
 
   // (5) 遠隔の ref を読んで照合する（応答が無くても、遠隔が同じ OID なら成功として扱う）
   const after = remoteOidOf(cwd, started.remote, branch);
-  if (!after.error && after.oid === pushHead) return finishSuccess(cwd, workId, { execution: started.proceed.execution, oid: pushHead, lockWaitMs });
+  if (!after.error && after.oid === pushHead) return finishSuccess(cwd, workId, { execution: started.proceed.execution, oid: pushHead, remote: started.remote, lockWaitMs });
   // 分岐（non-fast-forward・fetch first）と、遠隔のフック・ルールセットによる拒否を区別する
   const text = String(p.stderr ?? "");
   const code = after.error ? "remote-unreadable"

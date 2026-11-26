@@ -420,8 +420,9 @@ const SWITCH_VALUE = ["-c", "-C", "--create", "--force-create", "--orphan", "--c
 const BRANCH_LIST_FLAGS = ["-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort", "-i", "--ignore-case", "--column", "--no-column"];
 
 // 現在のブランチを変える・作る操作の解釈。戻り値: { op fields } か null（照会）。
+// start: 作成時の開始点（無ければ null）。branchOnly: `git branch <名前>` の形（切り替えない作成）
 function createOp(sub, args, cwd, add) {
-  const out = { action: "create", via: sub, branch: null };
+  const out = { action: "create", via: sub, branch: null, start: null, branchOnly: false };
   if (sub === "switch" || sub === "checkout") {
     const createFlag = ["-c", "-C", "--create", "--force-create", "-b", "-B", "--orphan"];
     const idx = args.findIndex((a) => createFlag.includes(a) || /^--(create|force-create|orphan)=/.test(a));
@@ -431,6 +432,9 @@ function createOp(sub, args, cwd, add) {
       const a = args[idx];
       out.branch = a.includes("=") ? a.slice(a.indexOf("=") + 1) : args[idx + 1];
       out.action = "create";
+      // 作成フラグとその値（`-c <名前>` の形の名前）を除いた位置引数の先頭が開始点。前後どちらに置かれても拾う
+      const rest = a.includes("=") ? args.filter((_, i) => i !== idx) : args.filter((_, i) => i !== idx && i !== idx + 1);
+      out.start = positionals(rest, SWITCH_VALUE)[0] ?? null;
       if (!out.branch) add("作成するブランチ名を確定できません。");
       return out;
     }
@@ -453,7 +457,8 @@ function createOp(sub, args, cwd, add) {
     // --track / -t は、リモート追跡ブランチから同名のローカルブランチを作る
     if (hasFlag(args, "-t", "--track")) {
       const rem = remoteList(cwd).filter((r) => target.startsWith(`${r}/`) && refExists(cwd, `refs/remotes/${target}`)).sort((a, b) => b.length - a.length)[0];
-      if (rem) { out.action = "create"; out.branch = target.slice(rem.length + 1); return out; }
+      // 開始点は明示された追跡元（target）をそのまま入れる
+      if (rem) { out.action = "create"; out.branch = target.slice(rem.length + 1); out.start = target; return out; }
       add(`--track の追跡元 '${target}' がリモート追跡ブランチと確認できません。`);
       out.branch = target;
       return out;
@@ -483,6 +488,7 @@ function createOp(sub, args, cwd, add) {
     }
     out.branch = rename || copy ? pos[1] ?? pos[0] : pos[0];
     out.action = rename ? "rename" : copy ? "copy" : "create";
+    if (out.action === "create") { out.start = pos[1] ?? null; out.branchOnly = true; }
     return out;
   }
   if (sub === "worktree") {
@@ -493,7 +499,7 @@ function createOp(sub, args, cwd, add) {
     const path = pos[0];
     if (!path) { add("worktree の作成先を確定できません。"); return out; }
     out.path = resolvePath(cwd, path);
-    if (bIdx >= 0) { out.branch = a[bIdx + 1]; out.action = "create"; }
+    if (bIdx >= 0) { out.branch = a[bIdx + 1]; out.action = "create"; out.start = pos[1] ?? null; }
     else if (hasFlag(a, "--detach")) return { detach: true, path: out.path };
     else if (pos[1]) {
       if (localBranchExists(cwd, pos[1])) { out.branch = pos[1]; out.action = "resume"; }
@@ -807,7 +813,7 @@ function gitOp(args, ctx, assigns, envTarget) {
     op = makeOp("merge", dir, unresolved, { branch, sources, via: sub, mode });
   } else if (["switch", "checkout", "branch", "worktree"].includes(sub)) {
     if (dynArgs) add(`${sub} の引数に展開・ワイルドカードが含まれ、対象を確定できません。`);
-    const c = dynArgs ? { action: "create", via: sub, branch: null } : createOp(sub, a, dir, add);
+    const c = dynArgs ? { action: "create", via: sub, branch: null, start: null, branchOnly: false } : createOp(sub, a, dir, add);
     if (c === null) op = makeOp("query", dir, unresolved, { subcommand: sub });
     else if (c.detach || c.configChange) {
       if (c.configChange || c.detach) ctx.dirty = true;

@@ -2,8 +2,11 @@
 // branch-release-workflow の CLI。サブコマンド:
 //   hook                       旧経路の PreToolUse フック（手動実行用。標準入力の JSON を判定して deny/ask/allow を返す）。
 //                              現行のフック登録は agent-hooks.mjs（Claude Code・Codex 共通）が行い、このサブコマンドは登録しない
-//   create <名前> [--base b] [--branch-only]   作業ブランチ（と worktree）を命名規則に従って作成
+//   create <名前> [--base b] [--branch-only|--carry]   作業ブランチ（と worktree）を命名規則に従って作成（--carry は追跡済みの未コミットの変更も新しい worktree へ移す）
 //   finish [ブランチ] | --merged  切り出し元へ取り込まれた（保護ブランチへの PR がある）作業ブランチの worktree を片付ける
+//   pr-template                PR 本文の雛形（本文置き場のファイル）と記入指示を出す。本文は、書き手が記入する
+//   pr --completion <申告> --verification <要約> [--title <タイトル>] [--body-file <ファイル>] [--failed] [--target <取り込み先>]
+//                              PR 作成の入口。作業外の変更の別コミット・準備・計画・公開・片付け（宣言で有効なとき）を順に行う
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
 //   work start                 変更作業を始め、作業 ID を 1 つ出力する（調査だけの依頼では使わない）
@@ -32,10 +35,18 @@ import {
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
+import { denyOfCommand } from "./agent-hooks.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
+import { carryChanges } from "./carry.mjs";
+import { finishBlocker, recordedState, removeBranch } from "./cleanup.mjs";
+import { removeWorkRecordAt } from "./publish.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
+import { runPr } from "./pr-flow.mjs";
+import { bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { previewTidy } from "./tidy.mjs";
+import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
@@ -365,17 +376,63 @@ function branchPrefix(config) {
   return g ? g.replace(/\*+$/, "") : null;
 }
 
+// 作成の途中で失敗したときの後始末。作りかけの worktree とブランチを消す（無いものは無視する）
+// 消すのは、このブランチ用に登録された worktree だけ（ブランチは作成前に存在しないと確かめてある。既存のほかの worktree には触れない）
+function cleanupCreated(main, wt, branch) {
+  if (worktrees(main).some((w) => w.path === wt && w.branch === branch)) git(main, "worktree", "remove", "--force", wt);
+  git(main, "branch", "-D", branch);
+}
+
+// worktree を作った後の失敗の巻き戻し。宣言ファイルを worktree へ移していれば、先に元の場所へ戻す。
+// 戻せたときだけ worktree とブランチを消す（未追跡の宣言ファイルを失わない）。戻せないときは worktree を残して手順を示す。常に終了する
+function rollbackCreate({ root, main, wt, branch, rel, moved, why }) {
+  if (moved) {
+    try {
+      // 元の場所に別のファイルができていれば上書きしない（失わないよう、worktree を残して手動の復旧を案内する）
+      if (existsSync(join(root, rel))) throw new Error(`${join(root, rel)} に別のファイルが既にあります`);
+      renameSync(join(wt, rel), join(root, rel));
+    } catch (error) {
+      fail(`${why}。さらに宣言ファイルを元の場所へ戻せなかったため、worktree は削除していません。\n  ${join(wt, rel)} を ${join(root, rel)} へ手で戻してから、\`git worktree remove --force ${wt}\` と \`git branch -D ${branch}\` で片付け、もう一度 brw create を実行してください。（${error.message}）`);
+    }
+  }
+  cleanupCreated(main, wt, branch);
+  fail(`${why}。作成した worktree とブランチは残していません。原因を直して、もう一度 brw create を実行してください。`);
+}
+
+// --carry: 元の作業ツリーの追跡済みの未コミットの変更を新しい worktree へ移し、結果を表示する。失敗は巻き戻す（元は変わらない）
+function carryInto({ root, main, wt, branch, start, rel, moved }) {
+  const startOid = git(root, "rev-parse", "--verify", "--quiet", `${start}^{commit}`);
+  let r;
+  try {
+    r = startOid ? carryChanges({ source: root, worktree: wt, startOid, branch, exclude: moved ? [rel] : [] }) : { kind: "failed", reason: "開始点のコミットを確認できません。" };
+  } catch (error) {
+    r = { kind: "failed", reason: `変更を移す処理で例外が起きました: ${error.message}` };
+  }
+  if (r.kind === "failed") rollbackCreate({ root, main, wt, branch, rel, moved, why: `変更を移せませんでした: ${r.reason}（元の作業ツリーは変更していません）` });
+  const list = (items) => items.map((f) => `    - ${f}`).join("\n");
+  if (r.kind === "none") console.log("移す未コミットの変更（追跡済みのファイル）はありませんでした。");
+  else {
+    console.log(`未コミットの変更を新しい worktree へ移しました（${r.files.length} 件）。ステージ済みの変更はステージ済みのまま移ります。`);
+    if (r.kind === "keptBoth")
+      console.log(`注意: 元の作業ツリーで内容が変わっていた次のファイルは、元から取り除いていません（元にも残っています）:\n${list(r.kept)}\n取り除いたファイル:\n${list(r.removed)}`);
+    console.log(`移した内容は、次のコマンドで再び取り出せます（作業を確認した後、brw finish が参照を削除します）: git stash apply ${r.recoveryRef}`);
+  }
+  if (r.skipped.length > 0) console.log(`未追跡のファイルは移していません（元の作業ツリーに残っています）:\n${list(r.skipped)}`);
+}
+
 function create(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
-  let name, base = config.baseBranch, branchOnly = false;
+  let name, base = config.baseBranch, branchOnly = false, carry = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--base") base = args[++i] ?? fail("--base に値が必要です。", 2);
     else if (args[i] === "--branch-only") branchOnly = true;
+    else if (args[i] === "--carry") carry = true;
     else if (!name) name = args[i];
     else fail("引数が不正です。", 2);
   }
-  if (!name) fail("使い方: create <名前> [--base <ブランチ>] [--branch-only]", 2);
+  if (!name) fail("使い方: create <名前> [--base <ブランチ>] [--branch-only | --carry]", 2);
+  if (carry && branchOnly) fail("--carry と --branch-only は同時に使えません（--carry は新しい worktree へ変更を移すため、worktree を作る形だけです）。", 2);
   const prefix = branchPrefix(config);
   const branch = matchesAny(config.workBranches, name) ? name : prefix ? prefix + name : fail(`workBranches（${config.workBranches.join(", ")}）に新規作成できるパターン（xxx/*）がありません。`);
   // 作れるのは共通判定で開発ブランチと分類されるものだけ（保護・分岐元・命名規則違反は拒否）
@@ -399,16 +456,33 @@ function create(args) {
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
     if (unregistered) console.log(`注意: ${rel} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
-    const wt = join(root, ".claude/worktrees", aliasOf(branch));
-    mkdirSync(join(root, ".claude/worktrees"), { recursive: true });
-    execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
-    console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
-    hooksForWorktree(worktrees(root)[0]?.path ?? root, wt);
-    if (unregistered) {
-      mkdirSync(dirname(join(wt, rel)), { recursive: true });
-      renameSync(join(root, rel), join(wt, rel));
-      console.log(`${rel} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+    // 配置先は常にリポジトリ本体の .claude/worktrees/（連携 worktree から実行しても入れ子にしない）
+    const main = worktrees(root)[0]?.path ?? root;
+    const wt = join(main, ".claude/worktrees", aliasOf(branch));
+    if (existsSync(wt) || worktrees(root).some((w) => w.path === wt))
+      fail(`配置先 ${wt} が既に存在する、または worktree として登録されているため、worktree を作りません（既存のものは変更していません）。`);
+    mkdirSync(join(main, ".claude/worktrees"), { recursive: true });
+    try {
+      execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
+    } catch (error) {
+      // 作成の途中で失敗したときは、作りかけの worktree とブランチを残さない
+      cleanupCreated(main, wt, branch);
+      fail(`worktree の作成に失敗しました（${error.message.split("\n")[0]}）。作りかけのものは残していません。原因を直して、もう一度 brw create を実行してください。`);
     }
+    console.log(`ブランチと worktree を作成しました: ${branch}\n  worktree: ${wt}`);
+    hooksForWorktree(main, wt);
+    let moved = false;
+    if (unregistered) {
+      try {
+        mkdirSync(dirname(join(wt, rel)), { recursive: true });
+        renameSync(join(root, rel), join(wt, rel));
+        moved = true;
+        console.log(`${rel} は ${start} に登録されていないため、worktree へ移しました。この作業ブランチで commit して登録してください。`);
+      } catch (error) {
+        rollbackCreate({ root, main, wt, branch, rel, moved: false, why: `宣言ファイルを worktree へ移せませんでした（${error.message}）` });
+      }
+    }
+    if (carry) carryInto({ root, main, wt, branch, start, rel, moved });
   }
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
   const url = previewUrl(config, branch);
@@ -431,69 +505,6 @@ function hooksForWorktree(parent, wt) {
 
 // 作業ブランチの切り出し元。create が記録したもの、無ければ宣言の baseBranch
 const baseOf = branchBase;
-
-// 作業ブランチが片付けてよい状態か。切り出し元へ取り込まれた、または保護ブランチへの PR がある、のどれかを満たすと done。
-// 取り込みは commit の祖先関係のほか、squash merge を見込んで「ブランチで変えたファイルが切り出し元で同じ内容」でも判定する
-// 取り込み先の ref（origin の追跡ブランチがあればそれ、無ければローカル）
-const targetOf = (repo, base) => (git(repo, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`) !== null ? `origin/${base}` : base);
-
-// 遠隔の同名ブランチの状態。present（存在し、追跡ブランチを更新済み）・absent（存在しない）・unknown（確かめられない）
-function remoteState(cwd, branch) {
-  const r = spawnSync("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  if (r.status === 2) return { state: "absent" };
-  if (r.status !== 0) return { state: "unknown", why: "リモートへの照会が失敗しました" };
-  if (git(cwd, "fetch", "origin", branch, "--quiet") === null) return { state: "unknown", why: "リモートからの取得が失敗しました" };
-  return { state: "present" };
-}
-
-function landedState(repo, config, branch, base) {
-  git(repo, "fetch", "origin", base, "--quiet");
-  const target = targetOf(repo, base);
-  if (git(repo, "merge-base", "--is-ancestor", `refs/heads/${branch}`, target) !== null) return { done: true, how: `${target} に取り込まれています` };
-  const mb = git(repo, "merge-base", `refs/heads/${branch}`, target);
-  const files = mb ? (git(repo, "diff", "--name-only", mb, `refs/heads/${branch}`) ?? "").split("\n").filter(Boolean) : [];
-  if (mb && files.length && git(repo, "diff", "--quiet", `refs/heads/${branch}`, target, "--", ...files) !== null)
-    return { done: true, how: `変更が ${target} に取り込まれています（squash merge など）` };
-  const gh = spawnSync("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "baseRefName,state,url", "--limit", "20"], { cwd: repo, encoding: "utf8" });
-  if (gh.status === 0) {
-    let prs = [];
-    try {
-      prs = JSON.parse(gh.stdout);
-    } catch {}
-    const merged = prs.find((p) => p.state === "MERGED" && p.baseRefName === base);
-    if (merged) return { done: true, how: `${base} への PR がマージされています（${merged.url}）` };
-    const toProtected = prs.find((p) => p.state !== "CLOSED" && matchesAny(config.protectedBranches ?? [], p.baseRefName));
-    if (toProtected) return { done: true, how: `保護ブランチ ${toProtected.baseRefName} への PR があります（${toProtected.url}）` };
-  }
-  return { done: false, how: `${base} にまだ取り込まれておらず、保護ブランチへの PR も見つかりません${gh.status === 0 ? "" : "（gh が使えないため PR は確認していません）"}` };
-}
-
-// 片付けの可否を確かめる。片付けられないときは理由を返す
-function finishBlocker(main, others, config, branch, base) {
-  if (classifyBranch(config, branch) !== "development") return `'${branch}' は作業ブランチではありません。`;
-  if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) === null) return `ローカルに ${branch} がありません。`;
-  const wt = others.find((w) => w.branch === branch);
-  if (wt && git(wt.path, "status", "--porcelain") !== "") return `worktree ${wt.path} に commit していない変更があります。`;
-  if (main.branch === branch) return `本体の作業ツリーが ${branch} を使っています。`;
-  const landed = landedState(main.path, config, branch, base);
-  if (!landed.done) return landed.how;
-  // 取り込み後に積んだ commit が手元にしか無ければ消さない。遠隔の状態を確かめられないときも残す
-  const rs = remoteState(main.path, branch);
-  if (rs.state === "unknown") return `遠隔（origin）の状態を確認できないため残します（${rs.why}）。`;
-  // 遠隔に無いのは、squash マージ後にリモートのブランチが削除された場合にも起きる。取り込みの判定（landed）は上で満たしているので片付けてよい
-  if (rs.state === "absent") return null;
-  const ahead = git(main.path, "rev-list", "--count", `origin/${branch}..refs/heads/${branch}`);
-  if (ahead !== "0") return `${branch} に push していない commit があります（${ahead ?? "不明"} 件）。`;
-  return null;
-}
-
-function removeBranch(main, others, branch) {
-  const wt = others.find((w) => w.branch === branch);
-  // 変更が無いことは確かめてある。submodule を含む worktree は --force が無いと消せないため付ける
-  if (wt) execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: main.path, stdio: "inherit" });
-  execFileSync("git", ["branch", "-D", branch], { cwd: main.path, stdio: "inherit" });
-  return wt;
-}
 
 // 切り出し元へ取り込まれた（または保護ブランチへの PR を作った）作業ブランチの worktree とローカルブランチを消す。
 // --merged なら、そうなっている作業ブランチをまとめて片付ける。自分の worktree の中からも実行できるよう、git の操作は本体の作業ツリーで行う
@@ -523,8 +534,14 @@ function finish(args) {
   const base = baseArg ?? baseOf(main.path, config, branch);
   const why = finishBlocker(main, others, config, branch, base);
   if (why) fail(`${why}\n  ${branch} は片付けません。worktree は、切り出し元（${base}）へのマージか、保護ブランチへの PR 作成の後に片付けます。`);
+  const recorded = recordedState(main.path, branch); // ブランチを消すと設定も消えるので、先に読む
   const wt = removeBranch(main, others, branch);
   console.log(`片付けました: ${branch}${wt ? `（worktree: ${wt.path}）` : ""}`);
+  // 自動の片付けが途中で止まっていた作業の状態も、同じ手順で取り除く
+  if (recorded) {
+    const r = removeWorkRecordAt(recorded.file, recorded.workId);
+    console.log(r.ok ? "作業状態の記録も取り除きました。" : `注意: 作業状態の記録を取り除けませんでした（${r.error.message}）: ${recorded.file}`);
+  }
   console.log(`同じブランチで続けるときは \`brw resume ${branch}\`、新しい作業は \`brw create <名前>\` で、リモートから取得し直して作ります。`);
 }
 
@@ -608,6 +625,33 @@ function resume(args) {
   hooksForWorktree(main.path, wt);
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
+}
+
+// PR 本文の雛形を本文置き場に書き出し、記入指示を出力する（記入そのものは書き手が行う。書き終えた本文は上書きしない）
+function prTemplate(args) {
+  if (args.length > 0) fail("使い方: brw pr-template（引数はありません）", 2);
+  const cwd = process.cwd();
+  const root = repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
+  const config = need(root);
+  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチの worktree で実行してください。");
+  if (classifyBranch(config, branch) !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。`);
+  const main = worktrees(cwd)[0]?.path ?? root;
+  const base = branchBase(cwd, config, branch);
+  const language = config.pullRequest.language;
+  // 検証の要約が記録されていれば差し込む（準備の前は無い）
+  const cur = publishState.currentWork(cwd);
+  const ver = cur.ok ? cur.work?.ready?.verification : null;
+  const planned = previewTidy(cwd);
+  if (planned?.secretLike.length) fail(`秘密情報らしい名前のファイルが未コミットの変更に含まれます: ${planned.secretLike.join(", ")}。コミットしないなら .gitignore に追加するか削除してください（含まれたままでは brw pr が止まります）。`);
+  const path = bodyPathOf(main, branch);
+  const r = prepareBody(path, { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false });
+  if (r.filled) {
+    console.log(`本文は記入済みです（上書きしません）: ${path}`);
+    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
+    return;
+  }
+  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
+  console.log(instruction({ bodyPath: path, base, language }));
 }
 
 function url(args) {
@@ -707,9 +751,19 @@ function renderWrangler(args) {
   process.exit(deployCf.writeAndHook(root, config, target, r));
 }
 
+// 手順書の経路で、共通の判定の拒否を必ず止める操作の種類: ブランチの作成・再開（create）と PR 作成（pr-create）
+const GUARD_OP_KINDS = ["create", "pr-create"];
+
 // Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
 function guard(args) {
   if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド"', 2);
+  // 作成・再開・PR 作成を含むコマンドは、共通の判定（フックと同じ）が拒否したら、拒否の code によらず止める。
+  // それ以外（commit・push だけ）は従来の判定へ進み、出力と終了コードを変えない
+  const denial = denyOfCommand(args[0], process.cwd());
+  if (denial && denial.kinds.some((k) => GUARD_OP_KINDS.includes(k))) {
+    console.log(`[deny] ${denial.reason}`);
+    process.exit(1);
+  }
   const result = judgeCommand(args[0], process.cwd());
   console.log(`[${result.decision}] ${result.reason ?? "ブランチ規則に適合しています。"}`);
   if (result.decision !== "allow") process.exit(1);
@@ -720,7 +774,8 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === realpathSyn
 if (isMain) {
   const [sub, ...rest] = process.argv.slice(2);
   const cmds = {
-    guard, hook, create, finish, resume, merge, url, "gen-workflow": genWorkflow,
+    guard, hook, create, finish, resume, merge, url, "pr-template": prTemplate,
+    pr: async (a) => { process.exitCode = await runPr(a); }, "gen-workflow": genWorkflow,
     // 導入・移行と状態検査（7.3）。終了コードは各関数が返す
     check: async (a) => { process.exitCode = await check(a); },
     setup: async (a) => { process.exitCode = await runSetup(a); }, cleanup, "wrangler-config": wranglerConfig, "render-wrangler": renderWrangler,

@@ -62,6 +62,31 @@ export const runEnforcementChecks = async (eq) => {
 
   // ---- 作成・再開 ----
   eq("enforcement/1.2 ブランチの作成を分類する", ["git switch -c dev/n", "git checkout -b dev/n", "git branch dev/n", "git switch --create dev/n main", "git checkout --orphan dev/n"].map((x) => [first(x).kind, first(x).action, first(x).branch]), Array(5).fill(["create", "create", "dev/n"]));
+  // 開始点（start）と「切り替えない作成」（branchOnly）を分類に持たせる。判定の挙動は変えない
+  const startCases = [
+    ["git switch -c dev/n origin/develop", "origin/develop", false],
+    ["git switch -c dev/n", null, false],
+    ["git switch --create=dev/n main", "main", false],
+    ["git switch -c dev/n --track origin/develop", "origin/develop", false],
+    ["git checkout -b dev/n develop", "develop", false],
+    ["git checkout -b dev/n", null, false],
+    ["git branch dev/n", null, true],
+    ["git branch dev/n develop", "develop", true],
+    ["git worktree add ../w -b dev/n", null, false],
+    ["git worktree add ../w -b dev/n develop", "develop", false],
+    ["git switch dev/other", null, false],
+    // 作成フラグより前に開始点がある形（レビュー指摘 1）
+    ["git switch main -c dev/n", "main", false],
+    ["git checkout main -b dev/n", "main", false],
+    ["git switch main --create=dev/n", "main", false],
+    ["git switch --conflict merge -c dev/n", null, false],
+    ["git switch -c dev/n --conflict merge", null, false],
+    // 追跡ブランチの作成では、明示された追跡元を開始点にする（レビュー指摘 2）
+    ["git switch --track origin/main", "origin/main", false],
+    ["git checkout --track origin/main", "origin/main", false],
+    ["git checkout -t origin/main", "origin/main", false],
+  ];
+  eq("enforcement/1.1 作成の開始点と切り替えない作成を分類に持たせる", startCases.map(([x]) => [first(x).start, first(x).branchOnly]), startCases.map(([, s, b]) => [s, b]));
   eq("enforcement/1.2 既存ブランチへの切り替えは再開として分類する", ["git switch dev/other", "git checkout dev/other"].map((x) => [first(x).kind, first(x).action, first(x).branch]), Array(2).fill(["create", "resume", "dev/other"]));
   eq("enforcement/1.2 worktree の追加を分類する", [first("git worktree add ../w -b dev/n").branch, first("git worktree add ../w -b dev/n").action, first("git worktree add ../x dev/other").action, first("git worktree add ../x dev/other").branch], ["dev/n", "create", "resume", "dev/other"]);
   eq("enforcement/1.2 ブランチ名の変更とコピーも作成として扱う", [first("git branch -m dev/new").action, first("git branch -m dev/old dev/new").branch], ["rename", "dev/new"]);
