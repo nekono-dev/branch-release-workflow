@@ -30,7 +30,7 @@ export const runDecisionChecks = async (eq) => {
   const on = (branch, fn) => { gitOut(d, "checkout", "-q", branch); try { return fn(); } finally { gitOut(d, "checkout", "-q", "dev/foo"); } };
 
   // ---- 1.2 作成・再開は BRW の手順を経る ----
-  eq("enforcement/1.2 ブランチの作成は拒否し、BRW の手順を示す", ["git switch -c dev/n", "git checkout -b dev/n", "git branch dev/n", "git worktree add ../w -b dev/n"].map((x) => [ev(x).verdict, ev(x).code, /brw create/.test(ev(x).alternative)]), Array(4).fill(["deny", "branch-create", true]));
+  eq("enforcement/1.2 ブランチの作成は拒否し、BRW の手順を示す", ["git switch -c dev/n", "git checkout -b dev/n", "git branch dev/n", "git worktree add ../w -b dev/n"].map((x) => [ev(x).verdict, ev(x).code, /brw\.mjs.? create/.test(ev(x).alternative)]), Array(4).fill(["deny", "branch-create", true]));
   eq("enforcement/1.2 開発ブランチ・宣言外ブランチの再開は拒否し、brw resume を示す", ["git switch dev/other", "git checkout dev/other", "git worktree add ../x dev/other", "git switch other/z"].map((x) => [ev(x).verdict, ev(x).code, /brw resume/.test(ev(x).alternative)]), Array(4).fill(["deny", "branch-resume", true]));
   eq("enforcement/1.2 名前の変更と gh pr checkout も作成として拒否する", [ev("git branch -m dev/new").code, ev("gh pr checkout 5 -b dev/pr5").code], ["branch-create", "branch-create"]);
   eq("enforcement/1.2 保護対象・恒常的な分岐元への切り替えは適合（通常のホスト承認に委ねる）", ["git switch main", "git switch develop"].map((x) => sig(ev(x))), Array(2).fill(["pass", "compliant", "normal", "branch-resume-protected"]));

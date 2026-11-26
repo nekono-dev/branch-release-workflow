@@ -15,6 +15,7 @@
 //   code         判定理由の識別子（ホスト間で同じ操作の判定を比べるときの主な手がかり）
 //   reason       人に見せる理由。reasons は確定できなかった理由などの内訳。alternative は代わりに使える BRW の手順
 //   targets・facts  判定に使った対象のブランチ名と、その分類
+import { BRW_RUN } from "./brw-cmd.mjs";
 import { autoApproveOf, classifyBranch, configMatchesHead, loadConfig } from "./lib.mjs";
 
 const CLASS_LABEL = {
@@ -26,10 +27,10 @@ const CLASS_LABEL = {
   other: "ブランチ以外の ref",
 };
 
-const ALT_CREATE = "ブランチや worktree は `brw create <名前>` で作成してください（既存のブランチは `brw resume <名前>`）。";
-const ALT_RESUME = "既存の開発ブランチは `brw resume <名前>` で再開してください。";
-const ALT_MERGE = "開発ブランチ間の取り込みは PR を作らず、ローカルで `brw merge <取り込み元>` を使ってください。";
-const ALT_PR_FLOW = "PR の作成は `brw pr-template` で本文の下書きを用意し、本文を書いたうえで `brw pr` を実行してください（`gh pr create`・GitHub の API・MCP による直接の作成は使えません）。";
+const ALT_CREATE = `ブランチや worktree は \`${BRW_RUN} create <名前>\` で作成してください（既存のブランチは \`${BRW_RUN} resume <名前>\`）。`;
+const ALT_RESUME = `既存の開発ブランチは \`${BRW_RUN} resume <名前>\` で再開してください。`;
+const ALT_MERGE = `開発ブランチ間の取り込みは PR を作らず、ローカルで \`${BRW_RUN} merge <取り込み元>\` を使ってください。`;
+const ALT_PR_FLOW = `PR の作成は \`${BRW_RUN} pr-template\` で本文の下書きを用意し、本文を書いたうえで \`${BRW_RUN} pr\` を実行してください（\`gh pr create\`・GitHub の API・MCP による直接の作成は使えません）。`;
 const ALT_PR = "保護対象への反映は、開発ブランチから分岐元へ PR を作成し、GitHub 上でリポジトリの条件を満たす利用者が squash マージしてください。";
 
 function decide(op, fields) {
