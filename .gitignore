@@ -1,5 +1,8 @@
-# >>> cc-sdd-bootstrap（この区画は cc-sdd-bootstrap が管理する）
+# >>> cc-sdd-bootstrap
 .claude/skills/kiro-*/
+.agents/skills/kiro-*/
 .kiro/settings/
+/CLAUDE.md
+/AGENTS.md
 /.cache/
 # <<< cc-sdd-bootstrap

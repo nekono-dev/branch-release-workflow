@@ -10,6 +10,7 @@
 // 更新はロックを取り、同じ場所の一時ファイルへ書いてから置き換える（読む側が書きかけを見ない）。
 // 同時に更新された・壊れている・読めない場合は安全側に倒す（新しい作業は始めず、禁止は維持されたものとして扱う）。
 // PR 本文・資格情報は保存しない。保存するのは決まった項目だけで、自由文は秘密らしい値を伏せて長さを制限する。
+import { githubRepoOf, unknownDestinationText } from "./remote-url.mjs";
 import { randomBytes, createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
@@ -359,15 +360,9 @@ export function setStatus(cwd, workId, status, { lockWaitMs } = {}) {
 /** 判別用の code を持つ失敗の結果。kind は invalidInput（入力・宛先の不備）か conflict（状態・Git の状態との食い違い）。 */
 export const failC = (kind, code, message) => ({ ok: false, error: { kind, code, message } });
 
-// GitHub のリポジトリを指す push 先の URL（https・ssh・scp 形式）。認証情報付きの URL は読まない（宛先不明）
-const GITHUB_REPO = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
+// リモートの URL の読み取りは remote-url.mjs に一本化している（呼び出し側の互換のため再エクスポートする）
+export { githubRepoOf };
 const NAME_PART = /^[A-Za-z0-9_.-]{1,100}$/;
-
-/** リモートの URL から GitHub の所有者・リポジトリ名を読む。読めなければ null（宛先不明として扱う）。 */
-export function githubRepoOf(url) {
-  const m = typeof url === "string" ? url.trim().match(GITHUB_REPO) : null;
-  return m ? { owner: m[1], name: m[2] } : null;
-}
 
 /** 作業ブランチの push 先リモート名（pushRemote → remote.pushDefault → 追跡先 → origin の順）。 */
 /** 本体（最初の worktree）のパス。確定できなければ null。 */
@@ -429,8 +424,9 @@ export function markReady(cwd, workId, input = {}, { lockWaitMs } = {}) {
 
     // push 先: push 用のリモート（無ければ既定のリモート）の URL が、指定の GitHub リポジトリを指していることを確認する
     const remote = remoteNameOf(cwd, branch);
-    const repo = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
-    if (!repo) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+    const url = git(cwd, "remote", "get-url", "--push", remote);
+    const repo = githubRepoOf(url);
+    if (!repo) return failC("invalidInput", "destination-unknown", unknownDestinationText(remote, url));
     const want = input.repository;
     if (repo.owner.toLowerCase() !== want.owner.toLowerCase() || repo.name.toLowerCase() !== want.name.toLowerCase())
       return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
@@ -548,8 +544,9 @@ export function issuePlan(cwd, workId, { repository, existing, lockWaitMs } = {}
 
     // push 先: GitHub の同じリポジトリを指していることを確認する（読み取りのみ）
     const remote = remoteNameOf(cwd, g.branch);
-    const dest = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
-    if (!dest || !SAFE_REMOTE_NAME.test(remote)) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+    const destUrl = git(cwd, "remote", "get-url", "--push", remote);
+    const dest = githubRepoOf(destUrl);
+    if (!dest || !SAFE_REMOTE_NAME.test(remote)) return failC("invalidInput", "destination-unknown", unknownDestinationText(remote, destUrl));
     if (dest.owner.toLowerCase() !== repository.owner.toLowerCase() || dest.name.toLowerCase() !== repository.name.toLowerCase())
       return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
 
@@ -687,8 +684,9 @@ export function pushPreflight(cwd, g, w, repository) {
     return failC("invalidInput", "name-unsafe", "リモート名またはブランチ名を安全に確認できないため、push しません。");
   if (w.ready.repositoryId !== repository.id) return failC("invalidInput", "destination-mismatch", "準備時の対象リポジトリ ID と一致しません。");
   // push 先は Git が実際に使う URL（insteadOf の展開後）で確認する
-  const dest = githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
-  if (!dest) return failC("invalidInput", "destination-unknown", `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。`);
+  const destUrl = git(cwd, "remote", "get-url", "--push", remote);
+  const dest = githubRepoOf(destUrl);
+  if (!dest) return failC("invalidInput", "destination-unknown", unknownDestinationText(remote, destUrl));
   if (dest.owner.toLowerCase() !== repository.owner.toLowerCase() || dest.name.toLowerCase() !== repository.name.toLowerCase())
     return failC("invalidInput", "destination-mismatch", "push 先のリモートが指定の対象リポジトリと一致しません。");
   const loaded = loadConfig(g.root);

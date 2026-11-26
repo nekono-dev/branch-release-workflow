@@ -91,3 +91,135 @@ Claude Code の既存フックは `PreToolUse` で拒否や許可を返せる。
 
 - 設計に戻す変更は不要。上の未観測項目は、必要に応じて追加の実環境検証として行う（管理者以外の資格情報の用意が最も効果が大きい）。
 - `main` への取り込みは、利用者が GitHub 上で PR を squash マージする。
+
+---
+
+## ギャップ分析: 要件 2 の追加分（2.9〜2.16）（2026-11-23）
+
+対象: 2026-11-23 に追加した受け入れ条件 2.9〜2.16（区切りごとの commit・push と、応答終了時の残りの検出）。既存の要件 1〜6 は実装・検証済み（上の分析）なので、差分だけを扱う。根拠は `scripts/agent-hooks.mjs`・`scripts/brw.mjs`・`scripts/lib.mjs`・`scripts/publish.mjs`、`SKILL.md`、cc-sdd の `kiro-impl`、`tests/agent-hooks-session.mjs` の走査である。
+
+### 要約
+
+- 応答終了時の検出（2.12・2.13）は、既存の Stop 処理（`stopGuidance`）に「作業ブランチの残り」の検出を足せば実現できる。ただし現在の Stop は「当該セッションに結び付いた、準備済みで未公開の作業」だけを見ており、ブランチと作業ツリーの状態は見ない。
+- 区切りの commit・push（2.9・2.10）は、cc-sdd の `kiro-*` スキルが担う箇所で、**このリポジトリからは書き換えられない**（セッション開始のたびに入れ直され、`kiro-` で始まる独自スキルも置けない）。実現できる手段は、BRW の SKILL.md・プロジェクトの CLAUDE.md の指示と、Stop フックによる後追いの検出に限られる。
+- **commit は BRW が確認を省かない**。確認省略（`autoApprovable`）の対象は push と PR 作成だけで、`git commit` は判定を通す（拒否も許可も返さない）。許可を求めずに commit できるかは、現状ではハーネス側の権限設定に依存する。
+- 「自律一括実施」では、1 回の応答が長く続くため、Stop の検出だけでは途中で中断したときの未 push を防げない（Stop は応答の終了時にしか動かない）。
+
+### 要件と既存資産の対応
+
+| 要件 | 既存資産 | ギャップ |
+|---|---|---|
+| 2.9 spec の各フェーズ生成後に commit・push | `kiro-spec-*` は commit しない（cc-sdd 提供・変更不可）。`kiro-impl` は 1 タスクごとに commit するが push はしない | **Constraint**: 手順は指示（SKILL.md・CLAUDE.md）でしか足せない。**Missing**: 指示の記述と、守られたかの検出 |
+| 2.10 実装 1 タスク完了ごとに commit・push | 同上（`kiro-impl` の「e) Commit」はパス指定のステージと commit まで） | 同上。push は指示のみ |
+| 2.9・2.10 「許可を求めずに」commit | `autoApprovable` は push・PR のみ（`safePush`・`safePullRequest`）。commit は `judgeBash` が PASS を返すだけ | **Missing**: 作業ブランチでの `git add`・`git commit` を確認省略する経路。**Unknown**: Claude・Codex それぞれで確認省略を返す応答（Claude は PreToolUse の allow、Codex は PermissionRequest の allow）が commit に使えるか |
+| 2.9・2.10 「許可を求めずに」push | 2.1 と既存の `autoApprovable` で対応済み | なし（`autoApprove.push` が明示的に false なら確認が残る。2.14 を参照） |
+| 2.11 リモートだけで再開・引き継ぎ | `brw resume`（リモートから取得し直して再開）が実装済み。`brw finish` は未 push の commit を保護する | **Missing**: 「未 push・未 commit が無い」ことを再開の前提として確かめ、報告する経路（検出は 2.12 と共通） |
+| 2.12 応答終了時の残りの検出 | `stopGuidance`（準備済み作業のみ）、`stop_hook_active` による再入防止、`git()`・`status --porcelain`・`rev-list --count` の既存の使い方（`brw.mjs`・`publish.mjs`） | **Missing**: ブランチ単位の検出（作業ブランチか、未 commit か、未 push か）。作業ブランチの判定には `classifyBranch`・`judgeBranch`（`lib.mjs`）を再利用できる |
+| 2.13 調査・確認のみなら止めない | 同上。`stopGuidance` は読み取り専用で状態を書かない | 変更が無い判定は `status --porcelain` と `rev-list` で足りる。**Research Needed**: 作業ツリーに無関係な未追跡ファイルがある場合の扱い |
+| 2.14 push 禁止の尊重 | `restrictionsOf(w)`・`noPush`（`brw work restrict`）が作業単位で実装済み。`pendingOf` が使用 | **Unknown**: 「宣言が push を禁じる」運用に対応する宣言の項目が現状ない（`autoApprove.push=false` は確認が残るだけで禁止ではない）。**Missing**: セッションに結び付いた作業が無いブランチでの制限の解決 |
+| 2.15 失敗時の報告 | 公開（`brw publish`）の失敗報告は実装済み（2.7）。区切りの commit・push は `brw` を経由しない素の git | **Constraint**: 素の git の失敗はエージェントが報告する。フックが検出できるのは「残っている」ことだけ |
+| 2.16 保護ブランチ等へは適用しない | 要件 1 の判定（`judgeBranch`）が拒否する | Stop の検出は作業ブランチに限る。保護ブランチ上の変更は検出対象にしない（案内すると保護ブランチへの commit・push を促してしまう） |
+
+### 実装方針の選択肢
+
+#### Option A: 既存の Stop 処理と SKILL.md を拡張する（指示＋検出）
+
+- `stopGuidance` に、cwd が宣言上の作業ブランチのとき、`git status --porcelain` が空でない、またはリモート追跡ブランチより先行している場合に block する分岐を足す。`stop_hook_active` の再入防止と読み取り専用の性質は保つ。
+- SKILL.md の「してよい」を「区切りごとに行う」に改め、spec・実装の区切りを列挙する。プロジェクトの CLAUDE.md にも同じ指示を書く。
+- 長所: 変更が小さく、既存の契約テスト（`tests/agent-hooks-session.mjs`）の形で検証できる。両ハーネスは同じ Stop の応答形式を使う。
+- 短所: 区切りでの commit・push は指示頼みで、長い応答の途中の中断は防げない。commit の確認省略は別に要る。
+
+#### Option B: 区切りの commit・push を BRW のコマンドにする（`brw checkpoint`）
+
+- 作業ブランチの変更を、パス指定ではなく作業単位で commit し push するサブコマンドを足し、スキルが区切りで呼ぶ。失敗の報告（2.15）と no-push の尊重（2.14）を 1 か所にまとめられる。
+- 長所: 2.14・2.15 を機械的に満たせる。確認省略は、既存の公開計画の仕組みに乗せやすい。
+- 短所: `kiro-impl` の commit 手順（選択的ステージ・メッセージ形式）と二重になる。cc-sdd 側の手順を変えられないため、呼ぶのは指示頼みのまま。ステージの対象選びを誤ると、無関係なファイルを commit するおそれがある。
+
+#### Option C: PostToolUse で commit 成功を検知して push を促す・実行する（ハイブリッド）
+
+- A に加え、PostToolUse（既に `recordWorkStart` で使用）で作業ブランチへの `git commit` 成功を検知し、push を案内する（または確認省略の範囲で push を実行する）。
+- 長所: 応答の途中でも commit 直後に push でき、「自律一括実施」の途中中断に強い。`kiro-impl` の commit をそのまま契機にできる。
+- 短所: フックが副作用（push）を起こす設計になり、現在の「フックは判定と案内だけ」という方針から外れる。案内だけにする場合は、エージェントが無視すると効果がない。PostToolUse の応答で追加の文脈を返せるかが、ホストごとに未確認。
+
+### 工数とリスク
+
+- **工数: M（3〜7 日）**。Stop の拡張とテストは小さい（S）。commit の確認省略と、Option C を採る場合の PostToolUse の扱いで M に伸びる。
+- **リスク: Medium**。既存の Stop の契約（準備済み作業の案内）と衝突しない設計が要る。無関係な未追跡ファイルによる誤検出で、応答が止まり続けるリスクは `stop_hook_active` で 1 回に抑えられるが、利用者体験が悪い。
+
+### 設計へ持ち越す事項（Research Needed）
+
+1. **commit の確認省略**: 作業ブランチでの `git add <パス>`・`git commit` を `autoApprovable` の対象にするか。対象にする場合の安全条件（コミットメッセージのシェル展開、`--amend`・`--no-verify` の扱い、ステージ対象）。Claude・Codex の確認省略の応答が commit に使えるかを実機で観測する。
+2. **「宣言が push を禁じる」の定義**: 宣言に対応する項目が無い。`autoApprove.push=false` を「確認が残る」と扱い、Stop は未 push を案内しない、と決めるのが自然だが、要件 2.14 の文言と合わせて確認する。
+3. **未 push の判定**: リモート追跡ブランチが無い新規ブランチ（初回 push 前）は「先行」ではなく「未 push」とみなす。fetch していない追跡ブランチの古さの扱い。ネットワークに依存しない判定にする。
+4. **作業ツリーの誤検出**: 無関係な未追跡ファイル、ignore されていない生成物、別の作業の変更が残る共有の作業ツリーをどう扱うか（追跡中の変更だけを見る、`.kiro/` や変更のあるパスに限る、など）。
+5. **Stop の作業との関係**: セッションに結び付いた作業が無くても検出する（要件 2.12 は「作業ブランチ」単位）。既存の「準備済みで未公開」の案内と、新しい「未 commit・未 push」の案内の優先順位と文面の統合。
+6. **PostToolUse の応答**: Option C を採る場合、Claude・Codex の PostToolUse が追加の文脈を返せるか、返した文脈がエージェントに届くかの実機確認。
+7. **自律一括実施の実機検証**: 長い応答（複数タスクの連続実装）で、区切りごとの push が実際に行われ、中断後に別のエージェントが `brw resume` で再開できることの確認。
+
+### 他の spec との接点
+
+- `harness-plugin-unification`（導入の統一）と、`agent-hooks.mjs`（Stop）・`hook-diagnose.mjs`・`setup-cli.mjs`・`SKILL.md`・`tests/agent-hooks-session.mjs` を共有する。Stop のイベントの登録は、両ハーネスのフック定義の対応表（harness-plugin-unification 要件 3-3）に含まれる。
+- brw-enforcement の既存の設計にある Codex のフック導入（`installCodexHooks`・worktree の有効化）は、harness-plugin-unification で置き換わる。設計の更新では、Codex への配り方の記述を harness-plugin-unification に委ね、重複して持たない。
+
+### 次の手順
+
+- `/kiro-spec-design brw-enforcement` で設計を更新する。上の Research Needed 1・2 は設計の冒頭で決める（利用者の確認が要る可能性がある）。
+
+---
+
+## 設計時の統合（要件 2.9〜2.16）（2026-11-23）
+
+ギャップ分析（上）の Option A（既存の Stop 処理と SKILL.md を拡張する）に、commit の確認省略を加えた形を採った。
+
+- **一般化**: 「作業ブランチに残った変更」という 1 つの概念（未コミットの変更と未 push の commit）で、要件 2.11（リモートだけで再開）・2.12（終了時の検出）・2.13（調査のみは止めない）・2.14（push 禁止）をまとめた。作業状態（セッションに結び付いた作業）に依存せず、Git の状態だけから導く（`work-remainder.mjs`）。
+- **Build vs Adopt**: 区切りの commit・push の実行手段は新設しない（Option B の `brw checkpoint` は、`kiro-impl` の commit 手順と二重になり、cc-sdd 側を変えられないため見送り）。`git add`・`git commit` の確認省略は、既存の `safePush` と同じ作法（限定した引数、複合コマンドは全区間が条件を満たすとき）で足す。
+- **簡素化**: フックによる push の実行と、commit 直後の push の案内（Option C の PostToolUse）は採らない。フックは判定と案内だけを行う方針を保ち、PostToolUse が追加の文脈を返せるかの実機確認は、残余リスクとともに設計の Non-Goals に残した。状態ファイルは増やさず、Stop のたびに Git から導く。
+- **ギャップ分析の Research Needed への回答**: (1) commit の確認省略は `autoApprove.commit`（未指定は有効）と限定した引数で行う。(2) 宣言に push 禁止の専用項目は無いため、`autoApprove.push: false` を「宣言が push を禁じる」と扱う（要件 2.14 の解釈。検証設計の確認事項）。(3) 未 push は `git rev-list --count HEAD --not --remotes` で、ネットワークなしに判定する。(4) 無関係な未追跡ファイルは、案内を 1 回に限る（`stop_hook_active`）ことと、パスの提示で扱う。(5) セッションに結び付いた作業が無くても検出し、公開の案内と 1 つの block にまとめる。(6) PostToolUse の追加文脈は未確認のまま持ち越す。(7) 長い応答での区切りごとの push は、実環境の検証項目に入れた。
+
+### 持ち越し
+
+- `autoApprove.push: false` を「宣言が push を禁じる」と読む解釈の確認（利用者）。
+- クォートした heredoc のメッセージの受け入れ範囲（実装時に、Claude の標準的な commit 手順で通ることを確かめる）。
+- Claude・Codex の PostToolUse が追加の文脈を返せるか（返せれば、commit 直後の push の案内を別途検討できる）。
+
+---
+
+## Codex での追加検証（2026-11-23、設計の再生成前）
+
+harness-plugin-unification の research.md の同名の節に、検証の条件と全項目の結果を記録した。本 spec に関わる結果だけを再掲する。
+
+- **commit の確認省略（2.9, 2.10）**: 対話相当（承認方針 `on-request`）では、`git add … && git commit …` はサンドボックスの失敗のあと `PermissionRequest` フックに全コマンド文字列で届き、`allow` で承認なしに実行された。設計の方式（Codex は `PermissionRequest` の許可で返す）は成立する。
+- **非対話（`codex exec`）の制約**: 承認方針が常に `never` で `PermissionRequest` は発生せず、`workspace-write` では `.git` が読み取り専用のため commit・push は失敗する。BRW のフックでは解決できず、実行側の書き込み許可（`--add-dir <.git>`、linked worktree では `<.git>/worktrees/<名>` も）か、外部のサンドボックスが要る。診断の `limits` と導入手順に明記する。
+- **Stop の案内（2.12〜2.15）**: `reason` はモデルに `hook_prompt` として届き、再入では `stop_hook_active: true` になる。案内の対象がエージェント自身の作業で生じた変更のときは commit・push が実行された。無関係な既存の変更のときは「依頼の範囲外」として実行されなかった。案内文に、この作業で生じた変更かどうかの判断と、そうでない場合の報告を含める。
+- **PostToolUse の追加文脈**: Codex では `additionalContext` がモデルに届く（Claude は未確認）。commit 直後の push の案内（Non-Goals）の実現可能性の材料になるが、利用者の判断（残余リスクの許容。中断の契機はトークンの使い切りと作業の停止）により、本 spec では採らない。
+- **中断の契機と Stop の関係**: トークンの使い切りと利用者による停止では、Stop が呼ばれない場合がある（Codex には別に `interrupt` イベントがある）。この残余リスクは許容され、取りこぼしは区切りごとの push で最小化する。それ以外の契機での中断は、利用者の依頼（「commit して」「push して」）で扱う。
+
+### 設計の検証で訂正した点（2026-11-23）
+
+- 設計では commit の確認省略を `brw.mjs` の `autoApprovable`（`safePush` と同じ作法）に足す案にしていたが、フックの実際の経路は `agent-hooks.mjs` の `judgeBash` → `operation-decision.mjs` の `evaluateAll`（`eligibleForApproval`）→ `plainOperation` だった（`autoApprovable` は手動実行用の旧経路）。設計を、`evalCommit`・`operation-policy.mjs` の flags・`plainOperation` の複合コマンドへの対応に改めた。
+- `plainOperation` は変更操作がちょうど 1 つの `git`・`gh` だけを許す。`git add` は読み取り扱いのため、`git add … && git commit …` を含む複合は現状では確認省略されない。この点も設計に含めた。
+- 既存の `stopGuidance` は、セッション ID や状態ファイルが無いと先頭で `null` を返す。残りの案内はこれと独立に評価する構造に改めた。
+
+## 設計時の調査: SSH 別名ホストの origin（要件 1.6〜1.8）（2026-11-25）
+
+### 事象
+`origin` が `~/.ssh/config` の別名（例: `git@github.com.nekono:owner/repo.git`）だと、`githubRepoOf`（`publish.mjs`）と `parseRepoSpec`・`remoteRepos`（`github-operations.mjs`）が `github.com` 固定の読み取りで null になり、`brw work ready`・`plan`・フック下の `gh pr create -R` が「確定できません」で止まる。
+
+### 実測（このリポジトリの環境）
+- `ssh -G git@github.com.nekono` は `hostname github.com` を返す。接続はしない。
+- `gh repo view` は別名を解決して成功する（通信が必要なため、フックの判定には使わない）。
+- `url.<別名>.insteadOf` で `https://github.com/` を別名へ書き換えると、`git config --get remote.origin.url` は https のまま、`git remote get-url` と実際の接続は別名になる。brw は `get-url`（展開後）を読むため、この運用は解決にならない。展開前を読むと実際の送り先と違うものを検査することになる。
+
+### 選択肢と判断
+| 案 | 判断 |
+|---|---|
+| `ssh -G` で別名を `github.com` に解決する | 採用。利用者の設定で決まる実際の接続先と同じ情報で、リポジトリには何も足さない。通信なし。 |
+| 宣言に別名と GitHub の対応を書く | 不採用（利用者の決定）。個人の SSH 設定が commit され、他の人・貢献者のノイズになる。 |
+| `gh` に問い合わせる | 不採用。通信が要り、フックの判定が遅く不安定になる。 |
+| 展開前の URL を読む | 不採用。実際の送り先を検査しない。 |
+
+### 持ち越し・リスク
+- `ssh -G` は `Match exec` を評価する。別名は remote 由来のため、文字種の検査と `--` で注入を防ぎ、設定の実行そのものは利用者自身のものとして受け入れる。
+- フックの 1 回の判定で複数の remote を読むため、結果を同じプロセスで別名ごとに覚える。
+- `ssh.github.com`（443 番）など `hostname` が `github.com` 以外の GitHub 接続先は、要件の範囲外として拒否のままにする。
+

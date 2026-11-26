@@ -203,7 +203,7 @@ export const runAgentHookSessionChecks = async (eq) => {
     try {
       const id = readyWork(r.dir);
       const c = stopOf("claude", r.dir);
-      eq("enforcement/2.5 準備済みで未公開の作業があれば、Claude は block の応答で作業 ID の再試行と中断を案内する", [block(c), c?.reason?.includes(id), c?.reason?.includes(`brw publish --work ${id}`), c?.reason?.includes(`brw pause --work ${id}`)], [true, true, true, true]);
+      eq("enforcement/2.5 準備済みで未公開の作業があれば、Claude は block の応答で作業 ID の再試行と中断を案内する", [block(c), c?.reason?.includes(id), c?.reason?.includes(`.mjs' publish --work ${id}`), c?.reason?.includes(`.mjs' pause --work ${id}`)], [true, true, true, true]);
       const again1 = stopOf("claude", r.dir)?.reason;
       const again2 = stopOf("claude", r.dir)?.reason;
       eq("enforcement/2.5 同じ作業の案内は何度でも同じ内容になる（再試行）", [typeof again1 === "string", again1 === c?.reason, again2 === c?.reason], [true, true, true]);
@@ -267,7 +267,7 @@ export const runAgentHookSessionChecks = async (eq) => {
       const id = readyWork(r.dir);
       gitOut(r.dir, "commit", "--allow-empty", "-m", "準備の後の変更");
       const c = stopOf("claude", r.dir);
-      eq("enforcement/2.5 準備の後に HEAD が変わった作業は、再開を案内する", [block(c), c?.reason?.includes(`brw work resume --work ${id}`)], [true, true]);
+      eq("enforcement/2.5 準備の後に HEAD が変わった作業は、再開を案内する", [block(c), c?.reason?.includes(`.mjs' work resume --work ${id}`)], [true, true]);
     } finally {
       r.cleanup();
     }
