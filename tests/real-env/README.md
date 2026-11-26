@@ -117,3 +117,19 @@ node tests/real-env/host-events.mjs --reset-counter      # 呼び出し回数の
 - **MCP の matcher（`mcp__.*`）**: MCP サーバーを用意していないため、正規表現としての解釈は実機で未観測（Bash の matcher は両ホストで届いた）。
 - **Codex の信頼承認の実操作**: `/hooks` での承認は自動化できないため未実施。信頼済みはバイパスフラグで、未承認はフラグなしで観測した。なお `codex app-server` の `hooks/list` が各フックの `trustStatus` と `currentHash` を返すため、信頼状態の読み取りは今後可能（診断の `codexTrust` は現状、呼び出し側の入力）。
 - **クラウド（管理対象フック）**: 本環境では確認できない。診断は `unsupported`（managed-hooks-required）のまま。
+
+# Stop の観測（brw-enforcement 14.1）
+
+Stop の block と再入（`stop_hook_active`）、worktree へ移った後の Stop の作業ディレクトリを、実際の Claude Code と Codex で 1 回ずつ観測する。BRW（scripts/）には依存せず、記録用の Stop フックだけを使う。`BRW_REAL_ENV=1` のときだけ動く。
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/stop-observe.mjs --dry-run            # 呼び出しなしで計画を表示
+node tests/real-env/stop-observe.mjs --host claude        # Claude を 1 回呼び出して判定
+node tests/real-env/stop-observe.mjs --host codex         # Codex を 1 回呼び出して判定
+```
+
+- 作業場所は `/tmp/brw-real-env/stop-observe/<ホスト>-*/`（本体と worktree は一時リポジトリ。作業の記録・状態ファイルは作らない）。登録ファイル（`.claude/`・`.codex/`）は本体の `.git/info/exclude` で未追跡の表示から外す。worktree は本体の `.claude/worktrees/wt` に作る（`poc/claude-stop-cwd.sh` で Stop の作業ディレクトリが worktree に追従した配置と同じ。本体の外に置くと、シェルの `cd` が引き継がれず本体で Stop が起きて観測できなかった）。
+- 判定は 2 項目: (a) 1 回目の Stop が未コミットの変更で block され、`stop_hook_active:true` の再入は block されずに通る、(b) すべての Stop の作業ディレクトリが worktree と一致する。
+- 結果は標準出力に、ホスト・版・日時つきの Markdown として出る。「観測結果の要約」へ追記する。記録が無い・想定と違う結果は「未観測」「不一致」と書き、成功として扱わない。
+- 呼び出し回数は host-events.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。Codex だけ `--dangerously-bypass-hook-trust` を 1 回の呼び出しに付ける。利用者の `~/.claude`・`~/.codex` の設定は書き換えない。

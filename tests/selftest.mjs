@@ -42,6 +42,7 @@ import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
+import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
@@ -645,6 +646,9 @@ await runIntegrationRulesetChecks(eq);
 
 // ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
 await runHookLoggerChecks(eq);
+
+// ---- 実環境の Stop 観測の引数・記録フック・判定・整形（brw-enforcement 14.1） ----
+await runStopObserveChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
