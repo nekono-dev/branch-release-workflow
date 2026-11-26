@@ -39,7 +39,7 @@
   - _Depends: 2.1_
   - _Boundary: 取り込みの判定_
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 4.1, 4.2, 4.3_
-- [ ] 2.3 拒否の案内と判定の根拠を整える
+- [x] 2.3 拒否の案内と判定の根拠を整える
   - 拒否の理由に、取り込み先・取り込み元の分類と、代替手段（基底の fast-forward 更新、基底を別の作業ツリーで確認している場合の `git -C <その作業ツリー> pull --ff-only origin <基底>`、PR による反映、`brw merge`）を含める。fetch による更新で形 A に当たらないものは、更新を許さない旨で拒否する。
   - 実効値を設定から読んで判定したとき、理由に設定のキーと値を含め、判定の事実に実効値と由来を載せる。同じ状態には同じ判定・同じ案内を返す。
   - 設定によってリベースになる pull の拒否に、設定のキーと値が含まれ、基底を別の作業ツリーで確認している場合の案内が表示され、同じ入力を 2 回判定して識別子・理由・案内が一致する。 `via: "fetch"` の操作は形 A 以外を必ず `merge-non-development`（更新を許さない旨）で拒否し、`git fetch origin dev/bar:dev/bar`（開発ブランチ）が拒否になることをテストで固定する（1.3 の時点では暫定で確認省略の許可になる）。
@@ -88,3 +88,4 @@
 - 2.1: 優先順位は sync-not-fast-forward → sync-ff-only-required → 許可。fetch の形 A 以外の拒否に仮の `ALT_SYNC` を付けた（2.3 で整える）。Decision の facts に ff・rebase・basis はまだ載せていない（2.3）。
 - 2.2: `merge --squash origin/main` は開発ブランチ上で許可（リベースだけを除外）。開発ブランチ同士のリベースは従来の許可のまま。既存期待 `enforcement/3.2` の「開発ブランチ上の `git pull origin main` 拒否」は要件 2.1 により許可へ変わったため `git merge dev/other main` に差し替えた。
 - 2.2 レビューで見つかった従来からの穴（未対応・要判断）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
+- 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。

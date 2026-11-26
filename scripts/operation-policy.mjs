@@ -455,7 +455,8 @@ function mergeFacts(sub, a, dir, branch, valueOpts, add) {
     }
   }
   const configKeys = [];
-  const basis = { ff: "default", rebase: "default", configKeys };
+  const configValues = {};
+  const basis = { ff: "default", rebase: "default", configKeys, configValues };
   let ff = "allow";
   if (ffArg !== null) { ff = ffArg; basis.ff = "arg"; }
   else {
@@ -471,6 +472,7 @@ function mergeFacts(sub, a, dir, branch, valueOpts, add) {
       else { add(`設定 ${key}=${v} の値を読めず、fast-forward の指定を確定できません。`); continue; }
       basis.ff = "config";
       configKeys.push(key);
+      configValues[key] = v.trim();
       break;
     }
   }
@@ -488,6 +490,7 @@ function mergeFacts(sub, a, dir, branch, valueOpts, add) {
         else { add(`設定 ${key}=${v} の値を読めず、リベースになるか確定できません。`); continue; }
         basis.rebase = "config";
         configKeys.push(key);
+        configValues[key] = v.trim();
         break;
       }
     }
@@ -932,7 +935,7 @@ function gitOp(args, ctx, assigns, envTarget) {
     const fetchUpdate = !dynArgs && !forbidden && !dirty && pos.length >= 2 && remoteList(dir).includes(pos[0]) && localSpecs.length === 1 && sameName(localSpecs[0]);
     if (fetchUpdate) {
       const name = bare(localSpecs[0].slice(localSpecs[0].indexOf(":") + 1));
-      op = makeOp("merge", dir, unresolved, { branch: name, sources: [{ name: `${pos[0]}/${name}`, branch: name, remote: pos[0], oid: null }], via: "fetch", mode: "fetch-update", ff: "only", rebase: false, basis: { ff: "default", rebase: "default", configKeys: [] }, fastForwardable: null });
+      op = makeOp("merge", dir, unresolved, { branch: name, sources: [{ name: `${pos[0]}/${name}`, branch: name, remote: pos[0], oid: null }], via: "fetch", mode: "fetch-update", ff: "only", rebase: false, basis: { ff: "default", rebase: "default", configKeys: [], configValues: {} }, fastForwardable: null });
       return op;
     }
     if (localSpecs.length) add("fetch の更新先がローカルのブランチになりえます（remote 追跡ブランチ以外）。");

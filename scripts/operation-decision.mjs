@@ -32,7 +32,17 @@ const ALT_CREATE = `ブランチや worktree は \`${BRW_RUN} create <名前>\` 
 const ALT_RESUME = `既存の開発ブランチは \`${BRW_RUN} resume <名前>\` で再開してください。`;
 const ALT_MERGE = `開発ブランチ間の取り込みは PR を作らず、ローカルで \`${BRW_RUN} merge <取り込み元>\` を使ってください。`;
 const ALT_PR_FLOW = `PR の作成は \`${BRW_RUN} pr-template\` で本文の下書きを用意し、本文を書いたうえで \`${BRW_RUN} pr\` を実行してください（\`gh pr create\`・GitHub の API・MCP による直接の作成は使えません）。`;
-const ALT_SYNC = (b) => `基底・保護ブランチの更新は fast-forward に限ります。\`git pull --ff-only origin ${b}\`（または \`git fetch origin ${b}:${b}\`）で更新してください。履歴を分岐させる反映は、開発ブランチから PR を作成してください。`;
+// フック経路は reason と alternative の連結を 500 文字で切るため、短く保つ（案内の 3 点が欠けないように）
+const ALT_SYNC = (b) => b === "<基底>"
+  ? `基底の更新は fast-forward に限ります。\`git pull --ff-only origin <基底>\`（基底を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin <基底>\`）で更新し、分岐する反映は PR で、開発ブランチへの取り込みは \`${BRW_RUN} merge origin/<基底>\` で行ってください。`
+  : `fast-forward で更新してください: \`git pull --ff-only origin ${b}\`（${b} を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin ${b}\`）。分岐する反映は PR で、開発ブランチへの取り込みは \`${BRW_RUN} merge origin/${b}\` で行ってください。`;
+// 実効値（ff・rebase）を設定から読んだときの根拠。設定のキーと値を示す（無ければ空文字列）
+const basisNote = (op) => {
+  const b = op.basis;
+  const keys = b?.configKeys ?? [];
+  if (!keys.length) return "";
+  return `（設定 ${keys.map((k) => `${k}=${b.configValues?.[k] ?? "?"}`).join("、")} による: ff=${op.ff}、rebase=${op.rebase}）`;
+};
 const ALT_PR = "保護対象への反映は、開発ブランチから分岐元へ PR を作成し、GitHub 上でリポジトリの条件を満たす利用者が squash マージしてください。";
 
 function decide(op, fields) {
@@ -158,7 +168,9 @@ function evalMerge(op, config, registered) {
   const sources = op.sources ?? [];
   const target = classifyBranch(config, op.branch);
   const srcCls = Object.fromEntries(sources.map((s) => [s.name, s.branch ? classifyBranch(config, s.branch) : "undeclared"]));
-  const facts = { branchClass: { [op.branch]: target }, sourceClass: srcCls };
+  const facts = { branchClass: { [op.branch]: target }, sourceClass: srcCls, ff: op.ff ?? null, rebase: op.rebase ?? null, basis: op.basis ?? null };
+  const note = basisNote(op);
+  const srcLabel = sources.length ? `取り込み元 ${sources.map((s) => `'${s.name}'（${label(srcCls[s.name])}）`).join("、")}` : "取り込み元なし";
   const targets = [op.branch, ...sources.map((s) => s.branch).filter(Boolean)];
   const isFetch = op.via === "fetch";
   // 形 A: 基底・保護ブランチを、origin の同名の追跡ブランチ 1 つから fast-forward で更新する
@@ -168,9 +180,9 @@ function evalMerge(op, config, registered) {
       const b = op.branch;
       const ffBase = { compliance: "violation", alternative: ALT_SYNC(b), targets, facts };
       if (op.rebase || op.mode === "pull-rebase" || op.mode === "squash" || op.ff === "never" || op.fastForwardable === false)
-        return deny(op, "sync-not-fast-forward", `${label(target)} '${b}' への取り込みが履歴を分岐させる更新（リベース・--no-ff・--squash、または実行前に分岐と確認できた merge）になるため拒否します。`, ffBase);
+        return deny(op, "sync-not-fast-forward", `${label(target)} '${b}' への ${srcLabel} の取り込みは、履歴を分岐させる更新（リベース・--no-ff・--squash・分岐した merge）になるため拒否します。${note}`, ffBase);
       if (op.ff !== "only" && op.mode !== "fetch-update")
-        return deny(op, "sync-ff-only-required", `${label(target)} '${b}' の更新に fast-forward の保証がありません。--ff-only を付けて再実行してください（例: git pull --ff-only origin ${b}）。`, ffBase);
+        return deny(op, "sync-ff-only-required", `${label(target)} '${b}' への ${srcLabel} の取り込みに fast-forward の保証がありません。--ff-only を付けてください。${note}`, ffBase);
       const ok = { compliance: "compliant", code: "sync-base-fast-forward", targets, facts };
       if (!registered) return decide(op, { ...ok, approval: "normal", approvalWhy: "unregistered", reason: `${label(target)} '${b}' の fast-forward 更新です。宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。` });
       return decide(op, { ...ok, verdict: "eligibleForApproval", approval: "skip", reason: `${label(target)} '${b}' を origin の同名ブランチから fast-forward で更新します（履歴は分岐しません）。確認を省略できます。` });
@@ -178,7 +190,7 @@ function evalMerge(op, config, registered) {
   }
   // fetch による更新は形 A だけを許す。それ以外（開発ブランチ・宣言外・別の形）は更新を許さない
   if (isFetch)
-    return deny(op, "merge-non-development", `fetch による '${op.branch}'（${label(target)}）の更新は許可されません。fetch で更新できるのは、origin の同名の基底・保護ブランチだけです。`, { alternative: ALT_SYNC(op.branch), targets, facts });
+    return deny(op, "merge-non-development", `fetch による '${op.branch}'（${label(target)}）の更新は許可されません（${srcLabel}）。fetch で更新できるのは origin の同名の基底・保護ブランチだけです。`, { alternative: ALT_SYNC(target === "protected" || target === "base" ? op.branch : "<基底>"), targets, facts });
   if (target !== "development")
     return deny(op, "merge-non-development", `${label(target)} '${op.branch}' へのローカルマージはできません。マージ先は開発ブランチだけです。`, { alternative: ALT_PR, targets, facts });
   // 形 B: 取り込み元が origin の追跡ブランチのうち基底・保護ブランチに当たるもの（<元>:<先> の形は除く）
@@ -188,7 +200,7 @@ function evalMerge(op, config, registered) {
   if (badSrc.length)
     return deny(op, "merge-non-development", `取り込み元 ${badSrc.map(([n, c]) => `'${n}'（${label(c)}）`).join("、")} は開発ブランチでも origin の基底・保護ブランチでもないため、マージできません。`, { alternative: ALT_MERGE, targets, facts });
   if (baseSrcs.length > 0 && (op.rebase || op.mode === "pull-rebase"))
-    return deny(op, "sync-rebase", `開発ブランチ '${op.branch}' への基底・保護ブランチ '${baseSrcs.map((s) => s.name).join("'、'")}' の取り込みがリベースになるため拒否します。マージで取り込んでください。`, { alternative: ALT_SYNC(baseSrcs[0].branch), targets, facts });
+    return deny(op, "sync-rebase", `${label(target)} '${op.branch}' への ${srcLabel} の取り込みはリベースになるため拒否します。マージで取り込んでください。${note}`, { alternative: ALT_SYNC(baseSrcs[0].branch), targets, facts });
   const base = { compliance: "compliant", code: baseSrcs.length > 0 ? "sync-base-merge" : "merge-development", targets, facts };
   if (sources.length === 0) return decide(op, { ...base, approval: "normal", approvalWhy: "no-source", reason: "取り込み元の指定がなく（--abort など）、確認は省略しません。" });
   if (!registered) return decide(op, { ...base, approval: "normal", approvalWhy: "unregistered", reason: "宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。" });

@@ -320,6 +320,52 @@ export const runDecisionChecks = async (eq) => {
     ur.cleanup();
   }
 
+  // ---- sync-base-branch 2.3 拒否の案内と判定の根拠 ----
+  {
+    const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG, register: true });
+    const w = fr.dir;
+    gitOut(w, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(w, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+    gitOut(w, "branch", "dev/bar");
+    const full = (cmd) => { const o = classifyCommand(cmd, w).operations[0]; return evaluate(o, contextFor(o)); };
+    const cfgSet = (k, v) => gitOut(w, "config", k, v);
+    const cfgUnset = (k) => gitOut(w, "config", "--unset", k);
+    const altOk = (x) => [/git -C <[^>]+> pull --ff-only origin main/.test(x.alternative ?? ""), /PR/.test(x.alternative ?? ""), /merge/.test(x.alternative ?? "")];
+    const altBase = (x) => [/git -C <[^>]+> pull --ff-only origin <基底>/.test(x.alternative ?? ""), /PR/.test(x.alternative ?? ""), /merge/.test(x.alternative ?? "")];
+    // 基底の更新（形 A）が設定由来のリベースで拒否される: 設定のキーと値・分類・別の作業ツリーの案内・facts
+    gitOut(w, "checkout", "-q", "main");
+    cfgSet("pull.rebase", "true");
+    const a1 = full("git pull --ff-only origin main"), a2 = full("git pull --ff-only origin main");
+    cfgUnset("pull.rebase");
+    eq("sync-base-branch/2.3 設定由来のリベースの拒否に設定のキーと値・分類が含まれる", [a1.code, /pull\.rebase=true/.test(a1.reason), /保護ブランチ/.test(a1.reason), /origin\/main|origin main/.test(a1.reason)], ["sync-not-fast-forward", true, true, true]);
+    eq("sync-base-branch/2.3 拒否の案内に別の作業ツリーでの pull --ff-only・PR・brw merge が含まれる", altOk(a1), [true, true, true]);
+    eq("sync-base-branch/2.3 facts に実効値と由来を載せる", [a1.facts.ff, a1.facts.rebase, a1.facts.basis.rebase, a1.facts.basis.configKeys], ["only", true, "config", ["pull.rebase"]]);
+    eq("sync-base-branch/2.3 同じ入力を 2 回判定すると識別子・理由・案内・根拠が一致", [decisionSignature(a1), a1.reason, a1.alternative, a1.facts], [decisionSignature(a2), a2.reason, a2.alternative, a2.facts]);
+    // 引数由来・設定の ff
+    const b = full("git pull --rebase origin main");
+    eq("sync-base-branch/2.3 引数由来の判定は由来が arg で、設定のキーは理由に含めない", [b.facts.basis.rebase, b.facts.basis.configKeys, /pull\.rebase=/.test(b.reason)], ["arg", [], false]);
+    cfgSet("merge.ff", "false");
+    const c = full("git merge origin/main");
+    cfgUnset("merge.ff");
+    eq("sync-base-branch/2.3 merge.ff=false 由来の拒否に設定のキーと値が含まれ ff の実効値が facts に載る", [c.code, /merge\.ff=false/.test(c.reason), c.facts.ff, c.facts.basis.ff, c.facts.basis.configKeys], ["sync-not-fast-forward", true, "never", "config", ["merge.ff"]]);
+    const d = full("git pull origin main");
+    eq("sync-base-branch/2.3 --ff-only が無い拒否も分類・案内を含み、既定の由来は default", [d.code, /保護ブランチ/.test(d.reason), altOk(d), d.facts.basis.ff], ["sync-ff-only-required", true, [true, true, true], "default"]);
+    // 開発ブランチ上のリベース（形 B）
+    gitOut(w, "checkout", "-q", "dev/foo");
+    cfgSet("pull.rebase", "true");
+    const e = full("git pull origin main");
+    cfgUnset("pull.rebase");
+    eq("sync-base-branch/2.3 開発ブランチへの取り込みのリベース拒否にも設定のキーと値・案内・facts が載る", [e.code, /pull\.rebase=true/.test(e.reason), altOk(e), e.facts.rebase, e.facts.basis.rebase], ["sync-rebase", true, [true, true, true], true, "config"]);
+    eq("sync-base-branch/2.3 形 B の拒否の理由に取り込み先・取り込み元の分類が含まれる", [/開発ブランチ/.test(e.reason), /保護ブランチ/.test(e.reason)], [true, true]);
+    // fetch は形 A 以外を更新を許さない旨で拒否し、案内を付ける
+    const f = ["git fetch origin dev/bar:dev/bar", "git fetch origin dev/foo:dev/foo"].map((cmd) => full(cmd));
+    eq("sync-base-branch/2.3 fetch の形 A 以外は merge-non-development で更新を許さない旨と案内を返す", f.map((x) => [x.verdict, x.code, /更新は許可されません/.test(x.reason), /開発ブランチ/.test(x.reason), altBase(x)]), Array(2).fill(["deny", "merge-non-development", true, true, [true, true, true]]));
+    // 取り込み元の分類
+    eq("sync-base-branch/2.3 取り込み元の分類を理由に含める（宣言外の取り込み元）", (() => { gitOut(w, "update-ref", "refs/remotes/origin/other/q", "main"); const x = full("git merge origin/dev/bar origin/other/q"); return [x.code, /宣言外/.test(x.reason)]; })(), ["merge-non-development", true]);
+    eq("sync-base-branch/2.3 許可の識別子は変わらない（開発ブランチ上の基底の取り込み）", decisionSignature(full("git merge origin/main")), "merge|eligibleForApproval|compliant|skip|sync-base-merge");
+    fr.cleanup();
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));

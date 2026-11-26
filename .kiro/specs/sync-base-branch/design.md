@@ -188,7 +188,7 @@ interface MergeOperation {
   sources: MergeSource[];
   ff: FastForward;            // 実効の fast-forward 指定。fetch-update は "only" とみなす
   rebase: boolean;            // pull が実効でリベースになるか
-  basis: { ff: "arg" | "config" | "default"; rebase: "arg" | "config" | "default"; configKeys: string[] }; // 実効値の由来。引数か、設定（読んだキー）か、既定か
+  basis: { ff: "arg" | "config" | "default"; rebase: "arg" | "config" | "default"; configKeys: string[]; configValues: Record<string, string> }; // 実効値の由来。引数か、設定（読んだキーと、そのキー→値）か、既定か
   fastForwardable: boolean | null; // merge で取り込み元の ID が確定しているときの祖先確認。確認不能は null
   unresolved: string[];
 }
@@ -216,7 +216,7 @@ interface MergeOperation {
 - 拒否の識別子: `sync-ff-only-required`（形 A に近いが `ff` が `allow`）、`sync-not-fast-forward`（`fastForwardable` が `false`、または `ff` が `never`、`squash`、`rebase`）、`sync-rebase`（形 B でリベースを伴う）。形に当たらないものは `merge-non-development` のまま。`via: "fetch"` で形 A に当たらないものは、更新を許さない旨の `merge-non-development` にする（要件 6.4）。
 - 確認省略: 許可した取り込みは、従来の開発ブランチ間マージと同じ分岐に従う。取り込み元が空なら `no-source`、宣言が未登録・編集中なら `unregistered`（`normal`）、登録済みなら `eligibleForApproval`（`skip`）。
 - 拒否の案内: 理由に取り込み先・取り込み元の分類を含め、`alternative` に `ALT_SYNC` を載せる。`ALT_SYNC` は次の3つを示す: (1) 基底を確認している作業ツリーでの `git pull --ff-only origin <基底>`。基底を別の作業ツリー（本体の checkout など）で確認している場合は `git -C <その作業ツリー> pull --ff-only origin <基底>`（`git fetch origin <基底>:<基底>` は、確認中のブランチを git が更新しない）。(2) PR による反映。(3) `brw merge`。同じ状態に同じ文面を返す。
-- 判定の根拠: 判定が `ff`・`rebase` を設定から読んだとき、理由にその設定のキーと値を含める（例: 「`pull.rebase=true` のため、リベースになりうる取り込みです」）。`facts` に `ff`・`rebase` の実効値と由来（`basis`）を載せる。同じ状態には同じ根拠を返す。設定が違えば結果が変わるのは仕様であり、理由で原因が分かるようにする。
+- 判定の根拠: 判定が `ff`・`rebase` を設定から読んだとき、理由にその設定のキーと値を含める（例: 「`pull.rebase=true` のため、リベースになりうる取り込みです」）。`facts` に `ff`・`rebase` の実効値と由来（`basis`。設定のキーと値は `configKeys`・`configValues`）を載せる。同じ状態には同じ根拠を返す。設定が違えば結果が変わるのは仕様であり、理由で原因が分かるようにする。
 
 **依存**
 - 入力: 字句解析の操作オブジェクト（P0）。

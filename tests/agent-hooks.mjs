@@ -60,6 +60,24 @@ const planned = (fn, opts = {}) => {
 const publishCmd = (id, plan, extra = "") => `node ${BRW} publish --work ${id} --plan ${plan} ${extra}`.trim();
 
 export const runAgentHookChecks = async (eq) => {
+  // ---- sync-base-branch 2.3 フックの出力（500 文字の上限内）に案内の 3 点が残る ----
+  {
+    const r = repoOf();
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+    gitOut(r.dir, "branch", "dev/bar");
+    const guide = (host, cmd) => { const t = preReasonOf(host, cmd, r.dir); return [/git -C <[^>]+> pull --ff-only origin/.test(t), /PR/.test(t), /merge origin\//.test(t)]; };
+    gitOut(r.dir, "checkout", "-q", "main");
+    gitOut(r.dir, "config", "pull.rebase", "true");
+    const cases = [["main", "git pull --ff-only origin main"], ["main", "git pull origin main"], ["main", "git fetch origin dev/bar:dev/bar"]];
+    const got = [];
+    for (const host of ["claude", "codex"]) for (const [, cmd] of cases) got.push(guide(host, cmd));
+    gitOut(r.dir, "checkout", "-q", "dev/foo");
+    for (const host of ["claude", "codex"]) got.push(guide(host, "git pull origin main"));
+    eq("sync-base-branch/2.3 フック出力に別の作業ツリーでの pull --ff-only・PR・merge origin/ の案内が残る（Claude・Codex）", got, Array(8).fill([true, true, true]));
+    r.cleanup();
+  }
+
   // ---- 応答の形（両ホストの契約） ----
   {
     const r = repoOf();
