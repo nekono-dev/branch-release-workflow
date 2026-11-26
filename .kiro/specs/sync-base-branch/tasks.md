@@ -74,7 +74,7 @@
   - _Depends: 2.3_
   - _Boundary: フック・guard の結合テスト_
   - _Requirements: 5.1, 5.2, 5.3, 6.1, 6.2, 6.3_
-- [ ] 4.3 使い捨てのリポジトリで、実際の git の挙動を検査に加える
+- [x] 4.3 使い捨てのリポジトリで、実際の git の挙動を検査に加える
   - 判定のテストが使う実 git の使い捨てのリポジトリで、履歴が分岐した状態の `git pull --ff-only`・`git merge --ff-only`・`git fetch origin main:main` が git に止められて手元が変わらないこと、`main` を別の作業ツリーで確認している状態の `git fetch origin main:main` が git に止められ、`git -C <その作業ツリー> pull --ff-only origin main` が判定を通り、実行すると更新できることを確かめる。
   - 上記の挙動が検査として再現でき、判定の限界の周知と手順書の案内に矛盾が無い。
   - _Depends: 3.1, 3.2, 4.1_

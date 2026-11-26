@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyCommand, classifyMcpCall } from "../scripts/operation-policy.mjs";
 import { contextFor, decisionSignature, evaluate, evaluateAll } from "../scripts/operation-decision.mjs";
-import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
+import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const CONFIG = { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" };
 
@@ -426,6 +426,68 @@ export const runDecisionChecks = async (eq) => {
     const jn = (cmd) => { const o = classifyCommand(cmd, N.w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code]; };
     eq("sync-base-branch/4.1 取り込み元の指定が無い操作（--abort・--continue）は基底ブランチ上でも確認を省略せず拒否", [jn("git merge --abort"), jn("git merge --continue")], Array(2).fill(["deny", "notApplicable", "merge-non-development"]));
     N.cleanup();
+  }
+
+  // ---- sync-base-branch 4.3 実際の git の挙動（使い捨てのリポジトリで git を実行して確かめる） ----
+  {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const ALLOW = ["eligibleForApproval", "skip", "sync-base-fast-forward", null];
+    const judgeAt = (cmd, cwd) => { const x = evaluateAll(classifyCommand(cmd, cwd), {}); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+    // git を実行して [終了コード, 実行後の main の先端] を返す（失敗しても例外にしない）
+    const run = (cwd, repo, ...args) => {
+      let code = 0;
+      try { gitOut(cwd, ...args); } catch (e) { code = e.status ?? -1; }
+      return [code, gitOut(repo, "rev-parse", "main")];
+    };
+    // 別の clone からリモートの main を 1 commit 進める
+    const advanceRemote = (remote, tmps) => {
+      const c = mkdtempSync(join(tmpdir(), "brw-cl-"));
+      tmps.push(c);
+      gitOut(c, "clone", "-q", remote, ".");
+      gitOut(c, "commit", "-q", "--allow-empty", "-m", "リモートの更新");
+      gitOut(c, "push", "-q", "origin", "main");
+      return gitOut(c, "rev-parse", "HEAD");
+    };
+    const tmps = [];
+
+    // 1. 履歴が分岐したとき、3 つの更新はいずれも git に止められ、手元の main は変わらない
+    const A = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    advanceRemote(A.remote, tmps);
+    gitOut(A.dir, "commit", "-q", "--allow-empty", "-m", "手元の更新");
+    const localTip = gitOut(A.dir, "rev-parse", "main");
+    gitOut(A.dir, "fetch", "-q", "origin");
+    const pullDiv = run(A.dir, A.dir, "pull", "--ff-only", "origin", "main");
+    const mergeDiv = run(A.dir, A.dir, "merge", "--ff-only", "origin/main");
+    const wtA = mkWorktree(A.dir, "dev/foo");
+    const fetchDiv = run(wtA, A.dir, "fetch", "origin", "main:main");
+    eq("sync-base-branch/4.3 分岐: pull --ff-only・merge --ff-only・fetch main:main は git が止め（終了コード非 0）、手元の main の先端は変わらない（1.2・1.3・1.4）", [pullDiv, mergeDiv, fetchDiv].map(([c, tip]) => [c !== 0, tip === localTip]), Array(3).fill([true, true]));
+    // pull・fetch は取得前なので分岐を確かめず許可する。merge は origin/main が手元にあるため、分岐を見て拒否できる
+    eq("sync-base-branch/4.3 分岐: pull・fetch の判定は取得前のため分岐を確かめず許可のまま（sync-ff-unverified の記述どおり）。手元に origin/main がある merge --ff-only は判定が拒否する（1.3・1.4）", [judgeAt("git pull --ff-only origin main", A.dir), judgeAt("git fetch origin main:main", wtA), judgeAt("git merge --ff-only origin/main", A.dir)], [ALLOW, ALLOW, ["deny", "notApplicable", "sync-not-fast-forward", null]]);
+    eq("sync-base-branch/4.3 分岐していても --ff-only の無い pull は判定が拒否する（1.3）", judgeAt("git pull origin main", A.dir).slice(0, 3), ["deny", "notApplicable", "sync-ff-only-required"]);
+
+    // 2. main を別の作業ツリーで確認中: fetch main:main は git に止められ、確認中の作業ツリーでの pull --ff-only は許可され main が進む
+    const B = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    const wtB = mkWorktree(B.dir, "dev/foo");
+    const remoteTip = advanceRemote(B.remote, tmps);
+    const before = gitOut(B.dir, "rev-parse", "main");
+    const fetchBusy = run(wtB, B.dir, "fetch", "origin", "main:main");
+    eq("sync-base-branch/4.3 main を別の作業ツリーで確認中だと、作業ブランチの作業ツリーからの fetch main:main は git が止め、main は変わらない（1.2）", [fetchBusy[0] !== 0, fetchBusy[1] === before, before !== remoteTip], [true, true, true]);
+    eq("sync-base-branch/4.3 その fetch も判定は許可（案内する代替の git -C <作業ツリー> pull --ff-only も同じ許可）（1.2・1.3）", [judgeAt("git fetch origin main:main", wtB), judgeAt(`git -C ${B.dir} pull --ff-only origin main`, wtB)], [ALLOW, ALLOW]);
+    const pullBusy = run(wtB, B.dir, "-C", B.dir, "pull", "--ff-only", "origin", "main");
+    eq("sync-base-branch/4.3 git -C <main を確認中の作業ツリー> pull --ff-only は実行でき、main が最新に fast-forward される（1.2）", [pullBusy[0], pullBusy[1] === remoteTip], [0, true]);
+
+    // 3. 先に進めるだけ（ローカル main がリモートの祖先）: fetch main:main・pull --ff-only とも成功し、判定の許可と一致する
+    const C = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG });
+    const tipC1 = advanceRemote(C.remote, tmps);
+    const fetchOk = run(C.dir, C.dir, "fetch", "origin", "main:main");
+    const D = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    const tipD = advanceRemote(D.remote, tmps);
+    const pullOk = run(D.dir, D.dir, "pull", "--ff-only", "origin", "main");
+    eq("sync-base-branch/4.3 先に進めるだけなら fetch main:main（main を確認していない作業ブランチから）・pull --ff-only（main 上）は成功して最新になる（1.2・1.3）", [fetchOk, pullOk], [[0, tipC1], [0, tipD]]);
+    eq("sync-base-branch/4.3 成功する先に進めるだけの更新は判定でも許可で、分岐のときと判定が同じ（1.2・1.3）", [judgeAt("git fetch origin main:main", C.dir), judgeAt("git pull --ff-only origin main", D.dir)], [ALLOW, ALLOW]);
+
+    for (const x of [A, B, C, D]) x.cleanup();
+    for (const t of tmps) rmSync(t, { recursive: true, force: true });
   }
 
   // ---- 3.3 保護対象への PR は作成まで ----
