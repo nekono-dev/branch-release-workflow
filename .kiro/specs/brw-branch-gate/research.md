@@ -92,3 +92,11 @@
 実際の `claude -p`（使い捨てのリポジトリ、BRW のフックを設定、`--permission-mode bypassPermissions`）で確認した。
 - 素の `git switch -c dev/probe-a` → 置き換えが実行され、worktree `.claude/worktrees/dev-probe-a` が作られ、**次の別の Bash 呼び出しの `pwd` が worktree、ブランチが `dev/probe-a`**（作業場所の移動を確認）。案内の見出し 4 行も表示された。
 - `EnterWorktree {name: "probe-b"}` → 拒否され、2 手の案内が表示された。エージェントは案内どおり `brw create` の後に `EnterWorktree {path}` で worktree に入れた。ただし案内の `<名前>`（path 側）はブランチ名ではなく worktree のディレクトリ名（`dev-probe-b`）で、エージェントが読み替えた。案内の分かりにくさとして残る課題。
+
+### 運用で見つかった課題: 案内の `brw` が PATH に無い（2026-11-26）
+
+プラグインとして導入した環境にはコマンド `brw` が PATH に無く、拒否の案内（`brw create <名前>` など）をそのまま実行できなかった。対応として、案内の文面を `node '<brw.mjs の絶対パス>' create <名前>` の形に統一した（`scripts/brw-cmd.mjs` の `BRW_RUN`）。`bin/brw` は採らない（Codex や PATH に入らない導入形態では解決しないため）。`brw pr` などの実行後の出力（`pr-flow.mjs`・`publish-cli.mjs`）は、すでに brw を実行できている文脈なので対象外。
+
+### 運用で見つかった課題: プラグインの版が更新されない（2026-11-26）
+
+機能追加後も `plugin.json` の版が変わらず、導入済みの環境が新しい内容を取り込んだか判別できなかった。機能を足す PR で版を上げる（今回 1.3.0）。検査の自動化は行わない。
