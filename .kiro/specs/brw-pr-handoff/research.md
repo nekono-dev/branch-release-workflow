@@ -132,3 +132,26 @@
 3. `brw pr` の分岐元からの実行で、作業の記録なしに承認・PR 作成・再実行の冪等性が成り立つか。
 4. 分岐元が本体のチェックアウトで、片付け（`finishUp`）が確実に通らないこと。
 5. フックの `brw pr` の許可（`agent-hooks.mjs` 179 行の信頼済みコマンド判定）が、分岐元からの実行でも通るか。
+
+---
+
+# 設計の記録（2026-11-26）: 要件 1.8〜1.11・2.8・3.10・4.12
+
+発見の種別は「既存の拡張」（軽い発見）。実機で確かめた内容は `feasibility.md` と `poc/` に置く。
+
+## 決めたこと（根拠つき）
+
+- **分岐元専用の軽い経路 `base-pr`（案 P2）を `brw pr` の中に置く。** 利用者の決定: 作業の記録は作業ブランチにだけ適用し、分岐元の PR は「リモートの取り込み → PR の作成 → 報告」の 3 段だけ。既存の公開（準備・計画・push）を分岐元へ広げると、5 か所の「開発ブランチだけ」の前提を同時に緩めることになり、片付けが分岐元に走る危険もある。
+- 変える箇所は、直接の PR 作成の判定（`evalPrCreateRules`）、`brw pr` の事前確認の振り分け、`brw pr-template`、`brw work start` の案内文だけ。公開の準備・計画・push（`publish.mjs`）は変えない。
+- **PR の作成・再利用の関数を `publish-pr.mjs` から切り出して公開する**（`createOrReusePr`）。作業の記録に依存しない形に分け、`runPublishPr` もこれを使う。リスク: 切り出しで既存の挙動を変えないこと（既存の試験で固定する）。
+- 拒否の案内は組ごとに選ぶ。`brw pr` で作れない組には、作成画面の URL（通信なしで作れる）を含めた手作業の手順を示す。
+
+## 簡素化・汎用化（design synthesis）
+
+- 「差があるか」は、fetch 後のローカルの参照で足りる（`git rev-list --count origin/<保護>..origin/<分岐元>`）。GitHub の比較 API は使わない（通信と認証を増やさない）。
+- 先行の検出は `ff-only` に任せられない（PoC）。`rev-list --count origin/<分岐元>..<分岐元>` を別に使う。
+
+## 参照した資料
+
+- GitHub REST API の記述（`github/rest-api-description`、`api.github.com.json`、`info.version` 1.1.4。取得 2026-11-26）: `POST /repos/{owner}/{repo}/pulls` は 201・403・422 を返す。
+- 実 GitHub の読み取り（2026-11-26）: `gh api repos/nekono-dev/branch-release-workflow/pulls/12` が `base.ref=main`・`head.ref=dev/sync-base-branch`・`merged=true` を返し、BRW 経由の開発ブランチ→保護ブランチの PR が実在する。同じ API の `compare/main...main` は `status=identical`・`ahead_by=0`。

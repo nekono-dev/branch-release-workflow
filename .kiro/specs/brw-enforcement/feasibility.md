@@ -15,7 +15,22 @@
 
 ## 設計の確認
 
-- 判定: 未通過
+- 判定: 通過
+
+確認日 2026-11-26。根拠の無い前提: なし。
+
+| 前提 | 根拠 |
+|---|---|
+| Stop が状態ファイル無しでも Claude Code・Codex で応答の終了を止められ、2 回目は `stop_hook_active:true` になる | **PoC** `poc/claude-stop-no-state.sh`（実行日 2026-11-26、Claude Code 2.1.329、一時リポジトリ、作業の記録なし）: 1 回目 `block`、2 回目 `stop_hook_active:true` で通った。Codex は `tests/real-env/README.md` の実機観測（2026-11-21、Codex 0.167。同じ形の block を受け入れ、2 回目は `stop_hook_active:true`）。Codex 0.172.0 での再観測は実装時の実環境試験で行う |
+| 未コミット・未追跡・未 push・同名リモート無しを git の出力で判定できる | **PoC** `poc/git-states.sh`（2026-11-26、一時リポジトリ・bare remote）: 9 状態で期待どおり（無視ファイルは数えず、新規ブランチの commit は未 push として数える） |
+| エージェントの実行は標準入出力が端末でない | **PoC**（2026-11-26）: Claude Code 2.1.329 の Bash と Codex 0.172.0 の `codex exec` で `process.stdin.isTTY`・`process.stdout.isTTY` がともに `undefined` |
+| 疑似端末による迂回の可否（確認の限界） | **PoC**（2026-11-26）: `script -qc` 経由では `isTTY=true`。迂回できるため、設計は限界を明記し、フックの拒否で補強する（`design.md` の `pr-merge` の節） |
+| マージ API が `sha`・`merge_method` を受け、405・409 を返す | **一次資料** GitHub REST API の記述（`github/rest-api-description` の `api.github.com.json`、`info.version` 1.1.4、取得 2026-11-26）の `pulls/merge` |
+| PR の取り込み先（`base.ref`）を API で取得できる | **PoC**（2026-11-26、実 GitHub の読み取り）: `gh api repos/nekono-dev/branch-release-workflow/pulls/12` が `base.ref` を返した |
+| 直接のマージ（`gh pr merge`・`--auto`）の拒否が両ホストで届く | **PoC** `tests/real-env/README.md`（2026-11-21、Claude・Codex）: どちらも deny |
+| 宣言または利用者の指示から push 禁止を読む方法 | 外部の動作に依存しない（既存の `restrictionsFor` と `autoApprove.push: false` の扱い。利用者が 2026-11-23 に確認済み）。 |
+
+実マージの実行（`PUT .../merge`）は、一次資料の確認にとどめ、実際の PR では行っていない（外部へ影響するため）。実装後に、使い捨てのリポジトリで実環境試験として確かめる（`design.md` の Testing Strategy）。
 
 ## タスク計画の確認
 

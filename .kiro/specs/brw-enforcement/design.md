@@ -2,7 +2,7 @@
 
 ## Overview
 
-BRW 導入リポジトリの Claude Code と Codex の操作を、同じブランチ分類と許可条件で判定する。開発中の push、作業完了時の PR 作成、依存作業の取り込みを BRW で進められるようにする。導入担当者が選択したリポジトリでは、GitHub のブランチ Ruleset で恒常的な分岐元への取り込みを制御する。作業ブランチの変更は、spec の各フェーズの生成後と実装の 1 タスク完了ごとに、許可を求めずに commit・push し、応答を終えるときに残りがあれば止めて案内する（リモートだけで再開・引き継ぎできる状態を保つ）。
+BRW 導入リポジトリの Claude Code と Codex の操作を、同じブランチ分類と許可条件で判定する。開発中の push、作業完了時の PR 作成、依存作業の取り込みを BRW で進められるようにする。導入担当者が選択したリポジトリでは、GitHub のブランチ Ruleset で恒常的な分岐元への取り込みを制御する。作業ブランチの変更は、成果物のまとまり（文書の作成を含む）の作成完了ごとと、実装の 1 つの作業単位の完了ごとに、許可を求めずに commit・push し、応答を終えるときに未コミットの変更または未 push の commit があれば止めて案内する（リモートだけで再開・引き継ぎできる状態を保ち、終了時に未 push の作業ブランチを残さない）。恒常的な分岐元向けの PR のマージは、エージェントには許さず、利用者が自分の端末で実行する `brw pr-merge` だけが行う。保護ブランチ向けの PR は、これまでどおり利用者が GitHub 上でマージする。
 
 ### Goals
 
@@ -10,6 +10,7 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 - 作業完了時の push と PR 作成を復旧できる一連の処理にする。
 - Ruleset の採否確認、書き込み権限の検査、適用、実効設定の確認を一つの導入操作で行う。
 - 作業ブランチの変更を区切りごとに commit・push し、途中で終了してもリモートだけで再開できる状態を保つ。応答の終了時に、作業ブランチの未コミットの変更と未 push の commit を検出して案内する。
+- 恒常的な分岐元向けの PR のマージを、利用者が自分の端末でだけ実行できるコマンドに限り、エージェントの直接のマージ・自動マージ予約は取り込み先にかかわらず拒否のままにする。保護ブランチ向けのマージはどの経路でも行わない。
 
 ### Non-Goals
 
@@ -26,19 +27,20 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 - BRW が作成または再利用する PR と、導入担当者が選択した対象への Ruleset の導入・整合検査。
 - エージェントごとのフック導入状態、実効 Ruleset、復旧に必要な情報の CLI 表示。
 - リモートの URL を GitHub のリポジトリとして読む規則（SSH の別名ホストの解決と、確定できないときの案内。要件 1.6〜1.8）。
-- 作業ブランチの区切りごとの commit・push の規則（指示の文面と、commit の確認省略）、および応答の終了時に作業ブランチの未コミットの変更・未 push の commit を検出して案内する Stop の処理（要件 2.9〜2.16）。
+- 作業ブランチの区切りごとの commit・push の規則（指示の文面と、commit の確認省略）、および応答の終了時に開発ブランチの未コミットの変更・未 push の commit を検出して案内する Stop の処理と、フックが使えない環境向けの終了前の確認 `brw guard --finish`（要件 2.9〜2.19）。
+- 恒常的な分岐元向けの PR を、利用者の端末の対話で確認したうえでマージする `brw pr-merge` と、エージェントによる直接のマージ・自動マージ予約・`brw pr-merge` の呼び出しの拒否（要件 3.2〜3.9）。
 
 ### Out of Boundary
 
 - プレビューと配備のトリガーは既存のプロバイダーと CI が管理する。
 - GitHub のレビュー・必須チェック、アカウントの権限設定、ネットワーク制御、管理対象フックの配布は各環境の設定で管理する。
 - Codex・Claude へのフックの届け方（プラグインの配布、フック定義、Codex のフックの信頼登録、`brw setup` の Codex 側の処理、診断の Codex の状態語彙）は harness-plugin-unification が持つ。本 spec は届いたフックが何を判定するかだけを持つ。
-- cc-sdd の `kiro-*` スキル（要件・設計・タスクの生成、`kiro-impl`）の手順。これらはセッションの開始ごとに入れ直されるため書き換えられない。区切りの commit・push は、BRW の SKILL.md と導入先の CLAUDE.md の指示、および Stop の検出で担保する。
+- 呼び出し側のスキル（cc-sdd の `kiro-*` など）の手順。これらはセッションの開始ごとに入れ直されるため書き換えられず、BRW もこれらを前提にしない。区切りの commit・push は、BRW の SKILL.md の一般的な指示（特定のスキルや文書の置き場に依存しない言い方）、導入先の指示（このリポジトリでは CLAUDE.md）、および Stop の検出で担保する。
 - フックの保証範囲は稼働確認済みの操作経路。独立したプロセス、対話シェル内の命令、ホストがフック対象にしないツール経路には、GitHub 上の分岐元への反映時に Ruleset が適用される。
 
 ### Allowed Dependencies
 
-- Node.js 22 以上の標準モジュールと既存の ESM、Git と `gh`、OpenSSH の `ssh -G`（設定の読み取りのみ。無くても拒否側に倒れる）、Claude Code と Codex のフック（届け方は harness-plugin-unification の対応表に従う）、GitHub REST API。既存の宣言読み込み、命名規則、worktree とプレビュー操作を利用する。
+- Node.js 22 以上の標準モジュールと既存の ESM、Git と `gh`、OpenSSH の `ssh -G`（設定の読み取りのみ。無くても拒否側に倒れる）、Claude Code と Codex のフック（届け方は harness-plugin-unification の対応表に従う）、GitHub REST API（PR の取得 `GET /pulls/{n}` と、`brw pr-merge` だけが使うマージ `PUT /pulls/{n}/merge`）。既存の宣言読み込み、命名規則、worktree とプレビュー操作を利用する。`work-remainder.mjs` は brw-pr-handoff の `tidy.mjs` が公開する `SECRET_PATTERNS` を読むだけで使う（片方向）。
 
 ### Revalidation Triggers
 
@@ -46,6 +48,8 @@ BRW 導入リポジトリの Claude Code と Codex の操作を、同じブラ�
 - `ssh -G` の出力形式（`hostname` 行）や OpenSSH の設定の解釈が変わった場合。
 - 宣言の `autoApprove` の項目（`commit` の追加を含む）、作業の制限（`noPush`）、Stop イベントの登録が変わった場合。
 - ブランチの分類、分岐元の解決、導入確認の対象、GitHub の権限や実効ルールの契約が変わった場合。ブランチ作成、終了処理、片付け、プレビューの CI トリガーも再検証する。
+- GitHub の PR 取得・マージ API の契約（`sha`・`merge_method`・405/409 の応答）、実行環境（Claude Code・Codex）が標準入出力を端末として渡すかどうかが変わった場合（`brw pr-merge` の確認が成立しなくなる）。
+- `SECRET_PATTERNS`（brw-pr-handoff）の形が変わった場合。
 
 ## Architecture
 
@@ -71,6 +75,8 @@ flowchart LR
     CLI --> Rules[導入と Ruleset]
     Publication --> GitHub[GitHub]
     Rules --> GitHub
+    CLI --> PrMerge[PR のマージ 利用者の端末]
+    PrMerge --> GitHub
 ```
 
 依存方向は `lib.mjs` → 操作判定・GitHub クライアント → 完了公開・Ruleset → フック変換と CLI とする。矢印の左側を下位依存とし、UI やホストの応答形式は下位モジュールに持ち込まない。
@@ -92,25 +98,26 @@ flowchart LR
 | `scripts/operation-policy.mjs` | 新規 | シェル・対応する GitHub ツール入力の操作への変換、ref 分類 |
 | `scripts/github-operations.mjs` | 新規 | `gh` コマンド・MCP ツール入力からの GitHub 書き込み経路（PR 作成・マージ・自動マージ予約など）の識別。operation-policy から呼ぶ 更新: `remoteRepos`・`parseRepoSpec` の scp・ssh 形式のホストを `remote-url.mjs` で正規化し、SSH の別名が `github.com` に解決できれば GitHub を指す remote として扱う（要件 1.6, 1.7） |
 | `scripts/remote-url.mjs` | 新規 | リモートの URL から GitHub の所有者・リポジトリ名を読む唯一の入口。scp・ssh 形式のホストが SSH の別名なら `ssh -G` で `github.com` に解決する（読み取りのみ・通信なし）。確定できない理由の文言（別名ホストの案内を含む）を作る（要件 1.6〜1.8） |
-| `scripts/operation-decision.mjs` | 新規 | 操作・登録済み宣言・作業の禁止から、拒否・通す・確認省略の可否を決める共通判定（ホストの入出力の形は持たない） |
-| `scripts/agent-hooks.mjs` | 新規・更新 | イベントとホスト応答の変換、終了時の作業状態の案内。更新: Stop に作業ブランチの残りの案内を統合する |
-| `scripts/work-remainder.mjs` | 新規（追加） | 作業ブランチの未コミットの変更と未 push の commit の検出、案内文の作成（読み取り専用・ネットワークに依存しない） |
+| `scripts/operation-decision.mjs` | 新規 | 操作・登録済み宣言・作業の禁止から、拒否・通す・確認省略の可否を決める共通判定（ホストの入出力の形は持たない）。更新: `github-merge`・`auto-merge` の拒否は取り込み先を問わず維持し、案内文を `brw pr-merge` を含む短い文面（フック経路の 500 文字の制限内）に改める |
+| `scripts/agent-hooks.mjs` | 新規・更新 | イベントとホスト応答の変換、終了時の作業状態の案内。更新: Stop に作業ブランチの残りの案内を統合する。Bash の PreToolUse で、信頼済みの `brw pr-merge` の呼び出しを拒否する（コード `pr-merge-user-only`。要件 3.5 を実行前に止める補強） |
+| `scripts/work-remainder.mjs` | 新規（追加） | 開発ブランチの未コミットの変更と未 push の commit の検出、秘密情報らしい名前のファイルの抽出、案内文の作成（読み取り専用・ネットワークに依存しない）。Stop と `brw guard --finish` が共用する |
 | `scripts/hook-install.mjs` | 新規 → 削除 | harness-plugin-unification で削除される（Claude の登録検査は `hook-registry.mjs` へ移る） |
 | `scripts/hook-diagnose.mjs` | 新規 | フックの稼働と対応経路の診断（読み取り専用。合成入力による動作検査） |
 | `scripts/github-client.mjs` | 新規 | 固定した GitHub ホスト・リポジトリへの API 呼び出し、対象の照合、応答とエラーの検証、PR・Ruleset の照会と追加 |
 | `scripts/publish.mjs` | 新規 | 作業 ID・完了申告・公開計画・push の実行と、途中・完了の状態管理 更新: `githubRepoOf` を `remote-url.mjs` へ移し再エクスポートする（呼び出し側の互換を保つ）。push 先を確定できない失敗文言を `remote-url.mjs` の共通文言にする（要件 1.6〜1.8） |
 | `scripts/publish-pr.mjs` | 新規 | 保護対象への PR の再利用・作成と、応答不確実時の再取得による照合 |
 | `scripts/publish-cli.mjs` | 新規 | `brw work`・`brw publish`・`brw pause` の入口（引数の検査、文言、次の操作の案内） 更新: push 先を確定できない失敗文言を共通文言にする（要件 1.8） |
+| `scripts/pr-merge.mjs` | 新規 | `brw pr-merge <PR 番号>`。端末判定 → PR の取得 → 取り込み先の判定 → 利用者への確認 → マージ（要件 3.3〜3.6） |
 | `scripts/ruleset-choice.mjs` | 新規 | 導入先と分岐元ごとの Ruleset の採否の保存と再利用 |
 | `scripts/ruleset-preflight.mjs` | 新規 | 導入前の読み取り検査（認証・導入権限・プラン・squash 設定・既存ルール） |
 | `scripts/ruleset-apply.mjs` | 新規 | 既存ルールの再利用、不足分だけの Ruleset 追加、応答不確実時の照合 |
 | `scripts/ruleset-inspect.mjs` | 新規 | 適用後・日常の実効ルールと作業経路（迂回可能な権限）の検査 |
 | `scripts/setup-cli.mjs` | 新規 | `brw setup`・`--migrate`・`brw check --ruleset` の入口（対象の決定、問い、表示、終了コード） |
-| `scripts/brw.mjs` | 更新 | サブコマンドの振り分け、既存ブランチ操作と各モジュールの呼び出し（旧 `hook` サブコマンドは手動実行用で、フック登録は agent-hooks.mjs）。`autoApprovable` など手動実行用の判定は拡張しない（実際の確認省略の経路は `operation-decision.mjs` と `agent-hooks.mjs`） |
+| `scripts/brw.mjs` | 更新 | サブコマンドの振り分け、既存ブランチ操作と各モジュールの呼び出し（旧 `hook` サブコマンドは手動実行用で、フック登録は agent-hooks.mjs）。追加: `pr-merge` の振り分けと、`guard --finish`（コマンドを渡さずに終了前の残りを判定する形。要件 2.19）。`autoApprovable` など手動実行用の判定は拡張しない（実際の確認省略の経路は `operation-decision.mjs` と `agent-hooks.mjs`） |
 | `hooks/hooks.json` | 更新 | Claude プラグインのイベント登録。Codex 用の定義と導入は harness-plugin-unification が持つ（`scripts/install-codex.mjs` は削除） |
-| `SKILL.md`、`references/setup.md`、`references/config.md`、`assets/config.example.json` | 更新 | ゲートで求めるワークフロー、導入・移行・復旧と対応範囲、宣言例。追加: SKILL.md の「作業の区切りの commit・push」（「してよい」を「行う」に改める）、`references/config.md` の `autoApprove.commit` と push 禁止の扱い |
+| `SKILL.md`、`references/setup.md`、`references/config.md`、`assets/config.example.json` | 更新 | ゲートで求めるワークフロー、導入・移行・復旧と対応範囲、宣言例。追加: SKILL.md の「作業の区切りの commit・push」（「してよい」を「行う」に改める。特定のスキルを示さない一般の言い方）と「終了前の確認」（フックが無い環境では `brw guard --finish`）、「分岐元向け PR のマージ」（利用者が自分の端末で `brw pr-merge`。保護ブランチ向けは GitHub 上）、`references/config.md` の `autoApprove.commit` と push 禁止の扱い |
 | `CLAUDE.md`（このリポジトリ） | 更新 | このリポジトリで cc-sdd の各フェーズ・各タスクの区切りに commit・push する指示（`kiro-*` スキルは書き換えられないため） |
-| `tests/work-remainder.mjs`、`tests/agent-hooks-session.mjs`、`tests/branch-ops.mjs`、`tests/decision.mjs` | 新規・更新 | 残りの検出、Stop の統合、commit の確認省略、リモートからの再開の契約テスト |
+| `tests/work-remainder.mjs`、`tests/pr-merge.mjs`、`tests/agent-hooks-session.mjs`、`tests/branch-ops.mjs`、`tests/decision.mjs` | 新規・更新 | 残りの検出、Stop と `guard --finish`、commit の確認省略、リモートからの再開、`brw pr-merge` の判定・確認・マージ、直接のマージの拒否の契約テスト |
 | `tests/remote-url.mjs` | 新規 | 別名ホストの解決・拒否・文言の契約テスト。`PATH` の先頭に置いた偽の `ssh` で `ssh -G` の出力を固定する。`tests/publish-plan.mjs`・`tests/decision.mjs` に別名 origin での公開準備と `gh pr create -R` の判定を足す（要件 1.6〜1.8） |
 | `tests/selftest.mjs` と `tests/*.mjs`（モジュール別の契約テスト・`integration-*.mjs`）、`tests/support/`、`tests/real-env/` | 更新・新規 | 既存 CLI の互換性、新しい操作・導入契約の統合テスト、テスト補助（一時リポジトリ・偽の GitHub）、実環境検証の補助 |
 
@@ -161,7 +168,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Boundary[区切り: spec の各フェーズ生成後または実装の 1 タスク完了] --> Commit[git add と git commit]
+    Boundary[区切り: 成果物のまとまりの作成完了 または 実装の 1 つの作業単位の完了] --> Commit[git add と git commit]
     Commit -->|commit の確認省略| Push[git push]
     Push -->|push の確認省略| Resume[リモートだけで再開できる状態]
     Boundary --> Stop[応答を終えようとする]
@@ -184,13 +191,23 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | 2.1, 2.6, 2.8 | 操作判定、フック変換 | 送り先の検証と確認省略、明示制限の優先 |
 | 2.2, 2.3, 2.4, 2.5 | 完了公開、フック変換 | 状態と push・保護対象への PR 作成・再利用 |
 | 2.7 | 完了公開、GitHub クライアント | 失敗の報告、push 後および作成応答消失時の復旧 |
-| 2.9, 2.10 | SKILL.md・CLAUDE.md の指示、操作判定（commit の確認省略） | 区切りの commit・push、`evalCommit` の確認省略、`plainOperation` の複合コマンド、`autoApprove.commit` |
-| 2.11 | 区切りの commit・push、`brw resume`、作業ブランチの残り | リモートからの再開（既存の `resume`）、終了時の検出 |
-| 2.12, 2.13 | 作業ブランチの残り、フック変換（Stop） | `remainderOf`、Stop の統合案内、調査のみの応答は止めない |
-| 2.14 | 作業ブランチの残り、完了公開の状態（`noPush`）、宣言（`autoApprove.push`） | push 禁止時は commit までの案内と未 push の報告 |
-| 2.15 | SKILL.md の指示、Stop の案内文 | 失敗時の報告（成功・未完了・理由）、手元に残る変更の明示 |
-| 2.16 | 操作判定、作業ブランチの残り | 保護・分岐元・宣言外では適用せず要件 1 の拒否に従う |
-| 3.1, 3.2, 3.3 | 操作判定、フック変換、CLI | PR 不要の開発間マージ、エージェントによる保護対象へのマージの拒否、GitHub 上での squash の案内 |
+| 2.9, 2.10 | 作業ブランチの残り、フック変換（Stop） | `remainderOf`（cwd と Git だけを使い、作業の記録・ブランチの作り方に依存しない）、Claude・Codex の Stop で block |
+| 2.11 | 作業ブランチの残り | 案内文に、秘密情報らしいファイルを commit に含めないことと、push できないときは理由を報告して終了することを含める |
+| 2.12 | フック変換（Stop） | `stop_hook_active` の再入では案内しない（既存） |
+| 2.13 | 作業ブランチの残り | 未コミットも未 push も無ければ `null`（止めない） |
+| 2.14 | SKILL.md・CLAUDE.md の指示、操作判定（commit の確認省略） | 区切りの commit・push、`evalCommit` の確認省略、`plainOperation` の複合コマンド、`autoApprove.commit` |
+| 2.15 | 区切りの commit・push、`brw resume`、作業ブランチの残り | リモートからの再開（既存の `resume`）、終了時の検出 |
+| 2.16 | 作業ブランチの残り、完了公開の状態（`noPush`）、宣言（`autoApprove.push`） | push 禁止時は未 push を理由にせず、未コミットの変更の案内は残す |
+| 2.17 | SKILL.md の指示、Stop の案内文 | 失敗時の報告（成功・未完了・理由）、手元に残る変更の明示 |
+| 2.18 | 操作判定、作業ブランチの残り | 保護・分岐元・宣言外では案内も停止もしない。commit・push は要件 1 の 3 で拒否 |
+| 2.19 | `brw guard --finish`、SKILL.md | フックが使えない環境で 2.9 と同じ判定を `remainderOf` で返す（`[block]`・終了コード 1 / `[allow]`・0） |
+| 3.1 | 操作判定、CLI | PR 不要の開発間マージ（既存） |
+| 3.2 | 操作判定、フック変換 | `github-merge`・`auto-merge` を取り込み先にかかわらず拒否（既存の判定を維持） |
+| 3.3 | 操作判定（案内文） | 拒否の案内に `brw pr-merge <番号>` を、実行できる形で含める（取り込み先を知らずに出すため、分岐元向けだけ実行でき保護ブランチ向けは拒否される旨を含める） |
+| 3.4, 3.5, 3.6 | PR のマージ（`pr-merge.mjs`）、フック変換 | 端末の対話での確認、非対話の拒否、取り込み先が保護ブランチ・確定不能のときの拒否 |
+| 3.7 | 操作判定 | 自動マージ予約の拒否（既存） |
+| 3.8 | 操作判定（`evalMerge`） | 開発ブランチから分岐元・保護ブランチへのローカルマージ・push の拒否（既存。試験で固定） |
+| 3.9 | 操作判定、完了公開 | 保護ブランチ向けの PR の URL・取り込み先・squash の案内（既存） |
 | 4.1, 4.2, 4.3, 4.4 | CLI、Ruleset | 対話の既定値（導入しない）、非対話の選択（未指定は見送り）、見送り |
 | 4.5, 4.6 | Ruleset | リポジトリ ID・対象 ref に対応する導入記録 |
 | 5.1, 5.2, 5.3 | Ruleset、GitHub クライアント | 事前検査、変更の保留、一連の適用フロー |
@@ -207,6 +224,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | フック変換 | `handleHook(host, event) → HookResponse` | 操作判定、プロジェクトのフック信頼状態 |
 | 完了公開 | `publish(input) → PublishResult` | Git remote、作業先の状態、GitHub API |
 | 作業ブランチの残り | `remainderOf(cwd) → Remainder \| null`、`remainderGuidance(remainder, policy) → string \| null` | 宣言、Git、作業の制限 |
+| PR のマージ | `runPrMerge(args, deps) → exitCode` | `github-client`、`remote-url`、宣言、利用者の端末 |
 | Ruleset | `plan(target, selection) → Result<Plan>`、`apply(plan) → Result<Report>`、`inspect(target) → Report` | GitHub クライアント、導入記録 |
 | GitHub クライアント | `request(target, method, path, body?) → Result<Response>` | `gh api`、GitHub API の入力と応答 |
 
@@ -223,7 +241,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
   - `lib.mjs`: `validateConfig` が `autoApprove.commit` を受け付け、`autoApproveOf` が `commit` を返す。
   - Claude は `PreToolUse` の許可、Codex は `PermissionRequest` の許可で返す。
 - `brw merge <source>` は、元 ref と checkout 先の両方が宣言済みの開発ブランチと確認できる場合にローカルマージする。対象 worktree と確定した元コミットを使い、競合は Git の状態と解決方法を返す。通常の開発ブランチへの push は共通判定に従う。開発間の取り込みに PR 作成は不要。
-- `protectedBranches` と恒常的な分岐元は、エージェント操作上の保護対象とする。対応するフック経路で直接の PR 作成も同じ分類を使い、宣言済み開発ブランチから保護対象への PR だけを BRW の公開操作として許可する。開発ブランチ間はローカルマージを案内し、宣言外への PR 作成は拒否する。保護対象への PR は作成または再利用まで行い、利用者に GitHub 上の PR URL、base、squash の案内を返す。エージェントからの GitHub マージと自動マージ予約、および非開発ブランチへのローカルマージは、対応するフック経路で拒否する。BRW は GitHub のマージ API を呼ばない。GitHub 側の直接更新とマージ方式の制限は、選択して適用した Ruleset の対象 ref に効く。
+- `protectedBranches` と恒常的な分岐元は、エージェント操作上の保護対象とする。対応するフック経路で直接の PR 作成も同じ分類を使い、宣言済み開発ブランチから保護対象への PR だけを BRW の公開操作として許可する（恒常的な分岐元から保護ブランチへの PR は brw-pr-handoff の `brw pr` が扱う）。開発ブランチ間はローカルマージを案内し、宣言外への PR 作成は拒否する。保護対象への PR は作成または再利用まで行い、利用者に GitHub 上の PR URL、base、squash の案内を返す。エージェントからの GitHub マージ（`gh pr merge`・API・MCP）と自動マージ予約は、**取り込み先にかかわらず**フック経路で拒否する（フックは PR の取り込み先を調べない。通信を判定に入れない）。拒否の案内は、取り込み先が恒常的な分岐元の PR は利用者が自分の端末で `brw pr-merge <番号>` を実行すること、保護ブランチ向けは GitHub 上でマージすること、を短く示す。非開発ブランチへのローカルマージも拒否する。BRW が GitHub のマージ API を呼ぶ入口は `brw pr-merge` だけで、利用者の端末の確認の後に限る。GitHub 側の直接更新とマージ方式の制限は、選択して適用した Ruleset の対象 ref に効く。
 
 - Claude・Codex へのフックの届け方（プラグインの配布、フック定義、信頼の登録、診断）は harness-plugin-unification の設計に従う。本 spec は、届いたフックのイベントごとの判定と応答を定める。許可と拒否の両方について、対応する実行環境でフックが届くことの稼働検査は、同 spec の受け入れ確認で行う。
 
@@ -258,12 +276,44 @@ function unknownDestinationText(remote: string, url: string | null): string;
 - 状態は `inProgress`、`ready`、`pushed`、`published` を持ち、`brw pause --work <id> --reason <reason>` は次の副作用を保留する。操作ごとに成功・対象外・明示禁止による省略・通常確認待ち・失敗を記録する。必要な操作が終了したときは `published` とし、PR を作成しない場合は URL を持たない。中断後の再開は `brw work resume --work <id>` で明示し、作業対象と検証結果を再照合する。再試行は同じ作業 ID と対象を再照合する。worktree ごとに公開実行を直列化し、操作間では状態の記録を更新できるようにする。push と PR 作成それぞれの直前に状態ロック内で最新の制限と計画の版を照合して操作開始を記録する。開始済みの操作は取り消せないため、追加された制限や中断は次の操作から適用する。終了時フックは当該ホストのセッションに結び付いた作業のみを参照する。準備済みの公開が残っている場合に、同じ作業 ID での再試行または中断を案内する。作業途中、調査のみ、中断済み、明示禁止だけが残る状態では公開を起動しない。終了時フックは書き込みや新しい作業の開始を行わない。
 - `finish` は既存の取り込み条件を利用する。リモートとの照合が失敗し、未 push の commit がないと確認できない場合は片付けを保留する。
 
+### PR のマージ（利用者の端末）（`scripts/pr-merge.mjs`）
+
+| 項目 | 内容 |
+|---|---|
+| 役割 | 取り込み先が恒常的な分岐元の PR を、利用者が自分の端末で確認してマージする |
+| 要件 | 3.3〜3.6 |
+
+**責務と制約**
+- 入口は `brw pr-merge <PR 番号>`。オプションは設けない（マージ方式は `squash` に固定。リポジトリの Ruleset が squash 限定である運用に合わせる）。
+- 順序: ① 標準入力と標準出力がともに端末でなければ、通信も git の変更もせずに「利用者が自分の端末で実行する必要がある」ことを案内して終了コード 1（3.5）。② 宣言と origin の GitHub リポジトリを読む（`remote-url`）。③ `GET /repos/{o}/{r}/pulls/{n}` で状態・取り込み先（`base.ref`）・取り込み先のリポジトリ・head の SHA・タイトルを得る。④ 判定（下記）。⑤ PR の番号・タイトル・`head → base`・head の SHA（短縮）を表示し、`マージしますか [y/N]` を端末から読む。`y`・`yes` 以外は何もせず終了コード 1（既定は中止）。⑥ `PUT /repos/{o}/{r}/pulls/{n}/merge` に `merge_method: "squash"` と、③で得た `sha` を渡す。`sha` が食い違えば GitHub が 409 を返し、確認した内容と違うものをマージしない。⑦ 結果（マージの commit の SHA、405 の理由、409 は再実行の案内）を表示する。
+- 判定（④）は `classifyBranch(config, baseRef)` で、`base`（恒常的な分岐元）のときだけ進める。`protected` は、利用者の端末でも拒否し「保護ブランチ向けは GitHub 上でマージする」と示す（3.6）。開発ブランチ・宣言外・取り込み先のリポジトリが origin と違う・PR が open でない・取り込み先を得られない（認証・通信の失敗を含む）ときも、理由を示して実行しない（3.6）。通信の失敗で推測して進めない。
+- 状態ファイルや作業の記録を作らない。ブランチの削除はしない。`brw pr-merge` を実行する権限（GitHub のトークンの権限）と、リポジトリのマージ条件（必須チェック・レビュー）は GitHub 側の設定が決める。
+
+**依存**: `lib.mjs`（`loadConfig`・`classifyBranch`・`repoRoot`。P0）、`remote-url.mjs`（P0）、`github-client.mjs`（`createGitHubSession` による固定したホスト・リポジトリへの呼び出し。P0）。
+
+**契約**: Service
+
+```js
+/** @typedef {{number: number, state: "open"|"closed", merged: boolean, title: string, headRef: string, headSha: string, baseRef: string, baseRepo: {owner: string, name: string}}} PrFacts */
+/** @typedef {{ok: true} | {ok: false, code: "not-open"|"base-protected"|"base-not-integration"|"repo-mismatch", reason: string}} MergeVerdict */
+
+/** 終了コード 0=マージ済み / 1=実行せず・失敗 / 2=使い方の誤り。deps で端末判定・入力・GitHub 接続を差し替えられる（試験用）。 */
+export async function runPrMerge(args: string[], deps?: PrMergeDeps): Promise<number>;
+
+/** 取り込み先の判定だけを行う純粋関数。 */
+export function judgeMerge(config: Config, facts: PrFacts, origin: {owner: string, name: string}): MergeVerdict;
+```
+
+- 事前条件: `args` は 1 つの正の整数。事後条件: 終了コード 0 のとき、PR は取り込み先が恒常的な分岐元で、利用者が `y` と答えた head の SHA でマージされている。
+- **確認の強さと限界**: 端末判定は、エージェントが標準入出力を端末として渡されない実行環境（Claude Code 2.1.329 の Bash と Codex 0.172.0 のシェルで実測。poc/ を参照）を前提に、利用者の端末の実行とエージェントの実行を分ける。ただし、エージェントが疑似端末（`script` など）を作って入力を与えれば端末判定は満たされる（実測）。このため、フックは信頼済みの `brw pr-merge` の呼び出しを Bash の実行前に拒否して補強するが、これは協調的なエージェントの誤用を防ぐものであり、悪意ある迂回を防ぐ強制ではない（既存の `--confirmed` と同じ限界）。迂回を許さない保証は、GitHub のマージ権限と Ruleset が与える。
+
+
 ### 作業ブランチの残りの検出（Stop）
 
 | 項目 | 内容 |
 |---|---|
 | 役割 | 応答を終えるとき、作業ブランチに未コミットの変更または未 push の commit があれば終了を止めて案内する |
-| 要件 | 2.11〜2.16 |
+| 要件 | 2.9〜2.13、2.16〜2.19 |
 
 **責務と制約**
 - 読み取りだけを行い、状態・設定・リモートを変更しない。ネットワークを使わない（追跡ブランチの古さは許容する）。
@@ -272,14 +322,15 @@ function unknownDestinationText(remote: string, url: string | null): string;
 - 未コミットの変更: `git status --porcelain --untracked-files=normal`（ignore されたものは含まない。新規の未追跡ファイルを含める）。
 - 未 push の commit: `git rev-list --count HEAD --not --remotes`（既知のどのリモート追跡ブランチにも含まれない commit の数）。追跡ブランチが無い新規のブランチも検出でき、初回の push 前でも成立する。
 - push 禁止: 作業の制限 `noPush`（`brw work restrict`。セッションではなく worktree の現在の作業から解決する既存の `restrictionsFor`）、または宣言の `autoApprove.push` が明示的に `false` のとき、未 push は理由にしない。未コミットの変更の案内は残し、「commit だけ行い、未 push であることを報告する」と案内する（2.14）。宣言に push を禁止する専用の項目は無いため、`autoApprove.push: false`（確認を省略しない運用）を「宣言が push を禁じる」と扱う（利用者が 2026-11-23 に確認済み）。この扱いは `references/config.md` に明記する。
-- 案内は `stop_hook_active` の再入では出さない（既存の規則）。既存の「準備済みで未公開の作業」の案内と 1 つの block にまとめ、公開の案内を先に、残りの案内を後に並べる。変更も未 push も無い調査・確認だけの応答では案内しない（2.13）。
+- 案内は `stop_hook_active` の再入では出さない（既存の規則。Claude Code 2.1.329 の実機で、状態ファイルが無い一時リポジトリでも 1 回目は block、2 回目は `stop_hook_active:true` になることを確認した。poc/ を参照）。既存の「準備済みで未公開の作業」の案内と 1 つの block にまとめ、公開の案内を先に、残りの案内を後に並べる。変更も未 push も無い調査・確認だけの応答では案内しない（2.13）。
+- **終了前の確認（2.19）**: フックが使えない環境（未導入・未信頼）向けに、`brw guard --finish` が同じ `remainderOf`・`remainderGuidance` で判定し、残りがあれば `[block] <案内>` を出して終了コード 1、無ければ `[allow]` で 0 を返す（`stop_hook_active` の概念は無く、毎回判定する）。引数が `--finish` ちょうど 1 つのときだけこの形になり、従来の「コマンド文字列を 1 つ渡す」形（`git` で始まる文字列）とは衝突しない。SKILL.md は、応答を終える前にこれを実行し、`[block]` なら案内に従うよう指示する。
 
 **依存**: `lib.mjs`（`git`・`loadConfig`・`repoRoot`・`judgeBranch`・`autoApproveOf`・`configMatchesHead`。P0）、`agent-hooks.mjs`（呼び出し元。P0）。依存の向きは `lib.mjs` → `work-remainder.mjs` → `agent-hooks.mjs`。
 
 **契約**: Service
 
 ```js
-/** @typedef {{branch: string, dirty: string[], dirtyCount: number, unpushed: number}} Remainder */
+/** @typedef {{branch: string, dirty: string[], dirtyCount: number, unpushed: number, secretLike: string[]}} Remainder */
 /** @typedef {{noPush: boolean}} RemainderPolicy */
 
 /** 対象の作業ブランチの残りを返す。対象外・判定不能は null（案内しない側に倒す）。 */
@@ -290,10 +341,10 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 ```
 
 - 事前条件: `cwd` は絶対パス。事後条件: `null` でない結果は、`dirtyCount > 0` または `unpushed > 0`。
-- 案内文は、ブランチ名、未コミットの変更の件数と先頭のパス、未 push の commit の数、次の操作（`git add <パス>` → `git commit` → `git push`、`brw` を使う場合は同じ）、失敗時に「成功した処理・未完了の処理・失敗理由を報告して終了する」こと（2.15）、および「この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい」という判断の指示を含む。Codex では、案内の対象がエージェント自身の作業の変更なら commit・push が実行され、依頼と無関係な既存の変更は「依頼の範囲外」として実行されないことを実機で確認した。後者でも 2 回目の Stop（`stop_hook_active`）で終了できる。
+- 案内文は、ブランチ名、未コミットの変更の件数と先頭のパス、未 push の commit の数、次の操作（`git add <パス>` → `git commit` → `git push`、`brw` を使う場合は同じ）、`secretLike`（`SECRET_PATTERNS` に当たる名前のファイル）があればそれらを commit に含めないこと（2.11）、push できないときはその理由を利用者へ報告してから終了すること、失敗時に「成功した処理・未完了の処理・失敗理由を報告して終了する」こと（2.17）、および「この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい」という判断の指示を含む。Codex では、案内の対象がエージェント自身の作業の変更なら commit・push が実行され、依頼と無関係な既存の変更は「依頼の範囲外」として実行されないことを実機で確認した（Codex 0.167。0.172.0 では再確認していない）。後者でも 2 回目の Stop（`stop_hook_active`）で終了できる。
 - 誤検出の扱い: 無関係な未追跡ファイルで止まり続けないよう、案内は 1 応答につき 1 回で、2 回目（`stop_hook_active`）は終了を許す。案内にはパスを示し、エージェントが理由を説明して終了できるようにする。
 
-**指示の文面（2.9, 2.10, 2.11, 2.15）**: BRW の SKILL.md に「作業の区切りの commit・push」を置く。区切りは、(1) `.kiro/specs/` に spec を作る運用での要件・設計・タスクの各生成後、(2) 実装の 1 タスク完了ごと。区切りでは、変更したパスだけを `git add` し、`git commit` し、`git push` する（許可は求めない）。利用者が push を禁じた場合は commit までにとどめて未 push を報告する。失敗したときは、成功した処理・未完了の処理・失敗理由を報告し、変更が手元にあることを示す。別の環境・エージェントへ引き継ぐときは、リモートの作業ブランチを `brw resume` で再開する。このリポジトリの CLAUDE.md にも同じ指示を置く。
+**指示の文面（2.14, 2.15, 2.17, 2.19）**: BRW の SKILL.md に「作業の区切りの commit・push」と「終了前の確認」を置く。BRW は呼び出し側のスキルや文書の置き場を知らないため、区切りは一般の言い方にする: (1) まとまった成果物（要件・設計・計画などの文書を含む）の作成が完了したとき、(2) 実装の 1 つの作業単位が完了したとき。区切りでは、変更したパスだけを `git add` し、`git commit` し、`git push` する（許可は求めない）。利用者が push を禁じた場合は commit までにとどめて未 push を報告する。失敗したときは、成功した処理・未完了の処理・失敗理由を報告し、変更が手元にあることを示す。応答を終える前に、フックが無い環境では `brw guard --finish` を実行する。別の環境・エージェントへ引き継ぐときは、リモートの作業ブランチを `brw resume` で再開する。このリポジトリの CLAUDE.md には、cc-sdd の各フェーズ・各タスクの区切りという具体的な言い方で同じ指示を置く（利用者の取り決めを書く場所であり、BRW 自体の文面ではない）。
 
 ### Ruleset の導入と検査
 
@@ -316,7 +367,7 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 宣言は正本と旧パスの優先順を維持する。恒常的な分岐元は `baseBranch` と追加の固定名 `baseBranches` から解決する。任意のパターンや一時的な `brwBase` は Ruleset の対象集合へ入れない。
 - 導入選択は `{host, owner, repository, repositoryId?, refs, enabled}`。リポジトリ ID は GitHub 側への適用を選んだ場合に確認・保存する。Git 共通ディレクトリに保存し、適用済み ID は選択とは別に記録する。選択済みと適用確認済みを区別する。別 clone では新たな対話確認または利用者指定の非対話入力を利用する。
 - 公開状態は `{workId, sessionId?, worktreeId, status, pausedReason?, ready?, restrictions, results}`。`ready` は公開先リポジトリ ID、push 先 ref、取り込み先リポジトリ ID と ref、head OID、完了申告、検証要約を持つ。作業の明示制限は `restrictions` に保存し、操作別の結果と PR URL は `results` に記録する。計画は作業に関連付け、記録した前提に変更があれば失効する。Git 共通ディレクトリに worktree 単位で保存し、同じ worktree の状態遷移はロックと一時ファイルからの置換で行う。セッションを関連付けられない環境では作業 ID で再開でき、終了時フックによる案内は無効と報告する。秘密情報や PR 本文は進捗記録に含めない。
-- 作業ブランチの残りは `{branch, dirty[], dirtyCount, unpushed}`。保存せず、Stop のたびに Git から導く（状態ファイルを増やさない）。
+- 作業ブランチの残りは `{branch, dirty[], dirtyCount, unpushed, secretLike[]}`。保存せず、Stop と `guard --finish` のたびに Git から導く（状態ファイルを増やさない）。
 - 宣言の `autoApprove` は `{push?, pullRequest?, commit?}`（未指定は有効、明示的な `false` だけが無効）。`commit` を足す。
 - 結果は成功または `auth`、`permission`、`unsupported`、`conflict`、`network`、`invalidInput` の判別可能なエラー。外部 JSON とフック入力は境界で検証してから JSDoc で型を表す。
 
@@ -330,14 +381,17 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 残りの検出は、Git の呼び出しが失敗したときや対象を決められないときに案内しない側（終了を許す側）へ倒す。確認不能で応答の終了を妨げない。
 - コマンドフックで権限を確認できない場合、アプリの審査・サンドボックス・ネットワーク方針に従う。共同の保護は GitHub Ruleset の実効設定で確認する。
 
+- `brw pr-merge` は、端末でない・取り込み先が保護ブランチ・PR が open でない・取り込み先を得られない・取り込み先のリポジトリが違う・認証や通信の失敗のいずれでも、マージを実行せず、理由と取るべき手順（利用者の端末での実行、GitHub 上でのマージ）を示して終了コード 1 で終わる。409（head が変わった）は、確認した内容と違うものをマージしていないことと、再実行の案内を示す。405（マージできない）は GitHub の理由をそのまま示す。
+- フックの拒否の案内は、フック経路の 500 文字の制限内に、`brw pr-merge` の案内を欠けさせずに収める（長さの試験を置く）。
+
 ## Testing Strategy
 
-- **単体**　恒常的な分岐元と開発指定の重複、`git -C`、push の refspec、確認対象の混在、別 remote、不正なフック入力での書き込み拒否、記録済み分岐元とオプトアウトを判定する。Claude と Codex のイベント応答、公開計画のうち一方だけ確認待ちになる場合、フックがホスト承認を受け取らない場合、開発間・宣言外への直接の PR 作成を拒否する場合を契約テストする。1.1–1.5, 2.1, 2.6, 2.8, 3.1–3.3。
+- **単体**　恒常的な分岐元と開発指定の重複、`git -C`、push の refspec、確認対象の混在、別 remote、不正なフック入力での書き込み拒否、記録済み分岐元とオプトアウトを判定する。Claude と Codex のイベント応答、公開計画のうち一方だけ確認待ちになる場合、フックがホスト承認を受け取らない場合、開発間・宣言外への直接の PR 作成を拒否する場合を契約テストする。1.1–1.5, 2.1, 2.6, 2.8, 3.1–3.9。
 - **Git 統合**　一時リポジトリと bare remote で BRW 経由の作成・再開と作業中の通常 push を確認する。調査・中断、同じセッションと HEAD での別作業、公開準備前の拒否、操作別の禁止・通常確認待ち、公開成功、push 成功後の PR 失敗・再試行、既存 PR、開発間での PR なしのマージと公開、宛先変更、未 push の worktree の保持を確認する。1.2, 2.2–2.7, 6.3, 6.4。
 - **GitHub 契約**　通常の `gh` 書き込み制限、管理者でも権限不足のトークン、プラン不明、選択見送り、既存ルールの再利用、範囲変更、バイパス情報欠落、Ruleset を変更できる作業主体と確認不能な主体、競合と応答消失を再現する。別管理者が条件を追加しても既存設定の更新要求を送らないことを確認する。事前検査の失敗時に書き込み要求がゼロであることも確認する。4.1–4.6, 5.1–5.7, 6.2。
 - **実環境**　検証用リポジトリで非管理の作業資格情報を使い、直接 push・rebase・merge commit が拒否され、利用者は GitHub 上で対象 PR を squash マージできることを確認する。対応するエージェント経路では GitHub マージと予約が拒否されることも確認する。Claude Code と Codex で禁止操作の拒否、通常 push・PR 作成の確認省略、作業 ID とセッションの関連付け、フック未信頼の検出を確認する。2.1, 2.2, 3.3, 5.8, 6.1。
 
-- **区切りの commit・push と終了時の検出**　`tests/work-remainder.mjs` で、未コミットの変更（変更・新規・削除）、未 push の commit、追跡ブランチが無い新規ブランチ、push 済みで残りが無い場合、保護ブランチ・分岐元・宣言外・detached HEAD・未導入で `null` になること、無視されたファイルを数えないことを確かめる（2.12, 2.13, 2.16, 1.5）。`tests/agent-hooks-session.mjs` で、Claude・Codex の Stop が残りを block で案内し、調査のみでは案内しないこと、`stop_hook_active` で再入しないこと、公開の案内と 1 つの block に統合されること、`noPush`・`autoApprove.push: false` では未 push を理由にせず未コミットだけを案内すること、状態ファイルやロックを作らないことを確かめる（2.12〜2.14）。`tests/decision.mjs` で、作業ブランチの `git add` と `git commit`（リテラルのメッセージ、クォートした heredoc）が確認省略され、`--amend`・`--no-verify`・`-c`・展開を含むメッセージ・保護ブランチ・`autoApprove.commit: false`・未登録の宣言では省略されないことを確かめる（2.9, 2.10, 2.16）。`tests/branch-ops.mjs` で、区切りで push 済みの作業ブランチを、手元の worktree を消した後に `brw resume` でリモートから再開できることを確かめる（2.11）。実環境では、Claude Code と Codex で、commit の確認省略（Codex は承認方針 `on-request` の app-server 経由で `PermissionRequest` の許可を確かめ、`codex exec` は `--add-dir` の有無での成否を確かめる）、Stop の案内（エージェント自身の変更で commit・push に進み、無関係な変更では報告して終了できること）、長い応答（複数タスクの連続実装）での区切りごとの push と中断後の別エージェントによる再開を確かめる（2.9〜2.12）。
+- **区切りの commit・push と終了時の検出**　`tests/work-remainder.mjs` で、未コミットの変更（変更・新規・削除）、未 push の commit、追跡ブランチが無い新規ブランチ、push 済みで残りが無い場合、保護ブランチ・分岐元・宣言外・detached HEAD・未導入で `null` になること、無視されたファイルを数えないこと、秘密情報らしい名前を `secretLike` に集めることを確かめる（2.9〜2.11, 2.13, 2.18, 1.5。git の各状態は `poc/git-states.sh` で先に確認済み）。`tests/agent-hooks-session.mjs` で、Claude・Codex の Stop が残りを block で案内し、調査のみでは案内しないこと、`stop_hook_active` で再入しないこと、作業の記録・状態ファイルが無くても案内すること、公開の案内と 1 つの block に統合されること、`noPush`・`autoApprove.push: false` では未 push を理由にせず未コミットだけを案内すること、状態ファイルやロックを作らないこと、`brw guard --finish` が同じ判定を返すこと（残りあり=終了コード 1、無し=0）を確かめる（2.9〜2.13, 2.16, 2.19）。`tests/decision.mjs` で、作業ブランチの `git add` と `git commit`（リテラルのメッセージ、クォートした heredoc）が確認省略され、`--amend`・`--no-verify`・`-c`・展開を含むメッセージ・保護ブランチ・`autoApprove.commit: false`・未登録の宣言では省略されないこと（2.14, 2.18）、`gh pr merge`・`gh pr merge --auto`・API・MCP のマージが取り込み先にかかわらず拒否され、案内に `brw pr-merge` が含まれ、案内が 500 文字の制限に収まること、開発ブランチから分岐元・保護ブランチへのローカルマージ・push が拒否されること（3.2, 3.3, 3.7, 3.8）を確かめる。`tests/pr-merge.mjs` で、`judgeMerge` の各区分、非対話（端末でない）での拒否と通信・変更が無いこと、`y` 以外で中止すること、`sha` を渡してマージすること、405・409・認証失敗の表示を、偽の GitHub 接続で確かめる（3.3〜3.6）。フックが信頼済みの `brw pr-merge` の呼び出しを拒否することも確かめる（3.5）。`tests/branch-ops.mjs` で、区切りで push 済みの作業ブランチを、手元の worktree を消した後に `brw resume` でリモートから再開できることを確かめる（2.15）。実環境では、Claude Code と Codex で、commit の確認省略（Codex は承認方針 `on-request` の app-server 経由で `PermissionRequest` の許可を確かめ、`codex exec` は `--add-dir` の有無での成否を確かめる）、Stop の案内（エージェント自身の変更で commit・push に進み、無関係な変更では報告して終了できること）、長い応答（複数の作業単位の連続実装）での区切りごとの push と中断後の別エージェントによる再開、使い捨てのリポジトリで利用者の端末から `brw pr-merge` が分岐元向けの PR をマージし保護ブランチ向けを拒否することを確かめる（2.9〜2.15, 3.4, 3.6）。
 
 ## Security Considerations
 
@@ -347,6 +401,9 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - フックの信頼の登録は harness-plugin-unification の `brw setup` が BRW のフックに限って行う（利用者の決定で、従来の「製品の確認に任せる」を改めた）。設定だけで強制を保証できない経路は導入診断で明示する。
 - commit の確認省略は commit する内容を検査しない（既存の push の確認省略と同じ）。秘密情報の混入の防止は `.gitignore` やリポジトリ側の対策に委ね、`git add` は強制（`-f`）や対話（`-i`・`-p`）の指定を対象外にする。
 - commit の確認省略は、作業ブランチ、登録済みの宣言、限定した引数の形に限り、`--amend`・`--no-verify`・設定の上書き・展開を含む引数は対象外にする。確認を省いても、保護ブランチ・宣言外への commit・push の拒否は変わらない。
+
+- `brw pr-merge` の確認は、端末の対話と、フックによる呼び出しの拒否で、協調的なエージェントの誤用を防ぐ。疑似端末（`script` など）を作る意図的な迂回は端末判定を満たしうるため（実測）、迂回の防止は GitHub のマージ権限・必須レビュー・Ruleset に委ね、`brw pr-merge` を実行できるトークンは利用者のものに限る運用を `references/setup.md` に明記する。マージ API には head の SHA を渡し、確認した内容と違う head をマージしない。通信・認証・判定のどれかが確定しないときは実行しない側に倒す。
+- 残りの案内は、秘密情報らしい名前のファイルを commit に含めないよう明示する。commit の内容は検査しない（既存の方針）。
 
 ## Migration Strategy
 
@@ -359,3 +416,4 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 2026-11-23: 要件 2.9〜2.16（区切りごとの commit・push と、応答終了時の残りの検出）を追加した。commit の確認省略（`evalCommit`・`plainOperation`・`autoApprove.commit`。検証で `brw.mjs` ではなく実際の経路に改めた）、Stop の統合（`work-remainder.mjs`）、指示の文面を設計した。Codex へのフックの届け方は harness-plugin-unification に委ね、`hook-install.mjs`・`install-codex.mjs` の記述を削除対象へ改めた。
 - 2026-11-23（再生成）: Codex 0.167 の実機検証の結果を反映した。`PermissionRequest` による commit の確認省略（対話相当）、非対話での `.git` 書き込み許可の要否、Stop の案内への従い方（案内文に「この作業で生じた変更か」の判断を含める）、PostToolUse の追加文脈（Codex で到達。本 spec では採らない）。利用者が `autoApprove.push: false` の解釈と残余リスク（中断の契機はトークンの使い切りと作業の停止）を確認・許容した。
 - 2026-11-25: 要件 1.6〜1.8（SSH の別名ホストの origin で brw が GitHub のリポジトリを確定できない問題）を追加した。`remote-url.mjs` を新設して URL の読み取りを一本化し、`ssh -G` で別名を解決する。宣言への別名の記載は採らない（利用者の決定）。要件・設計・タスクの承認は外した（タスクは再生成が必要）。
+- 2026-11-26: 要件 2.9〜2.19（終了時に未 push の作業ブランチを残さない。案内の文面は特定のスキルを前提にしない一般の言い方に改めた。フックが使えない環境向けに `brw guard --finish` を追加し、秘密情報らしい名前を案内に含める）と要件 3.2〜3.9（分岐元向け PR のマージは、利用者が自分の端末で実行する `brw pr-merge` だけが行う。フックは取り込み先を調べずに直接のマージを一律拒否し、案内で `brw pr-merge` を示す。保護ブランチ向けのマージはどの経路でも行わない）の設計を更新した。利用者の決定: 確認つきマージは端末のコマンド、保護ブランチ向けは禁止。端末判定の限界（疑似端末での迂回）は実測して設計に明記した。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。

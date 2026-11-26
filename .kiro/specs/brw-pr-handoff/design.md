@@ -11,11 +11,13 @@
 - `brw pr` が、別コミット化 → 準備 → 計画 → push・PR 作成 → 片付けを順に行い、止まったら再実行で続きから進む（要件 1、2、4）。
 - `brw pr-template` が、雛形と自己完結した記入指示を出し、本文はエージェントが書く（要件 3）。
 - 宣言 1 キーで片付けを外せる。既定は有効（要件 5）。
+- 恒常的な分岐元から保護ブランチへの PR を、`brw pr` で作れる。作業の記録は作らず、「リモートの分岐元の取り込み → PR の作成または再利用 → URL の報告」の 3 段だけを行う（要件 1.8〜1.11、2.8、3.10、4.12）。
 
 ### 非目標
 
 - 本文の自動生成、cc-sdd・`.kiro` の参照、リモートブランチの削除・プレビューの後始末・GitHub 側のマージ。
 - 公開の承認・計画・状態記録の仕組みの変更（brw-enforcement の既存の部品を使う）。
+- 分岐元・保護ブランチへの commit・push・マージ。分岐元からの PR で行う書き込みは、ローカルの分岐元の fast-forward 更新と、GitHub への PR 作成だけ。
 
 ## 境界の確約
 
@@ -26,6 +28,7 @@
 - PR 作成後の自動片付け（worktree・ローカルブランチ・作業状態・本文ファイル）と、手動の `brw finish` との共通化。
 - 直接の PR 作成の拒否（判定層の変更）と案内。
 - 宣言の 2 キー（`afterPublish.cleanup`・`pullRequest.language`）と導入時の既定値。
+- 恒常的な分岐元から保護ブランチへの PR の作成（`base-pr`）と、行き止まりにならない拒否の案内（要件 1.8〜1.11）。
 
 ### 担わない
 
@@ -35,7 +38,7 @@
 
 ### 許可する依存
 
-- `scripts/publish.mjs`・`publish-cli.mjs`（`runWork`・`runPublish`）の公開関数と、`lib.mjs` の宣言・git 補助。
+- `scripts/publish.mjs`・`publish-cli.mjs`（`runWork`・`runPublish`）の公開関数と、`lib.mjs` の宣言・git 補助。分岐元からの PR は、`publish-pr.mjs` の `existingPr` と、PR の作成の関数（作業の記録に依存しない形へ分離して公開する。後述）、`github-client.mjs`、`remote-url.mjs` を使う。
 - 依存の向きは「`pr-flow` → 公開の既存の段階・`tidy`・`cleanup`・`pr-template`」の一方向。`cleanup` は `brw.mjs` を import しない（`brw.mjs` が `cleanup` を使う）。
 
 ### 再検証の契機
@@ -63,6 +66,8 @@ flowchart TD
   PF --> TD[tidy: 別コミット]
   PF --> PUB[既存の公開: ready → plan → push・PR]
   PF --> CL[cleanup: 片付け]
+  PF -->|現在のブランチが分岐元| BP[base-pr: 分岐元からの PR]
+  BP --> GH[GitHub: PR の作成・再利用]
   FIN[brw finish] --> CL
   PT -.読む.-> BF
   PUB -.読む.-> BF
@@ -91,11 +96,12 @@ scripts/
 ├── pr-template.mjs    # 新規: 雛形の解決・本文ファイルの生成・記入指示の出力
 ├── tidy.mjs           # 新規: 未コミット変更の別コミット化・秘密らしい名前の検出
 ├── cleanup.mjs        # 新規: finishBlocker・removeBranch・状態ファイル削除・片付け後の案内
+├── base-pr.mjs        # 新規: 分岐元から保護ブランチへの PR（取り込み・差の確認・PR の作成または再利用・報告）
 ├── brw.mjs            # 変更: pr・pr-template を振り分け、finish が cleanup.mjs を使う
 ├── publish-cli.mjs    # 変更: 本文ファイルの読み取り先に BRW の本文置き場を許可
 ├── agent-hooks.mjs    # 変更: 信頼済みの brw pr を確認省略の対象にし、本文置き場を許可
 ├── operation-decision.mjs # 変更: evaluateAll に origin を追加。agent 起点の PR 作成は規則に合っても拒否して brw pr を案内
-├── publish.mjs / publish-pr.mjs # 変更: issuePlan と decidePr が origin: "brw-publish" を渡す。push・PR の結果に公開記録（push 先のリモート名・公開した OID・PR の URL）を保存する
+├── publish.mjs / publish-pr.mjs # 変更: issuePlan と decidePr が origin: "brw-publish" を渡す。push・PR の結果に公開記録（push 先のリモート名・公開した OID・PR の URL）を保存する。publish-pr: PR の再利用・作成を、作業の記録に依存しない関数 `createOrReusePr(session, target, {head, base, title, body})` として切り出して公開する（`runPublishPr` もこれを使う。挙動は変えない）
 ├── lib.mjs            # 変更: 宣言の検証・既定値に afterPublish・pullRequest を追加
 └── setup-cli.mjs      # 変更: 宣言の新規作成時に afterPublish.cleanup: true を書く
 assets/
@@ -103,7 +109,7 @@ assets/
 └── pr-template.ja.md / pr-template.en.md  # 新規: 既定の雛形
 tests/
 ├── tidy.mjs / pr-template.mjs / cleanup.mjs / pr-flow.mjs  # 新規
-└── agent-hooks.mjs / decision.mjs / selftest.mjs           # 変更
+└── base-pr.mjs / agent-hooks.mjs / decision.mjs / selftest.mjs  # base-pr は新規、他は変更
 evals/
 └── opens-pr-and-cleans-up/     # 新規: 評価ケース
 SKILL.md / references/config.md / references/setup.md       # 変更
@@ -113,7 +119,10 @@ SKILL.md / references/config.md / references/setup.md       # 変更
 
 - `scripts/brw.mjs` — `finish` の安全確認と削除を `cleanup.mjs` へ移す（挙動は変えない）。サブコマンド `pr`・`pr-template` を追加する。
 - `scripts/operation-decision.mjs` — `evalPrCreate` は、規則に適合する場合（現在は確認省略の対象）も拒否にする。案内は `ALT_PR_FLOW`（`brw pr-template` で本文を用意し、`brw pr` で作成）。不適合の拒否の案内は従来のまま。
+- `scripts/operation-decision.mjs` — `evalPrCreateRules` は、取り込み元が恒常的な分岐元で、取り込み先が保護ブランチの組を、規則に適合する PR 作成として扱う（ほかの組の拒否は変えない）。拒否の案内は組ごとに選ぶ関数 `prAlternative(headClass, baseClass, repo)` にし、`brw pr` で作れる組（開発ブランチ→保護・分岐元、分岐元→保護）だけに `brw pr` を示す。作れない組には、作れない理由と、利用者が GitHub 上で作成する手順（作成画面の URL。`https://github.com/<所有者>/<名前>/compare/<取り込み先>...<取り込み元>?expand=1` を通信なしで作る）を示す（要件 1.11）。
 - `scripts/publish-cli.mjs` — `readBody` は、作業ディレクトリ配下の相対パスに加え、`<本体>/.claude/worktrees/.brw/` 配下の絶対パスを受け付ける（実体パスで配下を確認し、`..`・リンクの逸脱を拒否する既存の基準を同じに適用）。
+- `scripts/pr-flow.mjs` — 事前確認で、現在のブランチが恒常的な分岐元のときは `base-pr` の `runBasePr` へ渡す（開発ブランチは従来の流れ）。開発ブランチでも分岐元でもないブランチは、理由と取るべき手順を表示して止まる（要件 1.4）。
+- `scripts/brw.mjs` — `prTemplate` は、分岐元でも雛形を出す（作成元・作成先を示し、「作業外の変更」は該当なし。要件 3.10）。`brw work start` の拒否の案内（`publish-cli.mjs`）は、分岐元では「分岐元から保護ブランチへの PR は `brw pr`」と示す。
 
 ## システムフロー
 
@@ -140,6 +149,29 @@ sequenceDiagram
 - 片付けだけが残っている状態（PR は作成済みで状態は `published`）では、`brw pr` は片付けだけを再試行する。
 - 開発ブランチへの取り込み（push だけで完了する公開）は、`brw merge` に使うブランチなので片付けない。
 
+### 分岐元からの PR
+
+```mermaid
+sequenceDiagram
+  participant A as エージェント / 利用者
+  participant B as brw pr (base-pr)
+  participant G as git
+  participant H as GitHub
+  A->>B: brw pr --title … （現在のブランチ = 分岐元）
+  B->>B: 事前確認（導入済み・作成先が保護ブランチ・本文）
+  B->>G: ① fetch、先行(origin/base..base)の確認、ff-only で取り込み
+  G-->>B: 最新 / 先行・分岐なら停止
+  B->>G: 差の確認（origin/保護..origin/base が 0 なら停止）
+  B->>H: ② 同じ head・base のオープンな PR を探す（あれば再利用）
+  B->>H: PR を作成（承認は autoApprove.pullRequest）
+  H-->>B: PR の URL
+  B-->>A: ③ URL を報告（片付け・別コミット・push はしない）
+```
+
+- 作業の記録（作業 ID・準備・計画）は作らない。再実行は、①が何も変えず、②が既存の PR を再利用するので安全（冪等）。
+- 書き込みは、ローカルの分岐元の fast-forward 更新（リモートと同じ位置へ進めるだけ）と、PR の作成だけ。commit・push・マージ・別コミット・片付けは行わない（要件 1.9、2.8、4.12）。
+
+
 ## 要件トレーサビリティ
 
 | 要件 | 概要 | 部品 | インターフェース |
@@ -147,16 +179,21 @@ sequenceDiagram
 | 1.1 | 直接の PR 作成を拒否し案内 | `evalPrCreate`（変更） | 拒否の案内 `ALT_PR_FLOW` |
 | 1.2 | `brw pr` が公開と同じ流れ | `pr-flow` | `runPr` |
 | 1.3 | 作業 ID なしで作業を補う | `pr-flow`（作業の探索・開始） | `runPr` |
-| 1.4 | 開発ブランチ外・対象不明は止める | `pr-flow`（事前確認） | 終了コード 1 と案内 |
+| 1.4 | 開発ブランチ・分岐元以外、対象不明は止める | `pr-flow`（事前確認） | 終了コード 1 と案内 |
 | 1.5 | 既存 PR の再利用 | 既存の `existingPr` | 既存どおり |
 | 1.6 | フック無効・Codex でも拒否 | `brw guard`（判定層を共有） | 既存の `guard` |
 | 1.7 | 未導入は拒否しない | 既存の `repoState` | 既存どおり |
+| 1.8 | 分岐元から保護ブランチへの PR（3 段・記録なし） | `base-pr`（`runBasePr`）、`evalPrCreateRules`（変更）、`createOrReusePr` | `brw pr`（現在のブランチが分岐元） |
+| 1.9 | 3 段以外を行わない | `base-pr`（書き込みは ff 更新と PR 作成だけ） | — |
+| 1.10 | 取り込めない・差なしは作成しない | `base-pr`（`syncBase`・`countDiff`） | 終了コード 1 と理由 |
+| 1.11 | 案内は受け付けられる手順だけ | `operation-decision.mjs`（`prAlternative`）、`pr-flow`、`publish-cli.mjs` の案内 | 手作業の手順と作成画面の URL |
 | 2.1・2.2 | 別コミット・メッセージ | `tidy` | `tidyChanges` |
 | 2.3 | gitignore 対象を含めない | `tidy`（`git status` の結果のみ使用） | `tidyChanges` |
 | 2.4 | 秘密らしい名前は停止 | `tidy`（`SECRET_PATTERNS`） | `TidyResult.blocked` |
 | 2.5 | 本文へ一覧を提供 | `pr-template`（事前確認の一覧と過去の別コミット） | 雛形の差し込み |
 | 2.6 | 変更が無ければ作らない | `tidy` | `TidyResult.none` |
 | 2.7 | 失敗時は進まない | `pr-flow`（段階の順序） | 終了コード 1 |
+| 2.8 | 分岐元では別コミットを作らず、含まれない旨を表示 | `base-pr`（`tidy` を呼ばない。`git status` の件数を表示） | 標準出力 |
 | 3.1・3.2 | 雛形・記入指示・4 つの節 | `pr-template`、`assets/pr-template.*.md` | `buildTemplate` |
 | 3.3 | リポジトリの雛形を優先 | `pr-template`（`resolveTemplate`） | `resolveTemplate` |
 | 3.4 | 言語の指定 | `lib.mjs`（`pullRequest.language`）、`pr-template` | 設定 |
@@ -164,6 +201,7 @@ sequenceDiagram
 | 3.7 | 自己完結した短い記入指示 | `pr-template`（`instruction`） | 標準出力 |
 | 3.8 | 本文なしなら案内 | `pr-flow`（本文の確認） | 終了コード 1 |
 | 3.9 | 本文ファイルを作業ツリーの外に置く | `pr-template`（`bodyPathOf`）、`readBody`（変更） | `.claude/worktrees/.brw/` |
+| 3.10 | 分岐元でも雛形を出す | `pr-template`、`brw.mjs`（`prTemplate`） | 作成元・作成先を示した雛形 |
 | 4.1 | 片付け（worktree・ブランチ） | `cleanup`（`removeBranch`） | `cleanupAfterPr` |
 | 4.2・4.11 | 作業状態の削除（順序） | `cleanup` | `cleanupAfterPr` |
 | 4.3 | リモート・プレビューは残す | `cleanup`（削除対象の限定） | — |
@@ -171,6 +209,7 @@ sequenceDiagram
 | 4.6・4.10 | 止まったとき再試行できる | `pr-flow`（再入）、`cleanup`（状態を残す、`brwState` の記録） | 状態 `published`、`brw finish` |
 | 4.7 | 既存 PR 再利用でも同じ判定 | `pr-flow` | 同上 |
 | 4.8・4.9 | 本体のパス・次の `brw create` を表示 | `cleanup`（`afterCleanupGuide`） | 標準出力 |
+| 4.12 | 分岐元では片付けない | `base-pr`（`cleanup` を呼ばない） | 試験で固定 |
 | 5.1〜5.4 | 設定・既定・導入時・既存導入先 | `lib.mjs`、`setup-cli.mjs` | `afterPublish.cleanup` |
 | 5.5 | 無効時は案内のみ | `pr-flow` | 標準出力 |
 | 5.6 | 不正値の報告 | `validateConfig` | 既存の報告 |
@@ -184,6 +223,7 @@ sequenceDiagram
 | `pr-flow` | 調整 | 段階の順序・再入・出力 | 1、2、3.8、4、5.5 | 既存の公開（P0）、`tidy`・`cleanup`・`pr-template`（P0） | Service |
 | `pr-template` | 本文 | 雛形の解決・本文ファイル・記入指示 | 2.5、3、6 | `lib.mjs`（P0） | Service |
 | `tidy` | 別コミット | 未コミット変更の検出・コミット | 2 | git（P0） | Service |
+| `base-pr` | 分岐元からの PR | 取り込み・差の確認・PR の作成または再利用 | 1.8〜1.11、2.8、4.12 | git（P0）、`github-client`・`remote-url`・`publish-pr` の `existingPr`・`createOrReusePr`（P0） | Service |
 | `cleanup` | 片付け | 安全確認・削除・案内 | 4 | git（P0）、`publish.mjs` の状態の場所（P0） | Service |
 | `evalPrCreate`（変更） | 判定 | 直接の PR 作成を拒否 | 1.1、1.6 | なし | API |
 
@@ -199,7 +239,7 @@ sequenceDiagram
 **責務と制約**
 - 引数: `--title`・`--body-file`（省略時は既定の本文置き場）・`--completion`・`--verification`・`--failed`・`--target`・`--work`（省略可）。
 - 順序（各段階の前に再入の判定を行う）:
-  1. 事前確認: 導入済み・現在のブランチが開発ブランチ。無ければ理由を表示して止まる。
+  1. 事前確認: 導入済み。現在のブランチが開発ブランチなら以降の流れ、恒常的な分岐元なら `runBasePr`（下記）へ渡す。どちらでもなければ理由を表示して止まる。
   2. 作業の特定: `--work` か、現在のブランチの作業。探索は「現在の作業（未公開）」を先に、無ければ**公開済みで片付けが残っている作業**（`published` で、この worktree の現在のブランチと一致するもの）を対象にする。公開済みの作業が見つかったときは、準備・公開を飛ばして片付けだけを行う。どちらも無ければ `work start` 相当で開始。公開後に片付けが止まり worktree を出てしまった場合は、本体から `brw finish <ブランチ>`（案内に出す）で回復する。
   3. 本文の確認: 新規 PR になりうるとき、本文ファイルが無ければ `brw pr-template` を案内して止まる（副作用の前）。
   4. `tidy`（別コミット）。失敗・停止なら以降へ進まない。
@@ -223,6 +263,40 @@ function runPr(args: string[], deps?: PrDeps): Promise<number>; // 終了コー�
 - 事前条件: `completion`・`verification` は必須（既存の `work ready` と同じ）。
 - 事後条件: 終了コード 0 のとき PR が存在する。1 で止まったときは再実行で続きから進む。
 - 不変条件: 同じ作業・同じ HEAD への再実行で、push・PR は重複しない（既存の公開の性質）。
+
+### 分岐元からの PR（`scripts/base-pr.mjs`）
+
+| 項目 | 内容 |
+|---|---|
+| 役割 | 恒常的な分岐元を作成元として、保護ブランチへの PR を作る |
+| 要件 | 1.8〜1.11、2.8、4.12 |
+
+**責務と制約**
+- 呼ばれるのは、現在のブランチの分類が `base` のときだけ（`pr-flow` が振り分ける）。作業の記録（`brw work start`・準備・計画）は作らず、`tidy`・`cleanup`・push・マージを呼ばない。
+- 作成先の決定: `--target` があればそれ、無ければ宣言の保護ブランチが 1 つのときそれ。分類が `protected` でない・複数で決められない・無いときは、理由を表示して止まる。
+- 順序: ① 本文の確認（既存の `brw pr` と同じ。本文ファイルが無い・未記入なら、副作用の前に `brw pr-template` を案内して止まる）。② `syncBase`: `git fetch origin <分岐元> <保護>`（失敗なら止まる）→ `git rev-list --count origin/<分岐元>..<分岐元>` が 1 以上なら、リモートへ未 push の commit があるとして止まる → 現在のブランチ（分岐元）で `git merge --ff-only origin/<分岐元>`（できなければ分岐・未コミットの衝突として止まる）。③ `countDiff`: `git rev-list --count origin/<保護>..origin/<分岐元>` が 0 なら、取り込む差が無いとして止まる。④ `existingPr` で同じ head・base のオープンな PR を探し、あれば再利用して⑥へ。⑤ 無ければ、承認の判定（`evaluateAll`、origin `"brw-publish"`、`autoApprove.pullRequest`。承認が必要なら、既存の `brw pr --confirmed`（利用者の端末）の案内）を経て `createOrReusePr`。⑥ PR の URL を表示して終了コード 0。
+- 作業ツリーに未コミットの変更があっても commit しない。「未コミットの変更が N 件あり、PR には含まれない」と表示して進める（2.8）。
+- 書き込みは、ローカルの分岐元の fast-forward 更新と PR の作成だけ（1.9）。`git merge --ff-only` は `brw` の中の処理で、フックの判定（`sync-base-branch` の許可と同じ形）を経ない。分岐元が本体のチェックアウトにあっても、片付けは呼ばないため、ブランチ・作業場所は削除されない（4.12）。
+
+**契約**: Service
+
+```js
+/** @returns {Promise<number>} 終了コード 0=PR を作成または再利用 / 1=止まった / 2=使い方の誤り */
+export async function runBasePr(args: string[], deps: PrDeps, ctx: { config: Config, branch: string }): Promise<number>;
+
+/** 分岐元をリモートへ fast-forward で追いつかせる。先行（未 push）・分岐・取得失敗は更新しない。 */
+export function syncBase(cwd: string, base: string):
+  | { ok: true, updated: boolean }
+  | { ok: false, code: "ahead" | "diverged" | "fetch-failed" | "ff-failed", message: string };
+
+/** origin/<base> にあって origin/<target>（保護ブランチ）に無い commit の数。0 なら取り込む差が無い。 */
+export function countDiff(cwd: string, target: string, base: string): number;
+```
+
+- 事前条件: `branch` の分類が `base`。事後条件: 終了コード 0 のとき、`base` を head、`target`（保護）を base とするオープンな PR が 1 つ存在する。
+- **先行の検出が必要な理由（PoC）**: ローカルの分岐元がリモートより先行しているとき、`git merge --ff-only origin/<分岐元>` は成功（「すでに最新」）してしまうため、先行は `rev-list --count origin/<分岐元>..<分岐元>` で別に検出する（`poc/base-sync.sh` の 3 番）。
+- 不変条件: 同じ状態での再実行は、PR を重複して作らない。
+
 
 ### 別コミット（`scripts/tidy.mjs`）
 
@@ -252,6 +326,7 @@ function instruction(ctx: TemplateContext): string;             // 自己完結�
 - 優先順位: `.github/PULL_REQUEST_TEMPLATE.md`（worktree の作業ツリー）→ 同梱の `assets/pr-template.<language>.md`。
 - 差し込み: 「作業外の変更」の節へ `previewTidy` の一覧と、ブランチ内の既存の別コミット（件名が `TIDY_SUBJECT`）のファイル一覧。「検証」の節へ `--verification`・`--failed`（未通過なら冒頭に「検証未通過」）。リポジトリ側の雛形には節が無いことがあるため、差し込みは節の見出しが見つかったときだけ行い、無ければ末尾に追記する。
 - `brw pr-template` は本文ファイルを `bodyPathOf` に書き出し（既に記入済みなら上書きせず、そのパスを案内）、標準出力に記入指示を出す。指示は次を含み、BRW・特定の呼び出し側の事前知識を要しない: 本文ファイルのパス、各節に書くこと（事実のみ・推測しない・読み手は人）、参照すべき情報（`git log <base>..HEAD`・`git diff --stat <base>`）、書き終えた後に実行する `brw pr` のコマンド。
+- 現在のブランチが恒常的な分岐元のときも出力する（要件 3.10）。作成元を分岐元、作成先を保護ブランチとして示し、「作業外の変更」の節は該当なしとして扱う（`previewTidy` は呼ばない）。参照すべき情報は `git log origin/<保護>..<分岐元>`・`git diff --stat origin/<保護>...<分岐元>`。
 
 ### 片付け（`scripts/cleanup.mjs`）
 
@@ -304,6 +379,7 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 | 停止 | 秘密らしい名前のファイル | 対象のファイル名を表示。commit も公開もしない |
 | 公開 | 承認待ち・禁止・失敗 | 既存の案内（同じ作業での再実行・中断）をそのまま返す |
 | 片付け | 未 push・未コミット・削除の失敗 | PR は作成済みであること、残した理由、`brw pr`（片付けのみ再試行）または `brw finish` を表示。PR を取り消さない |
+| 分岐元からの PR | 分岐元が先行・分岐、差なし、作成先が保護ブランチでない、fetch の失敗 | 理由と取るべき手順（未 push の commit は別の手順で反映する、など）を表示して終了コード 1。分岐元・保護ブランチへは何も書かない |
 
 ## テスト戦略
 
@@ -312,6 +388,8 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 - `pr-template`: リポジトリの雛形が優先される。言語の切り替え。作業外の変更と検証（未通過を含む）の差し込み。節の無い雛形では末尾に追記。記入指示が自己完結し、cc-sdd・`.kiro` の語を含まない（3、6.2）。
 - `cleanup`: 未 push の commit・未コミット変更で残る。既知の PR を渡すと `gh` なしで片付く。状態ファイルと本文ファイルが、worktree の削除に成功した後だけ消える。削除後に子プロセスを走らせない（4）。
 - `lib.mjs`: 2 キーの検証・既定値・不正値の報告（5）。
+- `base-pr`: 一時リポジトリと bare remote で、分岐元の最新・リモートが先行（ff で取り込む）・ローカルが先行（止まる）・分岐（止まる）・差なし（止まる）を確かめる（`poc/base-sync.sh` の各状態）。作成先が保護ブランチでない・複数の保護ブランチで決められない場合に止まる。偽の GitHub 接続で、PR の作成・既存 PR の再利用・承認が必要な場合の案内を確かめる。作業の記録・状態ファイルを作らないこと、`tidy`・`cleanup`・push を呼ばないこと、分岐元のブランチと作業場所が残ること、未コミットの変更が残り件数が表示されること（1.8〜1.10、2.8、4.12）。
+- `operation-decision`: 分岐元→保護ブランチの組が規則に適合する扱いになり、ほかの組の拒否は変わらない。`prAlternative` が、`brw pr` で作れない組に `brw pr` を示さず、作成画面の URL を示す（1.11）。`brw pr-template` が分岐元で出力される（3.10）。
 
 ### 統合
 - `pr-flow`: 偽の GitHub 接続で、準備から片付けまでが 1 回で通る。承認待ちで止まり、再実行で続きから進む。PR 作成済みで片付けだけが止まった状態からの再実行。`afterPublish.cleanup: false` で削除しない。`push` 完了の取り込みは片付けない（1、4、5）。
@@ -326,3 +404,8 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 - 秘密らしい名前の一覧は誤検出より見逃しを嫌う側に倒し、当たったら止める。一覧は付属の定数で、宣言では緩められない（緩和は利用者が自分で commit する運用）。
 - 本文ファイルの読み取りは、実体パスが許可された置き場の配下であることを確認し、リンクによる逸脱を拒否する（既存の `readBody` の基準）。
 - PR の本文・タイトル・資格情報をログや標準出力に出さない（既存の `publish-cli` の方針を維持）。
+- 分岐元からの PR は、分岐元・保護ブランチへ commit・push・マージを行わない。ローカルの分岐元を動かすのは fast-forward だけで、リモートより先行しているとき（未 push の commit があるとき）は更新せず止まる。作業ツリーの未コミットの変更は触れない。
+
+## 改訂メモ
+
+- 2026-11-26: 要件 1.8〜1.11、2.8、3.10、4.12（恒常的な分岐元から保護ブランチへの PR）の設計を追加した。利用者の決定により、作業の記録は作業ブランチにだけ適用し、分岐元からの PR は「取り込み → 作成 → 報告」の 3 段だけの軽い経路（`base-pr`）にした（案 P2）。判定の 5 か所の前提のうち、直接の PR 作成の判定（`evalPrCreateRules`）と `brw pr` の事前確認・雛形・案内だけを変え、作業の記録に結び付く `work start`・準備・計画・push は変えない。PoC で、ローカルの分岐元が先行していると `merge --ff-only` が成功してしまうことが分かったため、先行を別に検出する。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。

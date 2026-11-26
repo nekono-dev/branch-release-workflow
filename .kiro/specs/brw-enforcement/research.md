@@ -303,3 +303,26 @@ MCP と API の経路（`github-operations.mjs` の 430・435・503・615 行付
 4. PR の取り込み先を、`gh pr view`・REST・MCP の各経路で取得する方法と、失敗時の挙動。
 5. 権限モード（bypass・auto など）で、案内 M1 の `normal` がどう扱われるか。M2 の端末判定が Claude・Codex の実行環境（非対話）で代行を防げるか。
 6. 開発ブランチから基底・保護ブランチへの直接の取り込みが、現状でも拒否されること（試験で固定）。
+
+---
+
+# 設計の記録（2026-11-26）: 要件 2.9〜2.19・3.2〜3.9
+
+発見の種別は「既存の拡張」（軽い発見）。実機と一次資料で確かめた内容は `feasibility.md` と `poc/` に置く。
+
+## 決めたこと（根拠つき）
+
+- **終了時の検出は既存の設計を継承し、別の関数（`work-remainder.mjs`）を Stop で合成する**（ギャップ分析の案 S2）。2026-11-23 の設計が既にこの形で、状態ファイルが無くても評価する。今回の差分は、秘密情報らしい名前の案内（2.11）、フックが使えない環境向けの `brw guard --finish`（2.19）、cc-sdd を前提にしない文面（利用者の決定）。**この設計は未実装**（`scripts/work-remainder.mjs` は無い）で、これが「push まで強要できていない」原因。
+- **確認つきマージは、利用者の端末の対話コマンド `brw pr-merge`**（案 M2・M3 の合成）。フックは取り込み先を調べず、直接のマージを一律拒否して案内する。取り込み先の取得とマージは `brw pr-merge` の中だけで行うため、PreToolUse に通信を入れずに済む（ギャップ分析の懸念を解消）。マージ方式は `squash` 固定、`sha` で head を固定して TOCTOU を防ぐ。
+- **端末判定の限界を受け入れて明記**: Claude Code・Codex の Bash は標準入出力が端末でない（実測）。ただし疑似端末（`script`）では端末判定を満たせる（実測）ため、フックで信頼済みの `brw pr-merge` の呼び出しを実行前に拒否して補強する。意図的な迂回は GitHub 側の権限と Ruleset に委ねる（既存の `--confirmed` と同じ位置づけ）。
+
+## 簡素化・汎用化（design synthesis）
+
+- 終了前の確認（`guard --finish`）と Stop は、同じ `remainderOf`・`remainderGuidance` を共有する（判定を二重に持たない）。
+- 取り込み先の判定は純粋関数 `judgeMerge` に分け、ネットワークと対話を持たない形で試験できるようにした。
+- ビルドか採用か: マージ API の呼び出しは、既存の `github-client.mjs` を使う（新しい依存を足さない）。
+
+## 参照した資料
+
+- GitHub REST API の記述（`github/rest-api-description`、`api.github.com.json`、`info.version` 1.1.4。取得 2026-11-26）: `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` は `commit_title`・`commit_message`・`sha`・`merge_method`（merge・squash・rebase）を受け、200・405（マージできない）・409（`sha` が head と違う）を返す。
+- `tests/real-env/README.md`（実行日 2026-11-21）: Stop の block と `stop_hook_active`、`gh pr merge`・`--auto` の拒否を Claude・Codex で観測。
