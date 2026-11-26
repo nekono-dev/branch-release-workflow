@@ -266,7 +266,7 @@ interface MergeOperation {
 3. 既存の拒否（`git commit` を `main` 上、`git push origin main`、`gh pr merge`、開発ブランチ間のマージ）の判定が変わらない（要件 6.1・6.2）。
 4. `git fetch origin`（追跡ブランチの更新）が照会として通る（要件 6.3）。
 
-### 実機の確認（`tests/real-env` の方式）
+### 実 git の検査（`tests/decision.mjs` の使い捨てのリポジトリ）
 - 使い捨てのリポジトリで、`git pull --ff-only`・`git fetch origin main:main` が分岐時に git に止められ、手元が変わらないことを確かめる（診断の限界の裏づけ）。
 - `main` を別の作業ツリーで確認している状態で、`git fetch origin main:main` が git に止められ、`git -C <その作業ツリー> pull --ff-only origin main` が判定を通って更新できることを確かめる（案内の手順の裏づけ）。
 
