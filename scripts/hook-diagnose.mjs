@@ -64,6 +64,7 @@ const LIMITS = [
   { id: "graphql-indeterminate", host: "both", text: "GitHub の GraphQL は対象を確定できないため、常に確定不能として扱います。" },
   { id: "ref-moving-local", host: "both", text: "update-ref・reset・symbolic-ref・tag・branch の変更系など、ローカルの参照を動かす操作は、Claude では確認を求め、Codex では応答を返さず通常の承認に任せます。拒否はされません。" },
   { id: "over-detection", host: "both", text: "-c の危険な設定や、引数に展開・ワイルドカードを含む fetch は、安全側に倒れるため過検出になりえます。" },
+  { id: "sync-ff-unverified", host: "both", text: "pull・fetch による基底の更新は、取得前のため分岐を確かめません。fast-forward の保証は --ff-only・+ なしの更新が持ち、分岐していれば git が止めます。" },
   { id: "tool-response-format", host: "both", text: "PostToolUse の tool_response は、Claude は exit_code の無いオブジェクト、Codex は出力の文字列で届くことを実機（8.4）で確認し、その形で成功を判定します。判定できない形なら作業は記録されません（安全側）。" },
   { id: "codex-format-unverified", host: "codex", text: "Codex の hooks.json の形、matcher の正規表現としての解釈、信頼の実承認（/hooks）は、実機で未確認です（8.4）。linked worktree は、worktree に .codex/ ディレクトリがあるときだけ親チェックアウトの hooks.json が読まれることを実機で確認済みです。" },
   { id: "codex-hooks-disabled-partial", host: "codex", text: "Codex の hooks 無効の判定は限定的です。[features] の見出しにコメントが付く場合、ドット形式のキー、プロジェクトの .codex/config.toml は見逃します。" },
