@@ -178,6 +178,38 @@ export const runDecisionChecks = async (eq) => {
     eq("sync-base-branch/1.4 pull の <元>:<先> の取り込み元に印を付ける", [mo("git pull origin main:other").sources.map((x) => x.refspecDst === true), mo("git pull origin main").sources.map((x) => x.refspecDst === true), mo("git pull origin refs/heads/main:main").sources[0].branch], [[true], [false], "main"]);
   }
 
+  // ---- sync-base-branch 1.2 fast-forward になるかの確認（読み取りのみ） ----
+  {
+    const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG });
+    const w = fr.dir;
+    const ff = (cmd) => classifyCommand(cmd, w).operations[0].fastForwardable;
+    // dev/foo だけ先に進んでいる（先端は origin/main の祖先ではない）→ false
+    gitOut(w, "commit", "-q", "--allow-empty", "-m", "dev の先行");
+    const aheadOnly = ff("git merge origin/main");
+    gitOut(w, "reset", "-q", "--hard", "HEAD~1");
+    // origin/main だけ先に進める → dev/foo の先端は origin/main の祖先
+    gitOut(w, "checkout", "-q", "main");
+    gitOut(w, "commit", "-q", "--allow-empty", "-m", "main の更新");
+    gitOut(w, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(w, "checkout", "-q", "dev/foo");
+    const forwardable = ff("git merge origin/main");
+    // dev/foo にも独自のコミットを足す → 分岐
+    gitOut(w, "commit", "-q", "--allow-empty", "-m", "dev の更新");
+    const before = gitOut(w, "for-each-ref", "--format=%(refname) %(objectname)");
+    const diverged = ff("git merge origin/main");
+    const pullFf = ff("git pull origin main");
+    const pullFfOnly = ff("git pull --ff-only origin main");
+    const ctl = ff("git merge --abort");
+    const unknownRev = ff("git merge nonexistent-xyz");
+    const multi = ff("git merge origin/main dev/foo");
+    const after = gitOut(w, "for-each-ref", "--format=%(refname) %(objectname)");
+    fr.cleanup();
+    eq("sync-base-branch/1.2 merge で先端が取り込み元の祖先なら true（先に進めるだけ）", [aheadOnly, forwardable], [false, true]);
+    eq("sync-base-branch/1.2 履歴が分岐していれば false", diverged, false);
+    eq("sync-base-branch/1.2 pull・取り込み元なし・解決できない・複数の取り込み元は確認不能（null）", [pullFf, pullFfOnly, ctl, unknownRev, multi], [null, null, null, null, null]);
+    eq("sync-base-branch/1.2 判定でリポジトリの参照が変わらない（読み取りのみ）", after, before);
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));

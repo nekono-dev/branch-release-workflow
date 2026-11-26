@@ -12,6 +12,7 @@
 //   undetermined needsJudgment のうち、対象を確定できなかった操作（理由は op.unresolved）
 //   passes       needsJudgment が空（通常の照会・未導入のリポジトリ・リポジトリ外）
 // classifyMcpCall(toolName, toolInput, cwd) は MCP ツールの呼び出しを同じ形（加えて scope・server・tool）で返す。
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { GH_TARGET_ENV, ghOperations, httpClientOperations, isGh, mcpOperations } from "./github-operations.mjs";
@@ -263,6 +264,12 @@ const localBranchExists = (cwd, name) => refExists(cwd, `refs/heads/${name}`);
 const oidOf = (cwd, ref) => git(cwd, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
 const currentBranchOf = (cwd) => git(cwd, "branch", "--show-current") || null;
 const cfg = (cwd, key) => git(cwd, "config", "--get", key);
+// from が to の祖先か（読み取りのみ）。終了コード 0 → true、1 → false、それ以外（失敗）→ null
+function isAncestor(cwd, from, to) {
+  const r = spawnSync("git", ["merge-base", "--is-ancestor", from, to], { cwd, stdio: "ignore" });
+  if (r.error || r.status === null) return null;
+  return r.status === 0 ? true : r.status === 1 ? false : null;
+}
 const cfgAll = (cwd, key) => (git(cwd, "config", "--get-all", key) ?? "").split("\n").filter(Boolean);
 
 // 値を取るオプションを飛ばして、位置引数だけを集める。valueOpts は値を取るオプション名
@@ -886,7 +893,13 @@ function gitOp(args, ctx, assigns, envTarget) {
         else add("pull 元のブランチが指定されておらず、追跡先も無いため確定できません。");
       }
     }
-    op = makeOp("merge", dir, unresolved, { branch, sources, via: sub, mode, ff: facts.ff, rebase: facts.rebase, basis: facts.basis });
+    // merge で取り込み元が 1 つかつ ID が確定しているときだけ、先端が取り込み元の祖先かを読み取りで確かめる。それ以外（pull など）は確認不能（null）
+    let fastForwardable = null;
+    if (sub === "merge" && mode !== "control" && sources.length === 1 && sources[0].oid) {
+      const tip = oidOf(dir, "HEAD");
+      if (tip) fastForwardable = isAncestor(dir, tip, sources[0].oid);
+    }
+    op = makeOp("merge", dir, unresolved, { branch, sources, via: sub, mode, ff: facts.ff, rebase: facts.rebase, basis: facts.basis, fastForwardable });
   } else if (["switch", "checkout", "branch", "worktree"].includes(sub)) {
     if (dynArgs) add(`${sub} の引数に展開・ワイルドカードが含まれ、対象を確定できません。`);
     const c = dynArgs ? { action: "create", via: sub, branch: null, start: null, branchOnly: false } : createOp(sub, a, dir, add);
