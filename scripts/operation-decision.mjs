@@ -34,8 +34,8 @@ const ALT_MERGE = `開発ブランチ間の取り込みは PR を作らず、ロ
 const ALT_PR_FLOW = `PR の作成は \`${BRW_RUN} pr-template\` で本文の下書きを用意し、本文を書いたうえで \`${BRW_RUN} pr\` を実行してください（\`gh pr create\`・GitHub の API・MCP による直接の作成は使えません）。`;
 // フック経路は reason と alternative の連結を 500 文字で切るため、短く保つ（案内の 3 点が欠けないように）
 const ALT_SYNC = (b) => b === "<基底>"
-  ? `基底の更新は fast-forward に限ります。\`git pull --ff-only origin <基底>\`（基底を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin <基底>\`）で更新し、分岐する反映は PR で、開発ブランチへの取り込みは \`${BRW_RUN} merge origin/<基底>\` で行ってください。`
-  : `fast-forward で更新してください: \`git pull --ff-only origin ${b}\`（${b} を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin ${b}\`）。分岐する反映は PR で、開発ブランチへの取り込みは \`${BRW_RUN} merge origin/${b}\` で行ってください。`;
+  ? `基底の更新は fast-forward に限ります。\`git pull --ff-only origin <基底>\`（基底を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin <基底>\`）で更新し、分岐する反映は PR で、開発ブランチへの取り込みは \`git merge origin/<基底>\` で行ってください。`
+  : `fast-forward で更新してください: \`git pull --ff-only origin ${b}\`（${b} を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin ${b}\`）。分岐する反映は PR で、開発ブランチへの取り込みは \`git merge origin/${b}\` で行ってください。`;
 // 実効値（ff・rebase）を設定から読んだときの根拠。設定のキーと値を示す（無ければ空文字列）
 const basisNote = (op) => {
   const b = op.basis;

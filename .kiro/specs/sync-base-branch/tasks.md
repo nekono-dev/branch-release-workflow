@@ -54,7 +54,7 @@
   - _Depends: 2.3_
   - _Boundary: 診断_
   - _Requirements: 1.3, 3.2_
-- [ ] 3.2 (P) 取り込みの手順と確認省略の対象を手順書に書く
+- [x] 3.2 (P) 取り込みの手順と確認省略の対象を手順書に書く
   - 基底の更新（`git pull --ff-only origin <基底>`、基底を確認していない作業ツリーでの `git fetch origin <基底>:<基底>`、確認中の作業ツリーが別にある場合の `git -C <その作業ツリー> pull --ff-only origin <基底>`）と、作業ブランチへの基底の取り込み（`git merge origin/<基底>`）の手順を書く。許可した取り込みが確認省略の対象であること、リベースと `origin` 以外のリモートは対象外であることも書く。
   - 手順書と設定の資料を読めば、基底の更新と作業ブランチへの取り込みの手順、確認省略の対象、対象外の取り込みが分かる。
   - _Depends: 2.3_
@@ -89,3 +89,4 @@
 - 2.2: `merge --squash origin/main` は開発ブランチ上で許可（リベースだけを除外）。開発ブランチ同士のリベースは従来の許可のまま。既存期待 `enforcement/3.2` の「開発ブランチ上の `git pull origin main` 拒否」は要件 2.1 により許可へ変わったため `git merge dev/other main` に差し替えた。
 - 2.2 レビューで見つかった従来からの穴（未対応・要判断）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
 - 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。
+- 3.2: `brw merge` は開発ブランチ同士専用で `origin/<基底>` を取り込めない。拒否の案内 `ALT_SYNC` は `git merge origin/<基底>` に直した（設計の「`brw merge`」は開発ブランチ間の案内のみ）。
