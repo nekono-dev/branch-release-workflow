@@ -2,15 +2,17 @@
 
 2026-11-26 の相談の記録。`/kiro-discovery` の入力に使う。対になるメモは cc-sdd-bootstrap リポジトリの `.kiro/discovery-notes/2026-11-26-base-branch-sync.md`。
 
-## 1. 基底ブランチの更新（git pull）が拒否される — Path A（既存仕様 brw-enforcement の拡張）
+## 1. 基底ブランチの更新（git pull）が拒否される — 新規仕様 `sync-base-branch`（Path C）
+
+（更新: 2026-11-26。当初は brw-enforcement の拡張（Path A）としたが、同時並行で進めるため新規仕様に分けた。要件の内容は `.kiro/specs/sync-base-branch/brief.md`。brw-enforcement は承認済みの元の状態に戻してある）
 - 現状: `git pull` は取り込み操作として扱われ、取り込み先が `main` などの保護ブランチだと拒否される（`scripts/operation-policy.mjs` の pull・merge 分岐、`scripts/operation-decision.mjs` の `evalMerge`、拒否コード `merge-non-development`）。`dev/x` 上の `git pull origin main` も、取り込み元が開発ブランチでないため拒否される。`git fetch origin main:main` も照会として通らない。
 - 動機: クラウドセッションや他のプロバイダで作業するとリモートだけが進み、手元の基底ブランチ・作業ブランチを追いつかせたい。
-- 決定済みの方針（要件 3-4〜3-7 に反映済み。`.kiro/specs/brw-enforcement/requirements.md`）:
+- 決定済みの方針（`.kiro/specs/sync-base-branch/brief.md` の Desired Outcome に反映済み）:
   - 基底・保護ブランチを、同名のリモート追跡ブランチから fast-forward だけで更新する操作を許可する。
   - `dev/*` へ、基底・保護ブランチのリモート追跡ブランチを取り込む操作を許可する。
   - マージコミットが要る更新・他の非開発ブランチ・宣言外のリモートは拒否し、代替手段を表示する。
   - `rebase` の扱いと、保護ブランチへの直接 commit・push の拒否は変えない。
-- 次の作業: `/kiro-spec-design brw-enforcement` → `/kiro-spec-tasks brw-enforcement` → `/kiro-impl brw-enforcement`。承認は設計・タスクとも未承認に戻してある。
+- 次の作業: `/kiro-spec-init sync-base-branch`（または `/kiro-spec-quick sync-base-branch`）。
 - 設計で確認すること: `operation-policy.mjs` の pull 分岐が追跡先をどう解決するか、`--ff-only` の判定方法、Claude と Codex 両方のフックと `brw guard` への反映、`SKILL.md`・`references/` の説明、自己テスト（`tests/`）。
 
 ## 2. 作業ブランチが切られなかった理由のうち、BRW 側に関係するもの

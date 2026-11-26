@@ -1,22 +1,22 @@
 {
   "feature_name": "brw-enforcement",
   "created_at": "2026-11-20T10:23:34Z",
-  "updated_at": "2026-11-26T05:30:33Z",
+  "updated_at": "2026-11-25T05:30:00Z",
   "language": "ja",
-  "phase": "requirements-generated",
+  "phase": "tasks-generated",
   "approvals": {
     "requirements": {
       "generated": true,
-      "approved": false
+      "approved": true
     },
     "design": {
       "generated": true,
-      "approved": false
+      "approved": true
     },
     "tasks": {
       "generated": true,
-      "approved": false
+      "approved": true
     }
   },
-  "ready_for_implementation": false
+  "ready_for_implementation": true
 }
