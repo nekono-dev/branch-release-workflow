@@ -188,6 +188,7 @@ interface MergeOperation {
   sources: MergeSource[];
   ff: FastForward;            // 実効の fast-forward 指定。fetch-update は "only" とみなす
   rebase: boolean;            // pull が実効でリベースになるか
+  basis: { ff: "arg" | "config" | "default"; rebase: "arg" | "config" | "default"; configKeys: string[] }; // 実効値の由来。引数か、設定（読んだキー）か、既定か
   fastForwardable: boolean | null; // merge で取り込み元の ID が確定しているときの祖先確認。確認不能は null
   unresolved: string[];
 }
@@ -196,7 +197,7 @@ interface MergeOperation {
 - **`ff` の決め方**: 引数 `--ff-only`・`--ff`・`--no-ff` は最後の指定を採る。引数が無ければ設定を読む（`pull` は `pull.ff`、無ければ `merge.ff`。`merge` は `merge.ff`）。値は `only` → `"only"`、`false` → `"never"`、それ以外・未設定 → `"allow"`。
 - **`rebase` の決め方**（pull のみ）: 引数 `-r`・`--rebase`（`=false` 以外）・`--no-rebase` は最後の指定を採る。引数が無ければ `pull.rebase`・`branch.<名前>.rebase` を読み、`false`・未設定以外を `true` とする。
 - **`fastForwardable`**: `merge` で、取り込み先の先端と取り込み元の `oid` が確定しているときだけ、`merge-base --is-ancestor <先端> <oid>` の結果を載せる。それ以外は `null`。
-- **fetch の形**: `git fetch <リモート> <元>:<先>` で、先がローカルのブランチ名（`refs/heads/` または省略形）、`+` が無く、`--force`・`-f`・`--update-head-ok`・`-u`・`--refmap` が無く、ローカルを更新する refspec がちょうど 1 つのとき、`via: "fetch"`・`mode: "fetch-update"`・`branch: <先>`・`sources: [{ name: "<リモート>/<元>", branch: <元>, remote: <リモート> }]` の操作にする。それ以外は従来の分類（確定不能の理由つき）のまま。
+- **fetch の形**: `git fetch <リモート> <元>:<先>` で、リモートが `git remote` に登録済みの名前であり（`.` や URL は除く）、元と先から `refs/heads/` の接頭辞を外した名前を比べる（`refs/heads/main:refs/heads/main` と `main:main` は同じ形）。先がローカルのブランチ名、`+` が無く、`--force`・`-f`・`--update-head-ok`・`-u`・`--refmap` が無く、ローカルを更新する refspec がちょうど 1 つのとき、`via: "fetch"`・`mode: "fetch-update"`・`branch: <先>`・`sources: [{ name: "<リモート>/<元>", branch: <元>, remote: <リモート> }]`（`<元>` は接頭辞を外した名前）の操作にする。リモートの名前が `origin` かどうかは判定側が見る。登録されていないリモート（`.`・URL）や、それ以外の形は、従来の分類（確定不能の理由つき）のまま。
 - **事前条件**: 取り込み操作の引数が確定している。**事後条件**: `unresolved` が空でない操作は、判定側で必ず拒否される（既存の経路）。**不変条件**: 取り出しの過程で git の状態を変えない。
 
 ### 判定
@@ -214,7 +215,8 @@ interface MergeOperation {
 - 形 B（取り込み先が開発ブランチ）: 取り込み元のすべてが、開発ブランチ（従来の許可）または基底の取り込み元であり、`rebase` が `false`（`mode` が `pull-rebase` でない）であること。マージコミットは許す。
 - 拒否の識別子: `sync-ff-only-required`（形 A に近いが `ff` が `allow`）、`sync-not-fast-forward`（`fastForwardable` が `false`、または `ff` が `never`、`squash`、`rebase`）、`sync-rebase`（形 B でリベースを伴う）。形に当たらないものは `merge-non-development` のまま。`via: "fetch"` で形 A に当たらないものは、更新を許さない旨の `merge-non-development` にする（要件 6.4）。
 - 確認省略: 許可した取り込みは、従来の開発ブランチ間マージと同じ分岐に従う。取り込み元が空なら `no-source`、宣言が未登録・編集中なら `unregistered`（`normal`）、登録済みなら `eligibleForApproval`（`skip`）。
-- 拒否の案内: 理由に取り込み先・取り込み元の分類を含め、`alternative` に `ALT_SYNC`（`git pull --ff-only origin <基底>`、または PR による反映、または `brw merge`）を載せる。同じ状態に同じ文面を返す。
+- 拒否の案内: 理由に取り込み先・取り込み元の分類を含め、`alternative` に `ALT_SYNC` を載せる。`ALT_SYNC` は次の3つを示す: (1) 基底を確認している作業ツリーでの `git pull --ff-only origin <基底>`。基底を別の作業ツリー（本体の checkout など）で確認している場合は `git -C <その作業ツリー> pull --ff-only origin <基底>`（`git fetch origin <基底>:<基底>` は、確認中のブランチを git が更新しない）。(2) PR による反映。(3) `brw merge`。同じ状態に同じ文面を返す。
+- 判定の根拠: 判定が `ff`・`rebase` を設定から読んだとき、理由にその設定のキーと値を含める（例: 「`pull.rebase=true` のため、リベースになりうる取り込みです」）。`facts` に `ff`・`rebase` の実効値と由来（`basis`）を載せる。同じ状態には同じ根拠を返す。設定が違えば結果が変わるのは仕様であり、理由で原因が分かるようにする。
 
 **依存**
 - 入力: 字句解析の操作オブジェクト（P0）。
@@ -235,7 +237,7 @@ interface MergeOperation {
 ### 診断・文書
 
 - `hook-diagnose.mjs` の限界の一覧に項目 `sync-ff-unverified`（「`pull`・`fetch` による基底の更新は、取得前のため分岐を確かめません。fast-forward の保証は `--ff-only`・`+` なしの更新が持ち、分岐していれば git が止めます」）を足す。
-- `SKILL.md` に、基底の更新（`git pull --ff-only origin <基底>` または `git fetch origin <基底>:<基底>`）と、作業ブランチへの取り込み（`git merge origin/<基底>`）の手順を書く。`references/config.md` の確認省略の対象に、許可した取り込みを足す。
+- `SKILL.md` に、基底の更新（`git pull --ff-only origin <基底>`、または基底を確認していない作業ツリーでの `git fetch origin <基底>:<基底>`。確認中の作業ツリーが別にあるときは `git -C <その作業ツリー> pull --ff-only origin <基底>`）と、作業ブランチへの取り込み（`git merge origin/<基底>`）の手順を書く。`references/config.md` の確認省略の対象に、許可した取り込みを足す。
 
 ## エラー処理
 
@@ -253,8 +255,8 @@ interface MergeOperation {
 ### 単体テスト（`tests/decision.mjs`）
 1. `git pull --ff-only origin main` を `main` 上で判定し、宣言が登録済みなら `sync-base-fast-forward`（`eligibleForApproval`）、未登録なら `pass`（`unregistered`）になる（要件 1.1・4.1・4.2）。
 2. `git merge --ff-only origin/main` で、分岐していると `sync-not-fast-forward`、していなければ許可になる（要件 1.1・1.3）。
-3. `git fetch origin main:main` が `via: "fetch"` の許可になり、`git fetch origin +main:main`・`--force`・`main:other` は拒否になる（要件 1.2・1.5・6.4）。
-4. `git pull origin main`（`--ff-only` なし）・`--no-ff`・`--rebase`・`--squash` を基底の更新として判定し、`sync-ff-only-required` または `sync-not-fast-forward` になる（要件 1.4・1.5）。`pull.ff=only` の設定があると許可になり、`pull.rebase=true` の設定があると許可にならない。
+3. `git fetch origin main:main` と `git fetch origin refs/heads/main:refs/heads/main` が `via: "fetch"` の許可になり、`git fetch origin +main:main`・`--force`・`main:other`・`git fetch . dev/foo:main`（登録外のリモート）は拒否になる（要件 1.2・1.5・6.4）。既存の `tests/enforcement.mjs` の fetch の期待（照会にしない形）は変わらない。
+4. `git pull origin main`（`--ff-only` なし）・`--no-ff`・`--rebase`・`--squash` を基底の更新として判定し、`sync-ff-only-required` または `sync-not-fast-forward` になる（要件 1.4・1.5）。`pull.ff=only` の設定があると許可になり、`pull.rebase=true` の設定があると許可にならない。後者の拒否の理由に、設定のキーと値が含まれる（要件 3.2・3.3）。
 5. `dev/foo` 上で `git merge origin/main` と `git pull origin main` が `sync-base-merge`、`git pull --rebase origin main` が `sync-rebase`、`git merge main`（手元の `main`）・`git merge origin/other`・別のリモートが `merge-non-development` になる（要件 2.1〜2.4、3.1）。
 6. 取り込み元の指定なし（`--abort`）は確認を省略せず、同じ入力の判定が同じ（`decisionSignature` が一致）になる（要件 3.3・4.3）。
 
@@ -266,6 +268,7 @@ interface MergeOperation {
 
 ### 実機の確認（`tests/real-env` の方式）
 - 使い捨てのリポジトリで、`git pull --ff-only`・`git fetch origin main:main` が分岐時に git に止められ、手元が変わらないことを確かめる（診断の限界の裏づけ）。
+- `main` を別の作業ツリーで確認している状態で、`git fetch origin main:main` が git に止められ、`git -C <その作業ツリー> pull --ff-only origin main` が判定を通って更新できることを確かめる（案内の手順の裏づけ）。
 
 ## 移行
 - 既存の宣言・設定の変更は無い。`origin` の名前は固定で、宣言に項目を足さない。
