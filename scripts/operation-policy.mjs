@@ -919,7 +919,23 @@ function gitOp(args, ctx, assigns, envTarget) {
     if (hasFlag(a, "--refmap")) add("fetch の --refmap で更新先が変わりうるため、確定できません。");
     const pos = positionals(a, ["--depth", "--deepen", "--shallow-since", "--shallow-exclude", "-j", "--jobs", "-o", "--server-option", "--upload-pack", "--negotiation-tip", "--filter", "--refmap", "--recurse-submodules"]);
     const specs = pos.slice(1).filter((x) => x.includes(":"));
-    if (specs.some((x) => local(x.slice(x.indexOf(":") + 1)))) add("fetch の更新先がローカルのブランチになりえます（remote 追跡ブランチ以外）。");
+    // 「同名の fast-forward 更新」の形（<リモート> <元>:<先>）だけは取り込み操作として取り出す。それ以外は従来どおり確定不能にする
+    const localSpecs = specs.filter((x) => local(x.slice(x.indexOf(":") + 1)));
+    const bare = (n) => n.replace(/^refs\/heads\//, "");
+    const sameName = (x) => {
+      const i = x.indexOf(":");
+      const src = bare(x.slice(0, i));
+      const dst = bare(x.slice(i + 1));
+      return !x.startsWith("+") && src !== "" && src === dst && !/^refs\//.test(src) && !/[*^:?[\\]/.test(src);
+    };
+    const forbidden = a.some((x) => ["--force", "-f", "--update-head-ok", "-u", "--refmap", "--all", "--multiple"].includes(x) || x.startsWith("--refmap=") || /^-[A-Za-z]*[fu]/.test(x) && !x.startsWith("--"));
+    const fetchUpdate = !dynArgs && !forbidden && !dirty && pos.length >= 2 && remoteList(dir).includes(pos[0]) && localSpecs.length === 1 && sameName(localSpecs[0]);
+    if (fetchUpdate) {
+      const name = bare(localSpecs[0].slice(localSpecs[0].indexOf(":") + 1));
+      op = makeOp("merge", dir, unresolved, { branch: name, sources: [{ name: `${pos[0]}/${name}`, branch: name, remote: pos[0], oid: null }], via: "fetch", mode: "fetch-update", ff: "only", rebase: false, basis: { ff: "default", rebase: "default", configKeys: [] }, fastForwardable: null });
+      return op;
+    }
+    if (localSpecs.length) add("fetch の更新先がローカルのブランチになりえます（remote 追跡ブランチ以外）。");
     // refspec を省いた fetch は remote.<名前>.fetch の設定に従う
     if (pos.length <= 1) {
       const lines = (git(dir, "config", "--get-regexp", "^remote\\..*\\.fetch$") ?? "").split("\n");

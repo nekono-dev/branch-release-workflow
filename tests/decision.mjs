@@ -210,6 +210,27 @@ export const runDecisionChecks = async (eq) => {
     eq("sync-base-branch/1.2 判定でリポジトリの参照が変わらない（読み取りのみ）", after, before);
   }
 
+  // ---- sync-base-branch 1.3 fetch の同名更新を取り込み操作として取り出す ----
+  {
+    const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG });
+    const w = fr.dir;
+    const op = (cmd) => classifyCommand(cmd, w).operations[0];
+    const shape = (cmd) => { const o = op(cmd); return [o.kind, o.via, o.mode, o.ff, o.rebase, o.branch, o.sources?.map((s) => [s.name, s.branch, s.remote]), o.unresolved.length]; };
+    const fetchUpd = ["main", [["origin/main", "main", "origin"]], 0];
+    const want = ["merge", "fetch", "fetch-update", "only", false, ...fetchUpd];
+    eq("sync-base-branch/1.3 fetch の同名更新は取り込み操作（refs/heads/ の有無を同一視）", [shape("git fetch origin main:main"), shape("git fetch origin refs/heads/main:refs/heads/main"), shape("git fetch origin refs/heads/main:main")], [want, want, want]);
+    eq("sync-base-branch/1.3 追跡ブランチだけを更新する fetch は照会のまま", ["git fetch origin", "git fetch origin main", "git fetch origin main:refs/remotes/origin/main"].map((x) => op(x).kind), Array(3).fill("query"));
+    const kinds = (cmds) => cmds.map((x) => { const o = op(x); return [o.kind, o.unresolved.length > 0]; });
+    eq("sync-base-branch/1.3 登録外のリモート・強制・別名・複数更新・フラグ付きは従来の分類（確定不能）", kinds([
+      "git fetch . dev/foo:main", "git fetch https://example.com/x.git main:main", "git fetch origin +main:main", "git fetch origin main:other", "git fetch origin refs/heads/main:other",
+      "git fetch --force origin main:main", "git fetch -f origin main:main", "git fetch origin --update-head-ok main:main", "git fetch -u origin main:main", "git fetch --refmap= origin main:main",
+      "git fetch origin main:main dev/foo:dev/foo", "git fetch origin main:main $X",
+    ]), Array(12).fill(["unparseable", true]));
+    // 追跡ブランチ更新と同名更新の同居は、ローカルを更新する refspec が 1 つなので取り込み操作
+    eq("sync-base-branch/1.3 追跡ブランチ更新が同居しても更新先が 1 つなら取り込み操作", shape("git fetch origin main:main main:refs/remotes/origin/main")[0], "merge");
+    fr.cleanup();
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));

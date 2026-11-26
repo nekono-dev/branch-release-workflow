@@ -16,7 +16,7 @@
   - _Depends: 1.1_
   - _Boundary: 取り込みの事実の取り出し_
   - _Requirements: 1.3, 3.3_
-- [ ] 1.3 fetch の同名更新の形を取り込み操作として取り出す
+- [x] 1.3 fetch の同名更新の形を取り込み操作として取り出す
   - `git fetch <リモート> <元>:<先>` のうち、リモートが登録済みの名前で、元と先から `refs/heads/` の接頭辞を外した名前が同じで、先頭に `+` が無く、`--force`・`-f`・`--update-head-ok`・`-u`・`--refmap` が無く、ローカルを更新する更新先がちょうど 1 つの形だけを、更新先のブランチを取り込み先、同名の追跡ブランチを取り込み元とする取り込み操作として取り出す。fast-forward に限られる形として扱う。
   - 登録されていないリモート（`.`・URL）、別名への更新（`main:other`）、強制、複数のローカル更新、設定に由来する更新先は従来の分類（確定不能・照会ではない）のまま変えない。追跡ブランチだけを更新する fetch は従来どおり照会とする。
   - `git fetch origin main:main` と `git fetch origin refs/heads/main:refs/heads/main` が取り込み操作として現れ、`git fetch origin`・`git fetch origin main` は照会のまま、`git fetch . dev/foo:main`・`git fetch origin +main:main` は従来の分類のまま変わらない。
@@ -42,7 +42,7 @@
 - [ ] 2.3 拒否の案内と判定の根拠を整える
   - 拒否の理由に、取り込み先・取り込み元の分類と、代替手段（基底の fast-forward 更新、基底を別の作業ツリーで確認している場合の `git -C <その作業ツリー> pull --ff-only origin <基底>`、PR による反映、`brw merge`）を含める。fetch による更新で形 A に当たらないものは、更新を許さない旨で拒否する。
   - 実効値を設定から読んで判定したとき、理由に設定のキーと値を含め、判定の事実に実効値と由来を載せる。同じ状態には同じ判定・同じ案内を返す。
-  - 設定によってリベースになる pull の拒否に、設定のキーと値が含まれ、基底を別の作業ツリーで確認している場合の案内が表示され、同じ入力を 2 回判定して識別子・理由・案内が一致する。
+  - 設定によってリベースになる pull の拒否に、設定のキーと値が含まれ、基底を別の作業ツリーで確認している場合の案内が表示され、同じ入力を 2 回判定して識別子・理由・案内が一致する。 `via: "fetch"` の操作は形 A 以外を必ず `merge-non-development`（更新を許さない旨）で拒否し、`git fetch origin dev/bar:dev/bar`（開発ブランチ）が拒否になることをテストで固定する（1.3 の時点では暫定で確認省略の許可になる）。
   - _Depends: 2.2_
   - _Boundary: 取り込みの判定_
   - _Requirements: 3.2, 3.3, 6.4_
@@ -84,3 +84,4 @@
 ## Implementation Notes
 - 1.1: `mode` は設定由来のリベースでも `pull-rebase` になる（判定は `mode` か `rebase` で拒否できる）。`basis.configKeys` は実効値を決めた設定のキーだけ。設定の読み取り失敗と未設定は区別しない。git の長いオプションの省略形（`--reb` 等）は未対応（従来と同じ）。
 - 1.2: `fastForwardable` は `true|false|null`（null=確認不能）。同一コミットの merge は true。判定側（2.x）は「false のときだけ分岐」と扱う（`!== false` は許可側）。
+- 1.3: fetch の同名更新は暫定で `git fetch origin dev/bar:dev/bar` が `merge-development`（許可）になる。2.1 で形 A を足すときに `via:"fetch"` の形 A 以外を拒否にする（2.3 の完了条件に追記済み）。`--all`・`--multiple`・`-f`/`-u` を含む短い束は取り出さず従来分類のまま。
