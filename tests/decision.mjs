@@ -133,6 +133,51 @@ export const runDecisionChecks = async (eq) => {
   })(), [["deny", "github-merge"]]);
   eq("enforcement/3.2 GitHub マージの拒否は対象が確定できなくても同じ理由にする", [ev("gh pr merge").verdict, ev("gh pr merge $N").verdict], ["deny", "deny"]);
 
+  // ---- sync-base-branch 1.1 取り込みの fast-forward 指定・リベースの実効値と由来 ----
+  {
+    const mo = (cmd) => classifyCommand(cmd, d).operations[0];
+    const view = (cmd) => { const o = mo(cmd); return [o.ff, o.rebase, o.basis.ff, o.basis.rebase, o.basis.configKeys, o.unresolved.length]; };
+    const setCfg = (k, v) => gitOut(d, "config", k, v);
+    const unsetCfg = (k) => { try { gitOut(d, "config", "--unset", k); } catch { /* 未設定 */ } };
+    eq("sync-base-branch/1.1 引数だけの指定（最後の指定を採る）", [
+      view("git pull --ff-only origin main"), view("git pull --no-ff origin main"), view("git pull --ff-only --no-ff origin main"), view("git pull --no-ff --ff origin main"),
+      view("git pull --rebase origin main"), view("git pull -r origin main"), view("git pull --rebase --no-rebase origin main"), view("git pull --no-rebase -r origin main"), view("git pull --rebase=false origin main"),
+      view("git merge --ff-only origin/main"), view("git merge --no-ff origin/main"),
+    ], [
+      ["only", false, "arg", "default", [], 0], ["never", false, "arg", "default", [], 0], ["never", false, "arg", "default", [], 0], ["allow", false, "arg", "default", [], 0],
+      ["allow", true, "default", "arg", [], 0], ["allow", true, "default", "arg", [], 0], ["allow", false, "default", "arg", [], 0], ["allow", true, "default", "arg", [], 0], ["allow", false, "default", "arg", [], 0],
+      ["only", false, "arg", "default", [], 0], ["never", false, "arg", "default", [], 0],
+    ]);
+    eq("sync-base-branch/1.1 指定が無ければ既定", [view("git pull origin main"), view("git merge origin/main")], [["allow", false, "default", "default", [], 0], ["allow", false, "default", "default", [], 0]]);
+    setCfg("pull.ff", "only");
+    setCfg("pull.rebase", "true");
+    const cfgOnly = [view("git pull origin main"), view("git merge origin/main")];
+    // 引数が設定より優先される
+    const both = [view("git pull --no-ff --no-rebase origin main"), view("git pull --ff origin main")];
+    unsetCfg("pull.ff"); unsetCfg("pull.rebase");
+    eq("sync-base-branch/1.1 設定だけの指定（pull.ff・pull.rebase）", cfgOnly, [["only", true, "config", "config", ["pull.ff", "pull.rebase"], 0], ["allow", false, "default", "default", [], 0]]);
+    eq("sync-base-branch/1.1 引数と設定の両方がある場合は引数が優先", both, [["never", false, "arg", "arg", [], 0], ["allow", true, "arg", "config", ["pull.rebase"], 0]]);
+    setCfg("merge.ff", "false");
+    const mergeCfg = [view("git merge origin/main"), view("git pull origin main")];
+    setCfg("pull.ff", "only");
+    const pullPrior = view("git pull origin main");
+    unsetCfg("pull.ff"); unsetCfg("merge.ff");
+    eq("sync-base-branch/1.1 merge.ff は merge と pull の両方に効き、pull.ff が優先される", [mergeCfg, pullPrior], [[["never", false, "config", "default", ["merge.ff"], 0], ["never", false, "config", "default", ["merge.ff"], 0]], ["only", false, "config", "default", ["pull.ff"], 0]]);
+    setCfg("branch.dev/foo.rebase", "true");
+    const branchRb = view("git pull origin main");
+    unsetCfg("branch.dev/foo.rebase");
+    eq("sync-base-branch/1.1 branch.<名前>.rebase を読む", branchRb, [ "allow", true, "default", "config", ["branch.dev/foo.rebase"], 0]);
+    setCfg("pull.rebase", "false");
+    const rbFalse = view("git pull origin main");
+    setCfg("pull.rebase", "bogus");
+    const rbBad = view("git pull origin main");
+    unsetCfg("pull.rebase");
+    eq("sync-base-branch/1.1 pull.rebase=false はリベースにしない、読めない値は確定不能", [rbFalse, rbBad], [["allow", false, "default", "config", ["pull.rebase"], 0], ["allow", false, "default", "default", [], 1]]);
+    eq("sync-base-branch/2.4 リベースを伴う pull の mode", [mo("git pull --rebase origin main").mode, mo("git pull origin main").mode], ["pull-rebase", "pull"]);
+    eq("sync-base-branch/1.5 -c による設定の上書きと展開を含む引数は確定不能", ["git -c pull.rebase=true pull origin main", "git -c merge.ff=false merge origin/main", "git pull --ff-only $R main"].map((x) => mo(x).unresolved.length > 0), [true, true, true]);
+    eq("sync-base-branch/1.4 pull の <元>:<先> の取り込み元に印を付ける", [mo("git pull origin main:other").sources.map((x) => x.refspecDst === true), mo("git pull origin main").sources.map((x) => x.refspecDst === true), mo("git pull origin refs/heads/main:main").sources[0].branch], [[true], [false], "main"]);
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));
