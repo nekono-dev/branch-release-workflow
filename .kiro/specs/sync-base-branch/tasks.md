@@ -46,6 +46,12 @@
   - _Depends: 2.2_
   - _Boundary: 取り込みの判定_
   - _Requirements: 3.2, 3.3, 6.4_
+- [ ] 2.4 `<元>:<先>` の形の pull を常に拒否する
+  - 取り込み元に `refspecDst` の印が付いた取り込み（`git pull <リモート> <元>:<先>`）を、取り込み元の分類（開発・基底・保護）にかかわらず、確認を省略せず `merge-non-development` で拒否する。理由に「手元のブランチを書き換える pull は許可しない」旨を含め、案内に `git pull <リモート> <ブランチ>` の形と基底の fast-forward 更新を示す。フック経路の 500 文字の切り詰めに収める。
+  - `dev/foo` 上の `git pull origin dev/bar:main`・`git pull origin dev/bar:dev/baz`・`git pull origin main:main`・`git pull --ff-only origin main:main`（基底上）が拒否になり、`git pull origin dev/bar`・`git pull origin main` は従来どおり許可される。登録済み・未登録のどちらでも拒否が変わらない。
+  - _Depends: 2.3_
+  - _Boundary: 取り込みの判定_
+  - _Requirements: 3.4, 6.2_
 
 - [ ] 3. 診断と手順書
 - [x] 3.1 (P) 判定の限界を診断の一覧に載せる
@@ -87,7 +93,7 @@
 - 1.3: fetch の同名更新は暫定で `git fetch origin dev/bar:dev/bar` が `merge-development`（許可）になる。2.1 で形 A を足すときに `via:"fetch"` の形 A 以外を拒否にする（2.3 の完了条件に追記済み）。`--all`・`--multiple`・`-f`/`-u` を含む短い束は取り出さず従来分類のまま。
 - 2.1: 優先順位は sync-not-fast-forward → sync-ff-only-required → 許可。fetch の形 A 以外の拒否に仮の `ALT_SYNC` を付けた（2.3 で整える）。Decision の facts に ff・rebase・basis はまだ載せていない（2.3）。
 - 2.2: `merge --squash origin/main` は開発ブランチ上で許可（リベースだけを除外）。開発ブランチ同士のリベースは従来の許可のまま。既存期待 `enforcement/3.2` の「開発ブランチ上の `git pull origin main` 拒否」は要件 2.1 により許可へ変わったため `git merge dev/other main` に差し替えた。
-- 2.2 レビューで見つかった従来からの穴（未対応・要判断）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
+- 2.2 レビューで見つかった従来からの穴（利用者が拒否を採用し、要件 3.4・タスク 2.4 で対応）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
 - 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。
 - 3.2: `brw merge` は開発ブランチ同士専用で `origin/<基底>` を取り込めない。拒否の案内 `ALT_SYNC` は `git merge origin/<基底>` に直した（設計の「`brw merge`」は開発ブランチ間の案内のみ）。
 - 4.2: `brw guard` は create・pr-create だけ共通判定の拒否を採る（`GUARD_OP_KINDS`）ので、取り込みは guard で止まらない（既存仕様。検査で固定）。拒否はフック（Claude・Codex の PreToolUse/PermissionRequest）が担う。

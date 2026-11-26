@@ -135,6 +135,7 @@ sequenceDiagram
 | 3.1 | 許可外は従来どおり拒否 | 判定（従来の経路） | `merge-non-development` |
 | 3.2 | 理由・対象・代替手段を表示 | 判定の案内 | `reason`・`targets`・`alternative` |
 | 3.3 | 同じ状態に同じ判定・案内 | 判定は読み取りのみ・純粋 | `decisionSignature` |
+| 3.4 | `<元>:<先>` の pull は常に拒否 | 判定（`evalMerge` 冒頭） | `merge-non-development`・`sources[].refspecDst` |
 | 4.1 | 登録済みなら確認を省略 | 判定の承認の分岐 | `eligibleForApproval` |
 | 4.2 | 未登録・編集中は通常の承認 | 判定の承認の分岐 | `pass`・`approvalWhy: unregistered` |
 | 4.3 | 取り込み元の指定なしは省略しない | 既存の分岐 | `approvalWhy: no-source` |
@@ -142,7 +143,7 @@ sequenceDiagram
 | 5.2 | `brw guard` でも同じ結果 | 同上 | `evaluateAll` |
 | 5.3 | 未導入のリポジトリは判定しない | 既存の `repoState` の分岐 | `not-managed` |
 | 6.1 | 直接 commit・push の拒否は変えない | 変更しない（`commit`・`push` の経路に触れない） | — |
-| 6.2 | 開発ブランチ間・GitHub のマージは変えない | 変更しない（従来の経路を残す） | `merge-development`・`github-merge` |
+| 6.2 | 開発ブランチ間・GitHub のマージは変えない（`<元>:<先>` の pull を除く） | 変更しない（従来の経路を残す。3.4 の拒否が先） | `merge-development`・`github-merge` |
 | 6.3 | 手元のブランチを動かさない fetch は変えない | 字句解析（fetch の分類は形が当たるものだけ変える） | `query` |
 | 6.4 | 当たらない fetch は従来どおり | 判定（`via: "fetch"` で形 A 以外は拒否） | `merge-non-development`・`unresolved` |
 
@@ -211,6 +212,7 @@ interface MergeOperation {
 
 **責務と制約**
 - 取り込み元のうち「`origin` の追跡ブランチで、`classifyBranch` が基底または保護、`refspecDst` でないもの」を基底の取り込み元とする。これが無い取り込みは、従来の判定のままにする。
+- `refspecDst` の付いた取り込み元（`git pull <リモート> <元>:<先>`）を含む取り込みは、取り込み元の分類（開発・基底・保護）を問わず、`evalMerge` の冒頭で `merge-non-development`（手元のブランチを書き換える pull は許可しない旨。`alternative` は `git pull <リモート> <ブランチ>` の形と基底の fast-forward 更新）で拒否する（要件 3.4・6.2）。形 A・形 B・従来の開発ブランチ間の許可のいずれにも先んじる。
 - 形 A（取り込み先が基底・保護）: 取り込み元がちょうど 1 つで、ブランチ名が取り込み先と同じであること。さらに fast-forward の保証が付いた形（`mode` が `fetch-update`、または `ff` が `only` で `rebase`・`--no-ff`・`squash` でない）、かつ `fastForwardable` が `false` でないこと。
 - 形 B（取り込み先が開発ブランチ）: 取り込み元のすべてが、開発ブランチ（従来の許可）または基底の取り込み元であり、`rebase` が `false`（`mode` が `pull-rebase` でない）であること。マージコミットは許す。
 - 拒否の識別子: `sync-ff-only-required`（形 A に近いが `ff` が `allow`）、`sync-not-fast-forward`（`fastForwardable` が `false`、または `ff` が `never`、`squash`、`rebase`）、`sync-rebase`（形 B でリベースを伴う）。形に当たらないものは `merge-non-development` のまま。`via: "fetch"` で形 A に当たらないものは、更新を許さない旨の `merge-non-development` にする（要件 6.4）。
