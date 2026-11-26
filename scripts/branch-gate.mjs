@@ -181,7 +181,7 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
 
   // 単独の git 操作か（先頭の cd を除く）
   const segments = splitWords(command);
-  const compound = () => denied("gate-compound", "単独の git 操作として確定できないため、置き換えられません", [cmd()], ["他のコマンドと組み合わせた操作や、展開・記号を含むコマンドは置き換えません。brw create を単独で実行してください。"]);
+  const compound = () => denied("gate-compound", "単独の git 操作として確定できないため、置き換えられません", [cmd()], [`他のコマンドと組み合わせた操作や、展開・記号を含むコマンドは置き換えません。${BRW_RUN} create を単独で実行してください。`]);
   if (segments === null) return compound();
   const lead = hasLeadingCd ? 1 : 0;
   if (segments.length !== lead + 1) return compound();
@@ -193,17 +193,17 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
   const planResume = () => {
     const resumeCmd = `cd ${shellQuote(dir)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}`;
     const cls = branch ? classifyBranch(config, branch) : "undeclared";
-    if (!safe(branch)) return denied("gate-name-invalid", "切り替え先のブランチ名を確定できないため、置き換えられません", [cmd()], ["記号や空白を含む名前は置き換えません。再開するブランチを確認して brw resume <ブランチ> を実行してください。"]);
+    if (!safe(branch)) return denied("gate-name-invalid", "切り替え先のブランチ名を確定できないため、置き換えられません", [cmd()], [`記号や空白を含む名前は置き換えません。再開するブランチを確認して ${BRW_RUN} resume <ブランチ> を実行してください。`]);
     const existing = facts.branchExists(branch);
-    if (!existing.local && !existing.origin) return denied("gate-unresolved", `切り替え先 '${branch}' が既存のブランチと確認できないため、置き換えられません`, [cmd()], ["ローカルにもリモート（origin）にも無いブランチです。新しく作るなら brw create を実行してください。"]);
+    if (!existing.local && !existing.origin) return denied("gate-unresolved", `切り替え先 '${branch}' が既存のブランチと確認できないため、置き換えられません`, [cmd()], [`ローカルにもリモート（origin）にも無いブランチです。新しく作るなら ${BRW_RUN} create を実行してください。`]);
     if (cls === "protected" || cls === "base")
       return { verdict: "pass", code: "gate-resume-protected", reason: `'${branch}' は${cls === "protected" ? "保護ブランチ" : "恒常的な分岐元"}への切り替えで、ブランチは増えません。通常のホスト承認に任せます。` };
-    if (cls !== "development") return denied("gate-name-invalid", `'${branch}' は宣言の開発ブランチではないため、再開に置き換えられません`, [cmd()], ["brw resume で再開できるのは、宣言の作業ブランチ（workBranches）に一致するブランチだけです。", `新しく作るなら、命名規則に合う名前で brw create を実行してください。`]);
+    if (cls !== "development") return denied("gate-name-invalid", `'${branch}' は宣言の開発ブランチではないため、再開に置き換えられません`, [cmd()], [`${BRW_RUN} resume で再開できるのは、宣言の作業ブランチ（workBranches）に一致するブランチだけです。`, `新しく作るなら、命名規則に合う名前で brw create を実行してください。`]);
     if (facts.mainBranch === branch) return denied("gate-action-unsupported", `ブランチ '${branch}' は本体の作業ツリーで使用中のため、再開に置き換えられません`, [cmd()], ["brw resume は worktree を作るため、本体で使用中のブランチは再開できません。"]);
     // 再開先: 既にそのブランチの worktree があればそこ。無ければ brw resume が作る場所
     const wt = facts.worktreeOf(branch) ?? join(main, ".claude", "worktrees", aliasOf(branch));
     if (op.via === "worktree" && (op.path === undefined || op.path === null || resolve(op.path) !== resolve(wt)))
-      return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の再開先（${wt}）ではないため、置き換えられません`, [resumeCmd], ["brw resume は本体の .claude/worktrees/ の配下か、そのブランチの既存の worktree を使います。"]);
+      return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の再開先（${wt}）ではないため、置き換えられません`, [resumeCmd], [`${BRW_RUN} resume は本体の .claude/worktrees/ の配下か、そのブランチの既存の worktree を使います。`]);
     const notes = [
       "既存の開発ブランチの再開として brw resume を実行します。リモートに更新があれば取り込みます。",
       `作業場所をブランチの worktree（${wt}）に移しました。続けて、この worktree で作業してください。`,
@@ -235,7 +235,7 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
       operands.push(w);
       continue;
     }
-    if (!spec.allowed.includes(w)) return unsupported(`オプション ${w} は BRW の作成と同じ結果にならないため、置き換えられません`, ["このオプションを外すか、brw create を使ってください。"]);
+    if (!spec.allowed.includes(w)) return unsupported(`オプション ${w} は BRW の作成と同じ結果にならないため、置き換えられません`, [`このオプションを外すか、${BRW_RUN} create を使ってください。`]);
     if (w === spec.value) {
       flagSeen = true;
       flagValue = rest[j + 1] ?? null;
@@ -264,7 +264,7 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
     if (operands.length < 1 || operands.length > 2 || flagValue !== branch) return unsupported("ブランチ名または配置先を確定できません", ["配置先とブランチ名を 1 つずつ書いた形で作ってください。"]);
     start = operands[1] ?? null;
   } else if (operands.length !== 1) {
-    return unsupported("配置先を確定できません", ["配置先だけを書いた形は、brw create で作ってください。"]);
+    return unsupported("配置先を確定できません", [`配置先だけを書いた形は、${BRW_RUN} create で作ってください。`]);
   }
   if ((op.start ?? null) !== start) return unsupported("開始点を確定できません", ["開始点を 1 つに確定できる形で作ってください。"]);
 
@@ -277,22 +277,22 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
   if (!safe(branch) || cls !== "development") {
     if (cls === "protected" || cls === "base") return denied("gate-name-invalid", `'${branch}' は${cls === "protected" ? "保護ブランチ" : "恒常的な分岐元"}のため、作業ブランチとして作れません`, [cmd()], ["保護ブランチと分岐元は作業ブランチの名前にできません。"]);
     const why = safe(branch) ? checkName(config, branch) ?? `'${branch}' は workBranches（${config.workBranches.join(", ")}）に一致しません。` : "記号や空白を含む名前は置き換えません。";
-    return denied("gate-name-invalid", `ブランチ名 '${branch ?? ""}' は作業ブランチの命名規則に合わないため、置き換えられません`, [cmd()], [why, "接頭辞（dev/ など）は補いません。宣言の作業ブランチと命名規則に合う名前で、brw create を実行してください。"]);
+    return denied("gate-name-invalid", `ブランチ名 '${branch ?? ""}' は作業ブランチの命名規則に合わないため、置き換えられません`, [cmd()], [why, `接頭辞（dev/ など）は補いません。宣言の作業ブランチと命名規則に合う名前で、${BRW_RUN} create を実行してください。`]);
   }
   const existing = facts.branchExists(branch);
-  if (existing.local || existing.origin) return denied("gate-action-unsupported", `ブランチ '${branch}' は既に存在するため、作成ではなく再開です`, [`cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}`], ["既存のブランチの再開は brw resume で行ってください。"]);
+  if (existing.local || existing.origin) return denied("gate-action-unsupported", `ブランチ '${branch}' は既に存在するため、作成ではなく再開です`, [`cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}`], [`既存のブランチの再開は ${BRW_RUN} resume で行ってください。`]);
 
   // 配置先（本体の .claude/worktrees/ の配下。brw create が作る場所と一致すること）
   const base = config.baseBranch;
   const wt = join(main, ".claude", "worktrees", aliasOf(branch));
   if (op.via === "worktree" && (op.path === undefined || op.path === null || resolve(op.path) !== resolve(wt)))
-    return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の配置先（${wt}）ではないため、置き換えられません`, [cmd()], ["BRW は本体の .claude/worktrees/ の配下にだけ worktree を作ります。brw create で作ってください。"]);
+    return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の配置先（${wt}）ではないため、置き換えられません`, [cmd()], [`BRW は本体の .claude/worktrees/ の配下にだけ worktree を作ります。${BRW_RUN} create で作ってください。`]);
 
   // 開始点は分岐元（baseBranch か origin/baseBranch）に限る。現在のブランチから作る操作は分岐元からの作成と結果が違う
   if (start === null) {
     if (facts.currentBranch !== base) {
       const cur = facts.currentBranch;
-      return denied("gate-start-unsupported", `現在のブランチ（${cur ?? "なし"}）から分岐する操作のため、置き換えられません`, [safe(cur) ? cmd(` --base ${shellQuote(cur)}`) : cmd()], [`brw create は分岐元（${base}）から作ります。結果が変わるため、置き換えません。`, safe(cur) ? `分岐元を ${cur} にするなら --base で指定してください。` : "分岐元を指定しない作成は、brw create の既定（分岐元）だけです。"]);
+      return denied("gate-start-unsupported", `現在のブランチ（${cur ?? "なし"}）から分岐する操作のため、置き換えられません`, [safe(cur) ? cmd(` --base ${shellQuote(cur)}`) : cmd()], [`brw create は分岐元（${base}）から作ります。結果が変わるため、置き換えません。`, safe(cur) ? `分岐元を ${cur} にするなら --base で指定してください。` : `分岐元を指定しない作成は、${BRW_RUN} create の既定（分岐元）だけです。`]);
     }
   } else if (start !== base && start !== `origin/${base}`) {
     const b = start.replace(/^origin\//, "");
@@ -430,7 +430,7 @@ export function judgeEnterWorktree(input, cwd) {
         `cd ${shellQuote(root)} && node ${shellQuote(BRW_CLI)} create ${shellQuote(branch)}`,
         `EnterWorktree を path に ${wt} を指定して呼ぶ`,
       ], [
-        "1) brw create で作業ブランチと worktree を作ります。2) できた worktree のパスを path に指定して EnterWorktree を呼ぶと、作業場所がその worktree に移ります。",
+        `1) ${BRW_RUN} create で作業ブランチと worktree を作ります。2) できた worktree のパスを path に指定して EnterWorktree を呼ぶと、作業場所がその worktree に移ります。`,
         ...hint,
       ], branch === "<名前>" ? null : wt);
     }
@@ -453,9 +453,9 @@ export function judgeEnterWorktree(input, cwd) {
       "EnterWorktree を path に、brw resume が示した worktree を指定して呼ぶ",
     ], [
       `理由: ${cause}。`,
-      "既存の作業ブランチへ入るときは、brw resume でその worktree を用意してから、path に指定してください。新しく作るときは brw create <名前> を使います。",
+      `既存の作業ブランチへ入るときは、${BRW_RUN} resume でその worktree を用意してから、path に指定してください。新しく作るときは ${BRW_RUN} create <名前> を使います。`,
     ]);
   } catch {
-    return enterDenied("gate-enter-unresolved", "EnterWorktree の判定で内部エラーが起きたため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], ["判定を完了できませんでした。brw create または brw resume で作業場所を用意してください。"]);
+    return enterDenied("gate-enter-unresolved", "EnterWorktree の判定で内部エラーが起きたため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], [`判定を完了できませんでした。${BRW_RUN} create または ${BRW_RUN} resume で作業場所を用意してください。`]);
   }
 }

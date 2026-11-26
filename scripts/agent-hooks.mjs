@@ -16,6 +16,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BRW_RUN } from "./brw-cmd.mjs";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
 import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoRoot, sanitize } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
@@ -328,7 +329,7 @@ function gateJudge(cls, d, command, cwd, host, toolInput) {
       conclusion: "ブランチ・worktree の作成や切り替えを確定できないため、操作を止めます",
       commands: [`node ${shellQuote(BRW_CLI)} create <名前>`],
       workdir: null,
-      notes: `${reason}\n作成は brw create <名前>、既存の開発ブランチの再開は brw resume <ブランチ> を実行してください。`,
+      notes: `${reason}\n作成は ${BRW_RUN} create <名前>、既存の開発ブランチの再開は ${BRW_RUN} resume <ブランチ> を実行してください。`,
     }),
   };
 }
@@ -343,7 +344,7 @@ function judgeBash(command, cwd, host = "claude", toolInput = {}) {
   const d = evaluateAll(cls, restrictionsFor(cwd));
   if (d.verdict === "deny") return gateJudge(cls, d, command, cwd, host, toolInput) ?? decisionOf(d);
   if (cls.operations.some((o) => o.repoState === "managed") && refMovingIn(command))
-    return { verdict: "ask", reason: "ブランチや参照を直接動かす操作のため、利用者の確認を求めます。BRW の手順（brw create・brw resume など）を優先してください。", code: "ref-moving" };
+    return { verdict: "ask", reason: `ブランチや参照を直接動かす操作のため、利用者の確認を求めます。BRW の手順（${BRW_RUN} create・${BRW_RUN} resume など）を優先してください。`, code: "ref-moving" };
   // 送り先（別のリモートを含む）が信頼できない push は、確認省略しない（通常の承認に任せる）
   const pushesTrusted = cls.operations.every((o) => o.kind !== "push" || trustedRemote(o.cwd, o.remote));
   if (d.verdict === "eligibleForApproval" && plainOperation(command, cls) && pushesTrusted)
@@ -551,8 +552,8 @@ function stopGuidance(input) {
       const kind = pendingOf(w, head);
       if (kind === null) continue;
       const id = w.workId;
-      if (kind === "stale") lines.push(`- 作業 ${id}: 準備の後に HEAD が変わりました。\`brw work resume --work ${id}\` で再開して準備をやり直すか、\`brw pause --work ${id} --reason "<理由>"\` で中断してください。`);
-      else lines.push(`- 作業 ${id}: 公開を続けるには、\`brw work plan --work ${id}\` で計画 ID を取得し、\`brw publish --work ${id} --plan <計画 ID>\` を実行してください。中断するなら \`brw pause --work ${id} --reason "<理由>"\` を実行してください。`);
+      if (kind === "stale") lines.push(`- 作業 ${id}: 準備の後に HEAD が変わりました。\`${BRW_RUN} work resume --work ${id}\` で再開して準備をやり直すか、\`${BRW_RUN} pause --work ${id} --reason "<理由>"\` で中断してください。`);
+      else lines.push(`- 作業 ${id}: 公開を続けるには、\`${BRW_RUN} work plan --work ${id}\` で計画 ID を取得し、\`${BRW_RUN} publish --work ${id} --plan <計画 ID>\` を実行してください。中断するなら \`${BRW_RUN} pause --work ${id} --reason "<理由>"\` を実行してください。`);
     }
     if (lines.length === 0) return null;
     return { decision: "block", reason: `${PREFIX}準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}` };
