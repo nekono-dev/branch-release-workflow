@@ -1,9 +1,9 @@
 {
   "feature_name": "brw-pr-handoff",
   "created_at": "2026-11-25T14:20:34Z",
-  "updated_at": "2026-11-26T22:14:54Z",
+  "updated_at": "2026-11-26T22:20:43Z",
   "language": "ja",
-  "phase": "requirements-generated",
+  "phase": "design-generated",
   "approvals": {
     "requirements": {
       "generated": true,
@@ -14,7 +14,7 @@
       "approved": false
     },
     "tasks": {
-      "generated": true,
+      "generated": false,
       "approved": false
     }
   },
