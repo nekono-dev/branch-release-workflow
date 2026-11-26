@@ -50,25 +50,29 @@ export const runStopObserveChecks = async (eq) => {
     const second = fire(fx.worktree, true);
     eq("stop-observe/14.1 記録フックは stop_hook_active:true では block しない（応答なし）", second.stdout, "");
     const clean = fire(fx.main, false);
-    eq("stop-observe/14.1 記録フックは clean な本体では block しない", clean.stdout, "");
+    // 全 worktree を走査する: Stop の cwd が clean な本体でも、別の worktree に未コミットの変更があれば block する（Codex は cwd が本体のまま）
+    eq("stop-observe/14.1 記録フックは cwd が clean な本体でも、別の worktree の未コミットで block する", [JSON.parse(clean.stdout).decision, JSON.parse(readFileSync(logFile, "utf8").trim().split("\n").pop()).dirtyCwd], ["block", false]);
+    rmSync(join(fx.worktree, "new.txt"));
+    eq("stop-observe/14.1 記録フックはすべての worktree が clean なら block しない", fire(fx.main, false).stdout, "");
+    writeFileSync(join(fx.worktree, "new.txt"), "hi\n");
     const entries = parseStopLog(readFileSync(logFile, "utf8"));
-    eq("stop-observe/14.1 記録は cwd・stop_hook_active・dirty・block を持ち、本文を残さない", [entries.length, entries[0].cwd, entries[0].stop_hook_active, entries[0].dirty, entries[0].block, "last_assistant_message" in entries[0]], [3, fx.worktree, false, true, true, false]);
+    eq("stop-observe/14.1 記録は cwd・stop_hook_active・dirty・block を持ち、本文を残さない", [entries.length, entries[0].cwd, entries[0].stop_hook_active, entries[0].dirty, entries[0].block, "last_assistant_message" in entries[0]], [4, fx.worktree, false, true, true, false]);
 
     // ---- 判定 ----
     const W = fx.worktree;
     const ok2 = [{ stop_hook_active: false, block: true, cwd: W }, { stop_hook_active: true, block: false, cwd: W }];
     const j1 = judgeStops(ok2, { worktree: W });
-    eq("stop-observe/14.1 block の後に再入で通り、cwd が worktree なら一致", [j1.verdict, j1.blockThenPass.state, j1.cwdFollowsWorktree.state], ["一致", "一致", "一致"]);
+    eq("stop-observe/14.1 block の後に再入で通れば一致。cwd の追従は情報として記録する", [j1.verdict, j1.blockThenPass.state, j1.cwdFollowsWorktree.state], ["一致", "一致", "情報"]);
     eq("stop-observe/14.1 記録が無ければ成功にせず未観測", judgeStops([], { worktree: W }).verdict, "未観測");
     eq("stop-observe/14.1 1 回目が block されなければ不一致（成功にしない）", judgeStops([{ stop_hook_active: false, block: false, cwd: W }, { stop_hook_active: true, block: false, cwd: W }], { worktree: W }).blockThenPass.state, "不一致");
     eq("stop-observe/14.1 2 回目が無ければ再入の確認は未観測", judgeStops([{ stop_hook_active: false, block: true, cwd: W }], { worktree: W }).blockThenPass.state, "未観測");
     eq("stop-observe/14.1 再入でまた block されたら不一致", judgeStops([{ stop_hook_active: false, block: true, cwd: W }, { stop_hook_active: true, block: true, cwd: W }], { worktree: W }).blockThenPass.state, "不一致");
     const main = fx.main;
     const j2 = judgeStops(ok2.map((e) => ({ ...e, cwd: main })), { worktree: W });
-    eq("stop-observe/14.1 cwd が本体のままなら作業場所の追従は不一致", [j2.cwdFollowsWorktree.state, j2.verdict], ["不一致", "不一致"]);
+    eq("stop-observe/14.1 cwd が本体のままでも、block と再入が観測できれば一致（追従しない旨を情報に書く）", [j2.cwdFollowsWorktree.detail.includes("worktree ではなかった"), j2.verdict], [true, "一致"]);
     const link = join(base, "wt-link");
     symlinkSync(W, link);
-    eq("stop-observe/14.1 cwd の比較は実パスで行う（シンボリックリンク経由でも一致）", judgeStops(ok2.map((e) => ({ ...e, cwd: link })), { worktree: realpathSync(W) }).cwdFollowsWorktree.state, "一致");
+    eq("stop-observe/14.1 cwd の比較は実パスで行う（シンボリックリンク経由でも一致）", judgeStops(ok2.map((e) => ({ ...e, cwd: link })), { worktree: realpathSync(W) }).cwdFollowsWorktree.detail.includes("追従した"), true);
 
     // ---- 整形（既存 README の観測結果に追記できる形） ----
     const report = formatReport({
@@ -77,7 +81,7 @@ export const runStopObserveChecks = async (eq) => {
     eq("stop-observe/14.1 報告はホスト・版・日時を見出しに持つ", [report.includes("claude"), report.includes("2.1.329 (Claude Code)"), report.includes("2026-11-26T10:00:00Z")], [true, true, true]);
     eq("stop-observe/14.1 報告は判定の語（一致・不一致・未観測）だけで結果を示す", report.includes("| 一致 |") && !report.includes("成功"), true);
     const failReport = formatReport({
-      host: "codex", version: "codex-cli 0.172.0", at: "2026-11-26T10:00:00Z", judged: j2, entries: 2, exitCode: 0, timedOut: false,
+      host: "codex", version: "codex-cli 0.172.0", at: "2026-11-26T10:00:00Z", judged: judgeStops([{ stop_hook_active: false, block: false, cwd: main }], { worktree: W }), entries: 1, exitCode: 0, timedOut: false,
     });
     eq("stop-observe/14.1 想定と違う結果は不一致と書き、成功と書かない", failReport.includes("不一致") && !failReport.includes("一致（想定どおり）"), true);
     const unobs = formatReport({ host: "codex", version: "codex-cli 0.172.0", at: "t", judged: judgeStops([], { worktree: W }), entries: 0, exitCode: 124, timedOut: true });

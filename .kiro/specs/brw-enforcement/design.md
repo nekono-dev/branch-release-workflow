@@ -191,7 +191,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | 2.1, 2.6, 2.8 | 操作判定、フック変換 | 送り先の検証と確認省略、明示制限の優先 |
 | 2.2, 2.3, 2.4, 2.5 | 完了公開、フック変換 | 状態と push・保護対象への PR 作成・再利用 |
 | 2.7 | 完了公開、GitHub クライアント | 失敗の報告、push 後および作成応答消失時の復旧 |
-| 2.9, 2.10 | 作業ブランチの残り、フック変換（Stop） | `remainderOf`（cwd と Git だけを使い、作業の記録・ブランチの作り方に依存しない）、Claude・Codex の Stop で block |
+| 2.9, 2.10 | 作業ブランチの残り、フック変換（Stop） | `remaindersOf`（cwd と Git だけを使い、作業の記録・ブランチの作り方に依存しない）、Claude・Codex の Stop で block |
 | 2.11 | 作業ブランチの残り | 案内文に、秘密情報らしいファイルを commit に含めないことと、push できないときは理由を報告して終了することを含める |
 | 2.12 | フック変換（Stop） | `stop_hook_active` の再入では案内しない（既存） |
 | 2.13 | 作業ブランチの残り | 未コミットも未 push も無ければ `null`（止めない） |
@@ -200,7 +200,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | 2.16 | 作業ブランチの残り、完了公開の状態（`noPush`）、宣言（`autoApprove.push`） | push 禁止時は未 push を理由にせず、未コミットの変更の案内は残す |
 | 2.17 | SKILL.md の指示、Stop の案内文 | 失敗時の報告（成功・未完了・理由）、手元に残る変更の明示 |
 | 2.18 | 操作判定、作業ブランチの残り | 保護・分岐元・宣言外では案内も停止もしない。commit・push は要件 1 の 3 で拒否 |
-| 2.19 | `brw guard --finish`、SKILL.md | フックが使えない環境で 2.9 と同じ判定を `remainderOf` で返す（`[block]`・終了コード 1 / `[allow]`・0） |
+| 2.19 | `brw guard --finish`、SKILL.md | フックが使えない環境で 2.9 と同じ判定を `remaindersOf` で返す（`[block]`・終了コード 1 / `[allow]`・0） |
 | 3.1 | 操作判定、CLI | PR 不要の開発間マージ（既存） |
 | 3.2 | 操作判定、フック変換 | `github-merge`・`auto-merge` を取り込み先にかかわらず拒否（既存の判定を維持） |
 | 3.3 | 操作判定（案内文） | 拒否の案内に `brw pr-merge <番号>` を、実行できる形で含める（取り込み先を知らずに出すため、分岐元向けだけ実行でき保護ブランチ向けは拒否される旨を含める） |
@@ -223,7 +223,7 @@ Stop の案内は 1 回だけ出し、同じ応答の再入（`stop_hook_active`
 | 操作判定 | `evaluate(operation, context) → Decision` | 宣言・実際の Git ref |
 | フック変換 | `handleHook(host, event) → HookResponse` | 操作判定、プロジェクトのフック信頼状態 |
 | 完了公開 | `publish(input) → PublishResult` | Git remote、作業先の状態、GitHub API |
-| 作業ブランチの残り | `remainderOf(cwd) → Remainder \| null`、`remainderGuidance(remainder, policy) → string \| null` | 宣言、Git、作業の制限 |
+| 作業ブランチの残り | `remaindersOf(cwd) → Remainder \| null`、`remainderGuidance(remainder, policy) → string \| null` | 宣言、Git、作業の制限 |
 | PR のマージ | `runPrMerge(args, deps) → exitCode` | `github-client`、`remote-url`、宣言、利用者の端末 |
 | Ruleset | `plan(target, selection) → Result<Plan>`、`apply(plan) → Result<Report>`、`inspect(target) → Report` | GitHub クライアント、導入記録 |
 | GitHub クライアント | `request(target, method, path, body?) → Result<Response>` | `gh api`、GitHub API の入力と応答 |
@@ -312,37 +312,38 @@ export function judgeMerge(config: Config, facts: PrFacts, origin: {owner: strin
 
 | 項目 | 内容 |
 |---|---|
-| 役割 | 応答を終えるとき、作業ブランチに未コミットの変更または未 push の commit があれば終了を止めて案内する |
+| 役割 | 応答を終えるとき、このリポジトリのいずれかの worktree の開発ブランチに未コミットの変更または未 push の commit があれば終了を止めて案内する |
 | 要件 | 2.9〜2.13、2.16〜2.19 |
 
 **責務と制約**
 - 読み取りだけを行い、状態・設定・リモートを変更しない。ネットワークを使わない（追跡ブランチの古さは許容する）。
 - 既存の `stopGuidance` は、セッションの ID や状態ファイルが無い・読めないときに先頭で `null` を返す。これを `publishGuidance`（既存の処理。セッションに結び付いた準備済み作業の案内）と、残りの案内（本節。cwd と Git だけを使う）に分け、残りの案内は `publishGuidance` の早期の `null` に影響されず常に評価する。2 つの案内を 1 つの block にまとめる（公開の案内を先に並べる）。
-- 対象は、cwd のリポジトリが BRW 導入済みで、現在のブランチが `judgeBranch` で allow（作業ブランチ）のとき。保護ブランチ・恒常的な分岐元・宣言外のブランチ・detached HEAD・導入していないリポジトリは対象外（案内しない。2.16、1.5）。
-- 未コミットの変更: `git status --porcelain --untracked-files=normal`（ignore されたものは含まない。新規の未追跡ファイルを含める）。
-- 未 push の commit: `git rev-list --count HEAD --not --remotes`（既知のどのリモート追跡ブランチにも含まれない commit の数）。追跡ブランチが無い新規のブランチも検出でき、初回の push 前でも成立する。
+- 対象は、cwd のリポジトリ（BRW 導入済み）の全 worktree（`git worktree list --porcelain`。上限 20 件）のうち、そのブランチが `judgeBranch` で allow（開発ブランチ）のもの。保護ブランチ・恒常的な分岐元・宣言外のブランチ・detached HEAD・削除対象（prunable）の worktree、導入していないリポジトリは対象外（案内しない。2.18、1.5）。**cwd が作業の worktree を指すことに依存しない**（下の「検出の前提と限界」）。
+- 未コミットの変更: worktree ごとに `git -C <パス> status --porcelain --untracked-files=normal`（ignore されたものは含まない。新規の未追跡ファイルを含める）。
+- 未 push の commit: worktree ごとに `git -C <パス> rev-list --count HEAD --not --remotes`（既知のどのリモート追跡ブランチにも含まれない commit の数）。追跡ブランチが無い新規のブランチも検出でき、初回の push 前でも成立する。
 - push 禁止: 作業の制限 `noPush`（`brw work restrict`。セッションではなく worktree の現在の作業から解決する既存の `restrictionsFor`）、または宣言の `autoApprove.push` が明示的に `false` のとき、未 push は理由にしない。未コミットの変更の案内は残し、「commit だけ行い、未 push であることを報告する」と案内する（2.14）。宣言に push を禁止する専用の項目は無いため、`autoApprove.push: false`（確認を省略しない運用）を「宣言が push を禁じる」と扱う（利用者が 2026-11-23 に確認済み）。この扱いは `references/config.md` に明記する。
 - 案内は `stop_hook_active` の再入では出さない（既存の規則。Claude Code 2.1.329 の実機で、状態ファイルが無い一時リポジトリでも 1 回目は block、2 回目は `stop_hook_active:true` になることを確認した。poc/ を参照）。既存の「準備済みで未公開の作業」の案内と 1 つの block にまとめ、公開の案内を先に、残りの案内を後に並べる。変更も未 push も無い調査・確認だけの応答では案内しない（2.13）。
-- **終了前の確認（2.19）**: フックが使えない環境（未導入・未信頼）向けに、`brw guard --finish` が同じ `remainderOf`・`remainderGuidance` で判定し、残りがあれば `[block] <案内>` を出して終了コード 1、無ければ `[allow]` で 0 を返す（`stop_hook_active` の概念は無く、毎回判定する）。引数が `--finish` ちょうど 1 つのときだけこの形になり、従来の「コマンド文字列を 1 つ渡す」形（`git` で始まる文字列）とは衝突しない。SKILL.md は、応答を終える前に、作業ブランチの worktree の中でこれを実行し、`[block]` なら案内に従うよう指示する（フックがある環境でも、本体のチェックアウトへ戻る前に実行する）。
-- **検出の前提と限界**: Stop の入力の `cwd` が作業ブランチの worktree を指すことを前提にする。Claude Code 2.1.329 の実機では、エージェントが Bash で worktree へ `cd` した後、Stop の `cwd` はその worktree になった（`poc/claude-stop-cwd.sh`、2026-11-26）。エージェントが終了前に本体のチェックアウト（保護ブランチ・分岐元）へ戻っていると、対象外として素通りする。Codex 0.172.0 では `cwd` の追従を未確認のため、実環境試験で確かめる。残余リスクは、上の `brw guard --finish` の指示（作業ブランチの worktree の中で実行する）で下げる。
+- **終了前の確認（2.19）**: フックが使えない環境（未導入・未信頼）向けに、`brw guard --finish` が同じ `remaindersOf`・`remainderGuidance` で判定し、残りがあれば `[block] <案内>` を出して終了コード 1、無ければ `[allow]` で 0 を返す（`stop_hook_active` の概念は無く、毎回判定する）。引数が `--finish` ちょうど 1 つのときだけこの形になり、従来の「コマンド文字列を 1 つ渡す」形（`git` で始まる文字列）とは衝突しない。SKILL.md は、応答を終える前にこれを実行し、`[block]` なら案内に従うよう指示する。どの worktree から実行しても全 worktree を判定する。
+- **検出の前提と限界**: Stop の入力の `cwd` には依存せず、同じリポジトリの全 worktree を走査する。実機（2026-11-26）で、Claude Code 2.1.329 は Stop の `cwd` が `cd` で入った worktree に追従したが、**Codex 0.172.0 は起動時の本体のまま**だった（エージェントは worktree でファイルを作っていた）。このため `cwd` だけの検出は Codex で見逃す。全 worktree を走査する記録フックで、両ホストが「1 回目は block、再入（`stop_hook_active:true`）は通過」になることを実機で確認した（`tests/real-env/stop-observe.mjs`）。限界: (1) 別のセッションが作業中の worktree でも、そこに残りがあれば 1 回は案内が出る（案内に「この作業によるものでなければ報告して終了してよい」と書き、2 回目は通る）。(2) 同じリポジトリの worktree ではない別の clone は見えない。(3) 別の worktree のパスへ `cd` して commit・push する手順を案内に含める。
 
 **依存**: `lib.mjs`（`git`・`loadConfig`・`repoRoot`・`judgeBranch`・`autoApproveOf`・`configMatchesHead`。P0）、`agent-hooks.mjs`（呼び出し元。P0）。依存の向きは `lib.mjs` → `work-remainder.mjs` → `agent-hooks.mjs`。
 
 **契約**: Service
 
 ```js
-/** @typedef {{branch: string, dirty: string[], dirtyCount: number, unpushed: number, secretLike: string[]}} Remainder */
+/** @typedef {{branch: string, path: string, dirty: string[], dirtyCount: number, unpushed: number, secretLike: string[]}} Remainder */
 /** @typedef {{noPush: boolean}} RemainderPolicy */
 
-/** 対象の作業ブランチの残りを返す。対象外・判定不能は null（案内しない側に倒す）。 */
-export function remainderOf(cwd: string): Remainder | null;
+/** 全 worktree のうち開発ブランチの残りを返す（残りが無い・対象外・判定不能は空の配列。判定不能は案内しない側に倒す）。 */
+export function remaindersOf(cwd: string): Remainder[];
 
-/** 残りがあれば案内文を返す（残りが無ければ null）。dirty は先頭 10 件までを示す。 */
-export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string | null;
+/** 残りがあれば案内文を返す（残りが無ければ null）。worktree は先頭 5 件まで、各 dirty は先頭 10 件までを示す。 */
+export function remainderGuidance(rs: Remainder[], policy: RemainderPolicy): string | null;
 ```
 
-- 事前条件: `cwd` は絶対パス。事後条件: `null` でない結果は、`dirtyCount > 0` または `unpushed > 0`。
-- 案内文は、ブランチ名、未コミットの変更の件数と先頭のパス、未 push の commit の数、次の操作（`git add <パス>` → `git commit` → `git push`、`brw` を使う場合は同じ）、`secretLike`（`SECRET_PATTERNS` に当たる名前のファイル）があればそれらを commit に含めないこと（2.11）、push できないときはその理由を利用者へ報告してから終了すること、失敗時に「成功した処理・未完了の処理・失敗理由を報告して終了する」こと（2.17）、および「この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい」という判断の指示を含む。Codex では、案内の対象がエージェント自身の作業の変更なら commit・push が実行され、依頼と無関係な既存の変更は「依頼の範囲外」として実行されないことを実機で確認した（Codex 0.167。0.172.0 では再確認していない）。後者でも 2 回目の Stop（`stop_hook_active`）で終了できる。
+- 事前条件: `cwd` は絶対パス。事後条件: 返す各要素は、`dirtyCount > 0` または `unpushed > 0`。
+- 案内文は、対象の worktree のパスとブランチ名（別の worktree なら `cd <パス>` で移って commit・push する手順）、未コミットの変更の件数と先頭のパス、未 push の commit の数、次の操作（`git add <パス>` → `git commit` → `git push`、`brw` を使う場合は同じ）、`secretLike`（`SECRET_PATTERNS` に当たる名前のファイル）があればそれらを commit に含めないこと（2.11）、push できないときはその理由を利用者へ報告してから終了すること、失敗時に「成功した処理・未完了の処理・失敗理由を報告して終了する」こと（2.17）、および「この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい」という判断の指示を含む。Codex では、案内の対象がエージェント自身の作業の変更なら commit・push が実行され、依頼と無関係な既存の変更は「依頼の範囲外」として実行されないことを実機で確認した（Codex 0.167。0.172.0 では再確認していない）。後者でも 2 回目の Stop（`stop_hook_active`）で終了できる。
+- 試験（必須ケース）: Stop の `cwd` が clean な本体（保護ブランチ・恒常的な分岐元）で、別の worktree の開発ブランチに未コミットの変更または未 push の commit があるときに block されること（Codex の実機の形）、すべての worktree が clean なら止めないこと、別の worktree の保護ブランチ側は対象にしないこと。
 - 誤検出の扱い: 無関係な未追跡ファイルで止まり続けないよう、案内は 1 応答につき 1 回で、2 回目（`stop_hook_active`）は終了を許す。案内にはパスを示し、エージェントが理由を説明して終了できるようにする。
 
 **指示の文面（2.14, 2.15, 2.17, 2.19）**: BRW の SKILL.md に「作業の区切りの commit・push」と「終了前の確認」を置く。BRW は呼び出し側のスキルや文書の置き場を知らないため、区切りは一般の言い方にする: (1) まとまった成果物（要件・設計・計画などの文書を含む）の作成が完了したとき、(2) 実装の 1 つの作業単位が完了したとき。区切りでは、変更したパスだけを `git add` し、`git commit` し、`git push` する（許可は求めない）。利用者が push を禁じた場合は commit までにとどめて未 push を報告する。失敗したときは、成功した処理・未完了の処理・失敗理由を報告し、変更が手元にあることを示す。応答を終える前に、フックが無い環境では `brw guard --finish` を実行する。別の環境・エージェントへ引き継ぐときは、リモートの作業ブランチを `brw resume` で再開する。このリポジトリの CLAUDE.md には、cc-sdd の各フェーズ・各タスクの区切りという具体的な言い方で同じ指示を置く（利用者の取り決めを書く場所であり、BRW 自体の文面ではない）。
@@ -368,7 +369,7 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 宣言は正本と旧パスの優先順を維持する。恒常的な分岐元は `baseBranch` と追加の固定名 `baseBranches` から解決する。任意のパターンや一時的な `brwBase` は Ruleset の対象集合へ入れない。
 - 導入選択は `{host, owner, repository, repositoryId?, refs, enabled}`。リポジトリ ID は GitHub 側への適用を選んだ場合に確認・保存する。Git 共通ディレクトリに保存し、適用済み ID は選択とは別に記録する。選択済みと適用確認済みを区別する。別 clone では新たな対話確認または利用者指定の非対話入力を利用する。
 - 公開状態は `{workId, sessionId?, worktreeId, status, pausedReason?, ready?, restrictions, results}`。`ready` は公開先リポジトリ ID、push 先 ref、取り込み先リポジトリ ID と ref、head OID、完了申告、検証要約を持つ。作業の明示制限は `restrictions` に保存し、操作別の結果と PR URL は `results` に記録する。計画は作業に関連付け、記録した前提に変更があれば失効する。Git 共通ディレクトリに worktree 単位で保存し、同じ worktree の状態遷移はロックと一時ファイルからの置換で行う。セッションを関連付けられない環境では作業 ID で再開でき、終了時フックによる案内は無効と報告する。秘密情報や PR 本文は進捗記録に含めない。
-- 作業ブランチの残りは `{branch, dirty[], dirtyCount, unpushed, secretLike[]}`。保存せず、Stop と `guard --finish` のたびに Git から導く（状態ファイルを増やさない）。
+- 作業ブランチの残りは `{branch, path, dirty[], dirtyCount, unpushed, secretLike[]}`。保存せず、Stop と `guard --finish` のたびに Git から導く（状態ファイルを増やさない）。
 - 宣言の `autoApprove` は `{push?, pullRequest?, commit?}`（未指定は有効、明示的な `false` だけが無効）。`commit` を足す。
 - 結果は成功または `auth`、`permission`、`unsupported`、`conflict`、`network`、`invalidInput` の判別可能なエラー。外部 JSON とフック入力は境界で検証してから JSDoc で型を表す。
 
@@ -419,3 +420,4 @@ export function remainderGuidance(r: Remainder, policy: RemainderPolicy): string
 - 2026-11-25: 要件 1.6〜1.8（SSH の別名ホストの origin で brw が GitHub のリポジトリを確定できない問題）を追加した。`remote-url.mjs` を新設して URL の読み取りを一本化し、`ssh -G` で別名を解決する。宣言への別名の記載は採らない（利用者の決定）。要件・設計・タスクの承認は外した（タスクは再生成が必要）。
 - 2026-11-26: 要件 2.9〜2.19（終了時に未 push の作業ブランチを残さない。案内の文面は特定のスキルを前提にしない一般の言い方に改めた。フックが使えない環境向けに `brw guard --finish` を追加し、秘密情報らしい名前を案内に含める）と要件 3.2〜3.9（分岐元向け PR のマージは、利用者が自分の端末で実行する `brw pr-merge` だけが行う。フックは取り込み先を調べずに直接のマージを一律拒否し、案内で `brw pr-merge` を示す。保護ブランチ向けのマージはどの経路でも行わない）の設計を更新した。利用者の決定: 確認つきマージは端末のコマンド、保護ブランチ向けは禁止。端末判定の限界（疑似端末での迂回）は実測して設計に明記した。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。
 - 2026-11-26（設計の検証）: `brw pr-merge` が既存の GitHub クライアントの不変条件（マージ経路が無い。`client/3.2`）と矛盾していたため、`session.mergePull` と `session.readPull` を限定して足す設計に改めた（利用者の決定）。Stop の検出が `cwd` を前提にすることの限界（Claude Code は worktree へ追従、Codex は未確認）を明記し、`brw guard --finish` を作業ブランチの worktree で実行する指示にした。
+- 2026-11-26（実装中の観測で設計を戻した）: タスク 14.1 の実機観測で、Codex 0.172.0 は Stop の `cwd` が worktree に追従せず起動時の本体のままだと分かった（Claude Code 2.1.329 は追従）。`cwd` だけで検出する設計は Codex で見逃すため、Stop と `brw guard --finish` が同じリポジトリの全 worktree の開発ブランチを走査する形に改めた（`remainderOf` → `remaindersOf`。案内に対象の worktree のパスを含める）。要件 2.9・2.13・2.18 の「現在のブランチ」を「いずれかの worktree」に直した。利用者の指示（設計・タスクの更新）による。

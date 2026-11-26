@@ -326,3 +326,11 @@ MCP と API の経路（`github-operations.mjs` の 430・435・503・615 行付
 
 - GitHub REST API の記述（`github/rest-api-description`、`api.github.com.json`、`info.version` 1.1.4。取得 2026-11-26）: `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` は `commit_title`・`commit_message`・`sha`・`merge_method`（merge・squash・rebase）を受け、200・405（マージできない）・409（`sha` が head と違う）を返す。
 - `tests/real-env/README.md`（実行日 2026-11-21）: Stop の block と `stop_hook_active`、`gh pr merge`・`--auto` の拒否を Claude・Codex で観測。
+
+---
+
+# 設計の戻し（2026-11-26、実装中の観測）
+
+- タスク 14.1 の実機観測で、Codex 0.172.0 は Stop の `cwd` が worktree に追従せず起動時の本体のままだと分かった（Claude Code 2.1.329 は追従）。設計の前提（cwd が作業の worktree を指す）が Codex で成り立たない。
+- 選択肢: (a) 同じリポジトリの全 worktree の開発ブランチを走査する（採用）、(b) PostToolUse で「セッションが触れた worktree」を記録して Stop で使う。(b) は状態ファイルが増え、`brw create` 以外の経路（素の git の置き換え、手動の `cd`）の関連付けが漏れうる。(a) は別セッションの worktree でも 1 回は案内が出る欠点があるが、案内の文面と `stop_hook_active` の再入で許容できる。「未 push の作業ブランチを残さない」という目的にそのまま合う。
+- 実機の確認: 全 worktree を走査する記録フックで、両ホストが block→再入で通過した（`feasibility.md` の設計の確認）。

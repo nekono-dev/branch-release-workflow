@@ -55,15 +55,21 @@ export function hookScriptOf(logFile, host) {
     "for await (const c of process.stdin) text += c;",
     "const ev = JSON.parse(text);",
     "let dirty = false;",
+    "let dirtyCwd = false;",
+    "let scanned = 0;",
     "let note = null;",
+    "const statusOf = (dir) => execFileSync(\"git\", [\"status\", \"--porcelain\", \"--untracked-files=normal\"], { cwd: dir, encoding: \"utf8\" }).trim() !== \"\";",
     "try {",
-    '  dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=normal"], { cwd: ev.cwd, encoding: "utf8" }).trim() !== "";',
+    "  dirtyCwd = statusOf(ev.cwd);",
+    '  const paths = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: ev.cwd, encoding: "utf8" }).split("\\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9));',
+    "  scanned = paths.length;",
+    "  dirty = paths.some(statusOf);",
     "} catch {",
     '  note = "git-status-failed";',
     "}",
     "const active = ev.stop_hook_active === true;",
     "const block = !active && dirty;",
-    'appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), host: HOST, event: ev.hook_event_name ?? null, session_id: ev.session_id ?? null, cwd: ev.cwd ?? null, stop_hook_active: active, dirty, block, note }) + "\\n");',
+    'appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), host: HOST, event: ev.hook_event_name ?? null, session_id: ev.session_id ?? null, cwd: ev.cwd ?? null, stop_hook_active: active, dirty, dirtyCwd, scanned, block, note }) + "\\n");',
     `if (block) process.stdout.write(JSON.stringify({ decision: "block", reason: ${JSON.stringify(REASON)} }));`,
     "",
   ].join("\n");
@@ -103,13 +109,13 @@ export function judgeStops(entries, { worktree }) {
     else if (again.block === true) a = mismatch("再入（stop_hook_active:true）の Stop でまた block された");
     else a = match("1 回目は block され、再入（stop_hook_active:true）は block されずに通った");
   }
+  // Stop の cwd が worktree に追従するかは情報として記録する。検出は全 worktree の走査で行うため、追従しなくても合否に含めない。
   const W = real(worktree);
   const wrong = entries.find((e) => typeof e.cwd !== "string" || real(e.cwd) !== W);
   const b = wrong
-    ? mismatch(`Stop の作業ディレクトリが worktree ではなかった（${wrong.cwd ?? "なし"}）`)
-    : match("すべての Stop の作業ディレクトリが worktree だった");
-  const states = [a.state, b.state];
-  const verdict = states.includes("不一致") ? "不一致" : states.every((s) => s === "一致") ? "一致" : "未観測";
+    ? { state: "情報", detail: `Stop の作業ディレクトリは worktree ではなかった（${wrong.cwd ?? "なし"}）。全 worktree の走査で検出する` }
+    : { state: "情報", detail: "Stop の作業ディレクトリは worktree に追従した" };
+  const verdict = a.state;
   return { blockThenPass: a, cwdFollowsWorktree: b, verdict };
 }
 
@@ -122,8 +128,8 @@ export function formatReport({ host, version, at, judged, entries, exitCode, tim
     "",
     "| 項目 | 判定 | 観測の内容 |",
     "|---|---|---|",
-    `| 応答の終了を 1 回止め、再入（stop_hook_active:true）で通る | ${judged.blockThenPass.state} | ${judged.blockThenPass.detail} |`,
-    `| worktree へ移った後の Stop の作業ディレクトリ | ${judged.cwdFollowsWorktree.state} | ${judged.cwdFollowsWorktree.detail} |`,
+    `| 全 worktree の走査で未コミットを検出して 1 回止め、再入（stop_hook_active:true）で通る | ${judged.blockThenPass.state} | ${judged.blockThenPass.detail} |`,
+    `| worktree へ移った後の Stop の作業ディレクトリ（情報） | ${judged.cwdFollowsWorktree.state} | ${judged.cwdFollowsWorktree.detail} |`,
     "",
     `総合: ${judged.verdict}`,
   ].join("\n");
@@ -135,8 +141,8 @@ export function planOf(host) {
     host,
     calls: 1,
     items: [
-      { id: "S1a", title: "応答の終了を 1 回止め、再入（stop_hook_active:true）で通る", expect: "1 回目の Stop は未コミットの変更で block、2 回目は stop_hook_active:true で block されない" },
-      { id: "S1b", title: "worktree へ移った後の Stop の作業ディレクトリ", expect: "すべての Stop の cwd が worktree" },
+      { id: "S1a", title: "全 worktree の走査で未コミットを検出して 1 回止め、再入（stop_hook_active:true）で通る", expect: "1 回目の Stop は（Stop の cwd にかかわらず）いずれかの worktree の未コミットの変更で block、2 回目は stop_hook_active:true で block されない" },
+      { id: "S1b", title: "worktree へ移った後の Stop の作業ディレクトリ（情報）", expect: "worktree に追従するか、起動時の本体のままかを記録する（合否に含めない）" },
     ],
   };
 }

@@ -15,7 +15,7 @@
 
 ## 設計の確認
 
-- 判定: 未通過
+- 判定: 通過
 
 確認日 2026-11-26。根拠の無い前提: なし。
 
@@ -33,10 +33,17 @@
 
 実マージの実行（`PUT .../merge`）は、一次資料の確認にとどめ、実際の PR では行っていない（外部へ影響するため）。実装後に、使い捨てのリポジトリで実環境試験として確かめる（`design.md` の Testing Strategy）。
 
-**やり直し（2026-11-26、実装中の観測）**: 前提「Stop の入力の `cwd` が、エージェントが作業している worktree を指す」は、Claude Code 2.1.329 では成り立つが、**Codex 0.172.0 では成り立たない**（`tests/real-env/stop-observe.mjs` の観測。エージェントは worktree でファイルを作ったが、Stop の cwd は起動時の本体だった。生の出力は実行時の `/tmp/brw-real-env/stop-observe/codex-*/`、結果は tasks.md の Implementation Notes）。根拠が覆ったため、この前提は「未確認」ではなく「Codex で不成立」として、設計を直し、新しい前提を PoC で確かめてから通過に戻す。
+**やり直し（2026-11-26、実装中の観測）と再確認**: 前提「Stop の入力の `cwd` が、エージェントが作業している worktree を指す」は、Claude Code 2.1.329 では成り立つが、**Codex 0.172.0 では成り立たなかった**（`tests/real-env/stop-observe.mjs` の観測。エージェントは worktree でファイルを作ったが、Stop の cwd は起動時の本体だった）。設計を「同じリポジトリの全 worktree を走査する」形に改め、新しい前提を実機で確かめた:
+
+| 前提 | 根拠 |
+|---|---|
+| Stop の `cwd` に依存せず、全 worktree を走査して未コミットを検出すれば、両ホストで block→再入で通過になる | **PoC** `tests/real-env/stop-observe.mjs`（2026-11-26 23:23 UTC、一時リポジトリ。Claude Code 2.1.329 と Codex 0.172.0）: どちらも 1 回目は block、再入（`stop_hook_active:true`）は通過（一致）。Codex の Stop の cwd は本体のまま（`/tmp/brw-real-env/stop-observe/codex-VtS6F9/main`）で、検出は全 worktree の走査による |
+| `git worktree list --porcelain` で全 worktree を列挙でき、`git -C <パス> status` が worktree ごとに使える | 上の PoC の記録フックが使用（両ホストの実機の結果に含まれる）。単体試験で `.claude/worktrees/` 配下の worktree を含めて確認 |
+
+根拠の無い前提: なし。
 
 ## タスク計画の確認
 
-- 判定: 未通過
+- 判定: 通過
 
-設計の確認が未通過のため、設計の再承認後にやり直す（16.1・16.3 は `_Blocked_`）。
+確認日 2026-11-26（設計の更新後にやり直し）。実機で確かめる前提は、先頭の群 **14**（14.1 は完了。全 worktree の走査で両ホストの block→再入を確認済み、14.2 は端末判定）に置いてある。最終確認は 19.2。16.1・16.3 の `_Blocked_` は設計の修正で解除した。未解決: なし。
