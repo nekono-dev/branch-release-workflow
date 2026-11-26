@@ -85,3 +85,10 @@
   - `EnterWorktree {name}` → 拒否。2 手（`brw create` → `EnterWorktree` の path 指定）の案内。`EnterWorktree {path: <BRW の worktree>}` → 応答なし（通過）。
   - Codex の `Bash`（同じ入力）→ 拒否。「次のコマンド:」に作成と移動（`cd <worktree>`）を連ねたコマンドを示した。
 - **実機で未確認**: 書き換え後の `cd` が、エージェントの次の Bash 呼び出しの作業ディレクトリとして引き継がれること（設計時の PoC #2 で確認済みの挙動に依存。実エージェントでは未再確認）。
+
+
+### 実エージェントでの確認（タスク 4.3、利用者の許可を得て実施、2026-11-26）
+
+実際の `claude -p`（使い捨てのリポジトリ、BRW のフックを設定、`--permission-mode bypassPermissions`）で確認した。
+- 素の `git switch -c dev/probe-a` → 置き換えが実行され、worktree `.claude/worktrees/dev-probe-a` が作られ、**次の別の Bash 呼び出しの `pwd` が worktree、ブランチが `dev/probe-a`**（作業場所の移動を確認）。案内の見出し 4 行も表示された。
+- `EnterWorktree {name: "probe-b"}` → 拒否され、2 手の案内が表示された。エージェントは案内どおり `brw create` の後に `EnterWorktree {path}` で worktree に入れた。ただし案内の `<名前>`（path 側）はブランチ名ではなく worktree のディレクトリ名（`dev-probe-b`）で、エージェントが読み替えた。案内の分かりにくさとして残る課題。

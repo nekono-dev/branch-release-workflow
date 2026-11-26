@@ -204,5 +204,7 @@ function finishUp({ d, config, main, others, branch, workId, o }) {
   d.io.out(`片付けました: ${r.branch}（worktree: ${r.worktree}）`);
   if (r.stateNote) d.io.out(`注意: ${r.stateNote}`);
   d.io.out(`この worktree は削除されました。次の作業は本体（${r.main}）で行います。新しい作業は、本体で brw create <名前> を実行してください。`);
+  // 実機（Claude Code）の観察: 作業ディレクトリが消えると、ツールが終了コード 1 と表示し、次の呼び出しの作業ディレクトリはホームに戻る（本体ではない）
+  d.io.out(`注意: 作業ディレクトリが消えたため、実行したツールが「終了コード 1」や「作業ディレクトリが存在しない」と表示することがありますが、PR の作成と片付けは完了しています。続く操作は、先に cd ${shq(r.main)} してから行ってください。`);
   return 0;
 }
