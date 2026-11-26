@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: opens-pr-and-cleans-up
+expected_outcome: |
+  作業ブランチの worktree で変更を commit し、brw pr-template で本文の雛形と記入指示を得て、本文を本文置き場のファイルに書き、brw pr で PR を作成する。直接の gh pr create は使わない。PR の作成後は worktree とローカルブランチが片付き、続く操作は本体で行う。
+context:
+  scaffold_script: place-files.sh
