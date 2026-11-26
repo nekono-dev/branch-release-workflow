@@ -133,3 +133,13 @@ node tests/real-env/stop-observe.mjs --host codex         # Codex を 1 回呼�
 - 判定は 2 項目: (a) 1 回目の Stop が未コミットの変更で block され、`stop_hook_active:true` の再入は block されずに通る、(b) すべての Stop の作業ディレクトリが worktree と一致する。
 - 結果は標準出力に、ホスト・版・日時つきの Markdown として出る。「観測結果の要約」へ追記する。記録が無い・想定と違う結果は「未観測」「不一致」と書き、成功として扱わない。
 - 呼び出し回数は host-events.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。Codex だけ `--dangerously-bypass-hook-trust` を 1 回の呼び出しに付ける。利用者の `~/.claude`・`~/.codex` の設定は書き換えない。
+
+## Stop の観測の結果（実行日 2026-11-26）
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| 応答の終了を 1 回止め、再入（`stop_hook_active:true`）で通る | 一致 | （未判定。Stop の cwd が worktree でなく、未コミットの変更を検出できなかったため block されなかった） |
+| worktree へ移った後の Stop の作業ディレクトリ | 一致（worktree） | **不一致**（起動時の本体のまま。エージェントは worktree でファイルを作っていた） |
+
+- Codex のフックの信頼は、一時の `CODEX_HOME`（`config.toml` にプロジェクトの信頼、`auth.json` は読み取り用のリンク）で渡す。0.172 では `-c projects."<dir>".trust_level` が効かない（0.167 では効いた）。
+

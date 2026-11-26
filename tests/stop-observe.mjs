@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  formatReport, hostCommand, judgeStops, parseArgs, parseStopLog, planOf, setupRepos,
+  formatReport, hostCommand, judgeStops, parseArgs, parseStopLog, planOf, prepareCodexHome, setupRepos,
 } from "./real-env/stop-observe.mjs";
 
 const script = join(dirname(fileURLToPath(import.meta.url)), "real-env/stop-observe.mjs");
@@ -87,8 +87,20 @@ export const runStopObserveChecks = async (eq) => {
     const cc = hostCommand("claude", { main: fx.main, worktree: W });
     eq("stop-observe/14.1 Claude は project の設定だけを読み、バイパス指定を付けない", [cc.bin, cc.args.includes("--setting-sources"), cc.args[cc.args.indexOf("--setting-sources") + 1], cc.args.includes("--dangerously-bypass-hook-trust")], ["claude", true, "project", false]);
     const cx = hostCommand("codex", { main: fx.main, worktree: W });
+    // 一時の CODEX_HOME: プロジェクトの信頼を config.toml に書き、認証は読み取り用のリンクで見せる（利用者の ~/.codex は書き換えない）
+    {
+      const fakeUser = mkdtempSync(join(tmpdir(), "brw-user-codex-"));
+      writeFileSync(join(fakeUser, "auth.json"), "{}");
+      const base2 = mkdtempSync(join(tmpdir(), "brw-codexhome-"));
+      const ch = prepareCodexHome(base2, "/tmp/proj", fakeUser);
+      eq("stop-observe/14.1 一時の CODEX_HOME はプロジェクトの信頼を書き、認証へのリンクを持つ", [readFileSync(join(ch.home, "config.toml"), "utf8"), realpathSync(ch.link) === realpathSync(join(fakeUser, "auth.json"))], ['[projects."/tmp/proj"]\ntrust_level = "trusted"\n', true]);
+      const empty = mkdtempSync(join(tmpdir(), "brw-user-codex-"));
+      eq("stop-observe/14.1 認証ファイルが無ければリンクを作らない", prepareCodexHome(mkdtempSync(join(tmpdir(), "brw-codexhome-")), "/tmp/proj", empty).link, null);
+      eq("stop-observe/14.1 Codex の起動に -c のプロジェクト信頼は使わない", hostCommand("codex", { main: fx.main, worktree: W }).args.some((a) => String(a).includes("trust_level")), false);
+      for (const d of [fakeUser, base2, empty]) rmSync(d, { recursive: true, force: true });
+    }
     eq("stop-observe/14.1 Codex はフックの信頼のバイパスを 1 回の呼び出しに 1 つだけ付ける", [cx.bin, cx.args.filter((a) => a === "--dangerously-bypass-hook-trust").length], ["codex", 1]);
-    eq("stop-observe/14.1 Codex は本体の作業ディレクトリで開始し、プロジェクトの信頼を -c で渡す", [cx.args[cx.args.indexOf("-C") + 1], cx.args.includes(`projects."${fx.main}".trust_level="trusted"`)], [fx.main, true]);
+    eq("stop-observe/14.1 Codex は本体の作業ディレクトリで開始する", cx.args[cx.args.indexOf("-C") + 1], fx.main);
     eq("stop-observe/14.1 プロンプトは worktree への移動を指示する", [cc.args.some((a) => a.includes(W)), cx.args.some((a) => a.includes(W))], [true, true]);
 
     // ---- 計画（ホストを呼ばない） ----

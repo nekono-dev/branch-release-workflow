@@ -6,7 +6,8 @@
 //   BRW（scripts/）には依存しない。記録用の Stop フックだけを使う。結果は標準出力に出し、リポジトリには残さない。
 //   想定と異なる結果は「不一致」と書き、成功扱いにしない。記録が無いときは「未観測」と書く。
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync, symlinkSync} from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WORK_DIR, requireRealEnv } from "./common.mjs";
@@ -159,11 +160,25 @@ export function hostCommand(host, { main, worktree }) {
     args: [
       "exec", "-C", main, "-s", "workspace-write", "--skip-git-repo-check",
       "-c", 'model_reasoning_effort="low"',
-      "-c", `projects."${main}".trust_level="trusted"`,
       "--dangerously-bypass-hook-trust",
       prompt,
     ],
   };
+}
+
+/**
+ * Codex 用の一時の CODEX_HOME を作る。プロジェクト（本体）の信頼を config.toml に書き、認証ファイルは利用者の
+ * ~/.codex/auth.json への読み取り用のシンボリックリンクで見せる（0.172 では `-c projects.<dir>.trust_level` が効かないため）。
+ * 利用者の ~/.codex は書き換えない。auth.json が無ければ link は null（呼び出し側が未観測として扱う）。
+ */
+export function prepareCodexHome(base, main, userHome = join(homedir(), ".codex")) {
+  const home = join(base, "codex-home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "config.toml"), `[projects."${main}"]\ntrust_level = "trusted"\n`);
+  const auth = join(userHome, "auth.json");
+  let link = null;
+  if (existsSync(auth)) { link = join(home, "auth.json"); symlinkSync(auth, link); }
+  return { home, link };
 }
 
 /**
@@ -218,7 +233,8 @@ function observeHost(host) {
   const base = mkdtempSync(join(OUT_ROOT, `${host}-`));
   const fx = setupRepos(base, host);
   const { bin, args } = hostCommand(host, { main: fx.main, worktree: fx.worktree });
-  const r = spawnSync(bin, args, { cwd: fx.main, env: process.env, input: "", encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+  const env = host === "codex" ? { ...process.env, CODEX_HOME: prepareCodexHome(base, fx.main).home } : process.env;
+  const r = spawnSync(bin, args, { cwd: fx.main, env, input: "", encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
   writeFileSync(join(base, "host.out"), r.stdout ?? "");
   writeFileSync(join(base, "host.err"), r.stderr ?? "");
   const entries = existsSync(fx.log) ? parseStopLog(readFileSync(fx.log, "utf8")) : [];
