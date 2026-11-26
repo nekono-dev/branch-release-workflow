@@ -32,7 +32,7 @@
   - _Depends: 1.1, 1.2, 1.3_
   - _Boundary: 取り込みの判定_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 3.1, 4.1, 4.2, 4.3_
-- [ ] 2.2 開発ブランチへの基底の取り込み（形 B）を許可し、リベースを伴うものを拒否する
+- [x] 2.2 開発ブランチへの基底の取り込み（形 B）を許可し、リベースを伴うものを拒否する
   - 取り込み先が宣言上の開発ブランチで、取り込み元のすべてが、従来の許可に当たる開発ブランチ、または `origin` の追跡ブランチのうち基底・保護ブランチに当たるもののとき、マージコミットの作成を理由にせず許可する。確認省略は 2.1 と同じ分岐に従う。
   - リベースになる取り込みは許可しない。取り込み先が開発ブランチ以外・宣言外のとき、取り込み元が手元の別ブランチ・`origin` 以外のリモート・宣言外のブランチのときは、従来どおり拒否する。
   - `dev/foo` 上の `git merge origin/main`・`git pull origin main` が許可になり、`git pull --rebase origin main` が専用の識別子で拒否され、`git merge main`（手元の `main`）・`git merge origin/other`・別のリモートからの取り込みが従来どおり拒否される。
@@ -86,3 +86,5 @@
 - 1.2: `fastForwardable` は `true|false|null`（null=確認不能）。同一コミットの merge は true。判定側（2.x）は「false のときだけ分岐」と扱う（`!== false` は許可側）。
 - 1.3: fetch の同名更新は暫定で `git fetch origin dev/bar:dev/bar` が `merge-development`（許可）になる。2.1 で形 A を足すときに `via:"fetch"` の形 A 以外を拒否にする（2.3 の完了条件に追記済み）。`--all`・`--multiple`・`-f`/`-u` を含む短い束は取り出さず従来分類のまま。
 - 2.1: 優先順位は sync-not-fast-forward → sync-ff-only-required → 許可。fetch の形 A 以外の拒否に仮の `ALT_SYNC` を付けた（2.3 で整える）。Decision の facts に ff・rebase・basis はまだ載せていない（2.3）。
+- 2.2: `merge --squash origin/main` は開発ブランチ上で許可（リベースだけを除外）。開発ブランチ同士のリベースは従来の許可のまま。既存期待 `enforcement/3.2` の「開発ブランチ上の `git pull origin main` 拒否」は要件 2.1 により許可へ変わったため `git merge dev/other main` に差し替えた。
+- 2.2 レビューで見つかった従来からの穴（未対応・要判断）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。

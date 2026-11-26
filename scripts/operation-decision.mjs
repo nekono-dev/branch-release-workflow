@@ -181,13 +181,18 @@ function evalMerge(op, config, registered) {
     return deny(op, "merge-non-development", `fetch による '${op.branch}'（${label(target)}）の更新は許可されません。fetch で更新できるのは、origin の同名の基底・保護ブランチだけです。`, { alternative: ALT_SYNC(op.branch), targets, facts });
   if (target !== "development")
     return deny(op, "merge-non-development", `${label(target)} '${op.branch}' へのローカルマージはできません。マージ先は開発ブランチだけです。`, { alternative: ALT_PR, targets, facts });
-  const badSrc = Object.entries(srcCls).filter(([, c]) => c !== "development");
+  // 形 B: 取り込み元が origin の追跡ブランチのうち基底・保護ブランチに当たるもの（<元>:<先> の形は除く）
+  const isBaseSrc = (s) => s.remote === "origin" && !s.refspecDst && !!s.branch && ["protected", "base"].includes(classifyBranch(config, s.branch));
+  const baseSrcs = sources.filter(isBaseSrc);
+  const badSrc = sources.filter((s) => srcCls[s.name] !== "development" && !isBaseSrc(s)).map((s) => [s.name, srcCls[s.name]]);
   if (badSrc.length)
-    return deny(op, "merge-non-development", `取り込み元 ${badSrc.map(([n, c]) => `'${n}'（${label(c)}）`).join("、")} は開発ブランチではないため、マージできません。`, { alternative: ALT_MERGE, targets, facts });
-  const base = { compliance: "compliant", code: "merge-development", targets, facts };
+    return deny(op, "merge-non-development", `取り込み元 ${badSrc.map(([n, c]) => `'${n}'（${label(c)}）`).join("、")} は開発ブランチでも origin の基底・保護ブランチでもないため、マージできません。`, { alternative: ALT_MERGE, targets, facts });
+  if (baseSrcs.length > 0 && (op.rebase || op.mode === "pull-rebase"))
+    return deny(op, "sync-rebase", `開発ブランチ '${op.branch}' への基底・保護ブランチ '${baseSrcs.map((s) => s.name).join("'、'")}' の取り込みがリベースになるため拒否します。マージで取り込んでください。`, { alternative: ALT_SYNC(baseSrcs[0].branch), targets, facts });
+  const base = { compliance: "compliant", code: baseSrcs.length > 0 ? "sync-base-merge" : "merge-development", targets, facts };
   if (sources.length === 0) return decide(op, { ...base, approval: "normal", approvalWhy: "no-source", reason: "取り込み元の指定がなく（--abort など）、確認は省略しません。" });
   if (!registered) return decide(op, { ...base, approval: "normal", approvalWhy: "unregistered", reason: "宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。" });
-  return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: "開発ブランチ同士のローカルマージです（PR は不要）。確認を省略できます。" });
+  return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: baseSrcs.length > 0 ? "開発ブランチへの基底・保護ブランチ（origin）の取り込みです（マージコミットは作れますが、基底は変わりません）。確認を省略できます。" : "開発ブランチ同士のローカルマージです（PR は不要）。確認を省略できます。" });
 }
 
 /** 作業ディレクトリの remote に、github.com に解決できない SSH の別名ホストがあれば、その案内（要件 1.8）。無ければ空文字列。 */

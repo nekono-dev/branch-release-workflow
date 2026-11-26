@@ -124,7 +124,7 @@ export const runDecisionChecks = async (eq) => {
 
   // ---- 3.2 開発ブランチ以外へのマージ ----
   eq("enforcement/3.2 保護・分岐元・宣言外へのローカルマージは拒否する", ["main", "develop", "other/z"].map((b) => on(b, () => { const x = ev("git merge dev/other"); return [x.verdict, x.code]; })), Array(3).fill(["deny", "merge-non-development"]));
-  eq("enforcement/3.2 開発ブランチへの取り込み元が開発ブランチでなければ拒否する", ["git merge main", "git merge other/z", "git pull origin main"].map((x) => [ev(x).verdict, ev(x).code]), Array(3).fill(["deny", "merge-non-development"]));
+  eq("enforcement/3.2 開発ブランチへの取り込み元が開発ブランチでなければ拒否する", ["git merge main", "git merge other/z", "git merge dev/other main"].map((x) => [ev(x).verdict, ev(x).code]), Array(3).fill(["deny", "merge-non-development"]));
   eq("enforcement/3.2 GitHub 側のマージと自動マージ予約を拒否する", ["gh pr merge 5", "gh pr merge 5 --squash", "gh pr merge 5 --auto", "gh api -X PUT repos/acme/app/pulls/5/merge", "gh api repos/acme/app/merges -f base=main -f head=dev/foo", "gh api graphql -f query='mutation { mergePullRequest(input:{pullRequestId:\"X\"}) { clientMutationId } }'"].map((x) => [ev(x).verdict, ev(x).code]), [["deny", "github-merge"], ["deny", "github-merge"], ["deny", "github-merge"], ["deny", "github-merge"], ["deny", "github-merge"], ["deny", "github-merge"]]);
   eq("enforcement/3.2 自動マージ予約の拒否理由は予約を示す", ev("gh pr merge 5 --auto").code, "github-merge");
   eq("enforcement/3.2 MCP のマージも拒否する", (() => {
@@ -280,6 +280,44 @@ export const runDecisionChecks = async (eq) => {
     gitOut(S.w, "config", "--unset", "pull.rebase");
     eq("sync-base-branch/2.1 pull.ff=only の設定は --ff-only と同等、pull.rebase=true は拒否", [cfgOk, cfgRb], ["sync-base-fast-forward", "sync-not-fast-forward"]);
     S.cleanup();
+  }
+
+  // ---- sync-base-branch 2.2 開発ブランチへの基底の取り込み（形 B） ----
+  {
+    const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG, register: true });
+    const w = fr.dir;
+    gitOut(w, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(w, "branch", "other/z"); gitOut(w, "update-ref", "refs/remotes/origin/other/z", "main");
+    gitOut(w, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+    gitOut(w, "branch", "dev/bar");
+    gitOut(w, "remote", "add", "upstream", "/tmp/brw-upstream-dummy");
+    gitOut(w, "update-ref", "refs/remotes/upstream/main", "main");
+    const judge = (cmd, dir = w) => { const o = classifyCommand(cmd, dir).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+    const okReg = ["eligibleForApproval", "skip", "sync-base-merge", null];
+    eq("sync-base-branch/2.2 dev/foo 上の origin の基底の取り込み（merge・pull）は登録済みなら確認省略の対象", ["git merge origin/main", "git pull origin main", "git pull origin refs/heads/main", "git merge --no-ff origin/main", "git merge --ff-only origin/main", "git merge --squash origin/main", "git merge origin/main origin/dev/bar", "git merge dev/bar origin/main"].map((c) => judge(c)), Array(8).fill(okReg));
+    eq("sync-base-branch/2.2 リベースを伴う取り込み（引数・設定由来・branch.<名前>.rebase）は sync-rebase で拒否", (() => {
+      const args = ["git pull --rebase origin main", "git pull -r origin main", "git pull --rebase --ff-only origin main"].map((c) => judge(c).slice(0, 3));
+      const viaCfg = [["pull.rebase", "true"], ["branch.dev/foo.rebase", "true"]].map(([k, v]) => { gitOut(w, "config", k, v); const r = judge("git pull origin main").slice(0, 3); gitOut(w, "config", "--unset", k); return r; });
+      return [...args, ...viaCfg];
+    })(), Array(5).fill(["deny", "notApplicable", "sync-rebase"]));
+    eq("sync-base-branch/2.2 リベースでない設定（pull.rebase=false）は許可", (() => { gitOut(w, "config", "pull.rebase", "false"); const r = judge("git pull origin main")[2]; gitOut(w, "config", "--unset", "pull.rebase"); return r; })(), "sync-base-merge");
+    eq("sync-base-branch/2.2 開発ブランチ同士だけならリベースでも従来の判定のまま", judge("git pull --rebase origin dev/bar")[2], "merge-development");
+    eq("sync-base-branch/2.2 手元の別ブランチ・宣言外のブランチ・origin 以外のリモート・origin の宣言外は merge-non-development", ["git merge main", "git merge other/z", "git merge origin/other/z", "git pull origin other/z", "git merge upstream/main", "git pull upstream main", "git merge origin/main main", "git merge origin/main origin/other/z", "git pull origin main other/z"].map((c) => judge(c).slice(0, 3)), Array(9).fill(["deny", "notApplicable", "merge-non-development"]));
+    eq("sync-base-branch/2.2 <元>:<先> の取り込み元は形 B に当たらない", ["git pull origin main:dev/foo", "git pull origin main:other", "git pull origin main:main"].map((c) => judge(c).slice(0, 3)), Array(3).fill(["deny", "notApplicable", "merge-non-development"]));
+    eq("sync-base-branch/2.2 fetch による更新は形 A 以外を拒否のまま（形 B に紛れない）", ["git fetch origin dev/bar:dev/bar", "git fetch origin dev/foo:dev/foo"].map((c) => judge(c).slice(0, 3)), Array(2).fill(["deny", "notApplicable", "merge-non-development"]));
+    eq("sync-base-branch/2.2 取り込み元の指定が無い操作（--abort）は確認を省略しない", judge("git merge --abort").slice(0, 4), ["pass", "normal", "merge-development", "no-source"]);
+    eq("sync-base-branch/2.2 取り込み先が宣言外のブランチなら基底の取り込みも merge-non-development", (() => {
+      gitOut(w, "checkout", "-q", "other/z");
+      const r = ["git merge origin/main", "git pull origin main"].map((c) => judge(c).slice(0, 3));
+      gitOut(w, "checkout", "-q", "dev/foo");
+      return r;
+    })(), Array(2).fill(["deny", "notApplicable", "merge-non-development"]));
+    eq("sync-base-branch/2.2 同じ入力は同じ判定", [judge("git merge origin/main"), judge("git pull --rebase origin main")], [judge("git merge origin/main"), judge("git pull --rebase origin main")]);
+    fr.cleanup();
+    const ur = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG, register: false });
+    gitOut(ur.dir, "update-ref", "refs/remotes/origin/main", "main");
+    eq("sync-base-branch/2.2 未登録の宣言では許可しても通常の承認、リベースの拒否は変わらない", [judge("git merge origin/main", ur.dir), judge("git pull origin main", ur.dir), judge("git pull --rebase origin main", ur.dir).slice(0, 3)], [["pass", "normal", "sync-base-merge", "unregistered"], ["pass", "normal", "sync-base-merge", "unregistered"], ["deny", "notApplicable", "sync-rebase"]]);
+    ur.cleanup();
   }
 
   // ---- 3.3 保護対象への PR は作成まで ----
