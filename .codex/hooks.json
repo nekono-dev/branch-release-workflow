@@ -38,6 +38,24 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/work-branch-gate.mjs\" user-prompt-submit --tool codex",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/feasibility-gate.mjs\" user-prompt-submit --tool codex",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -46,6 +64,15 @@
           {
             "type": "command",
             "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" pre-tool-use --tool codex",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/work-branch-gate.mjs\" pre-tool-use --tool codex",
             "timeout": 10
           }
         ]
@@ -78,6 +105,15 @@
             "type": "command",
             "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/kiro-gate.mjs\" stop --tool codex",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agent-hooks/cc-sdd-bootstrap/work-branch-gate.mjs\" stop --tool codex",
+            "timeout": 15
           }
         ]
       }

@@ -24,6 +24,26 @@ export const CONFIG_FORMAT = 1;
 
 const VERSION_RE = /^\d+\.\d+\.\d+(-.+)?$/;
 const LANG_RE = /^[a-z]{2}(-[A-Z]{2})?$/;
+// 基底ブランチの要素に使えない文字（空白・C0 制御文字・DEL・C1 制御文字）
+const BASE_BRANCH_BAD_RE = /[\s\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * 基底ブランチの一覧（カンマ区切り）を検査する。
+ * @param {unknown} value - 設定の値
+ * @returns {string | null} 不正なら日本語の理由、正しければ null
+ */
+function baseBranchesProblem(value) {
+  if (typeof value !== "string") return "文字列で指定してください";
+  const names = value.split(",");
+  if (names.some((name) => name === "")) {
+    return "カンマ区切りで 1 件以上を指定し、空の要素は使わないでください（例 main,develop）";
+  }
+  for (const name of names) {
+    if (name.startsWith("-")) return "ブランチ名の先頭に「-」は使えません";
+    if (BASE_BRANCH_BAD_RE.test(name)) return "ブランチ名に空白や制御文字は使えません";
+  }
+  return null;
+}
 
 /**
  * 導入に使う基本の項目だけを置く（役割表などの項目は lib/config-schema.mjs でつなぐ。subagent-delegation 1.12）。
@@ -55,6 +75,41 @@ export const configFields = [
         ? null
         : "「xx」または「xx-YY」の形で指定してください（例 ja・pt-BR）";
     },
+  },
+  {
+    // Codex のフックの承認の記録を書く・子の承認の確認を省くかの切り替え（既定 true）。
+    // flag・question は持たない（対話や引数では尋ねない）。
+    path: "codex.trustHooks",
+    kind: "boolean",
+    defaultValue: true,
+    validate(value) {
+      return typeof value === "boolean" ? null : "true か false で指定してください";
+    },
+  },
+  {
+    // 作業前のブランチ確保を有効にするか（既定 true）。flag・question は持たない。
+    path: "workflow.branchGate",
+    kind: "boolean",
+    defaultValue: true,
+    validate(value) {
+      return typeof value === "boolean" ? null : "true か false で指定してください";
+    },
+  },
+  {
+    // 検証後の PR 作成の案内を有効にするか（既定 true）。flag・question は持たない。
+    path: "workflow.prAfterValidate",
+    kind: "boolean",
+    defaultValue: true,
+    validate(value) {
+      return typeof value === "boolean" ? null : "true か false で指定してください";
+    },
+  },
+  {
+    // 基底ブランチの一覧（カンマ区切り。既定 main,master,develop）。flag・question は持たない。
+    path: "workflow.baseBranches",
+    kind: "string",
+    defaultValue: "main,master,develop",
+    validate: baseBranchesProblem,
   },
 ];
 
