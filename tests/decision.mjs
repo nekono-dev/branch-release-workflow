@@ -366,6 +366,68 @@ export const runDecisionChecks = async (eq) => {
     fr.cleanup();
   }
 
+  // ---- sync-base-branch 4.1 監査での穴埋め（判定の単体テスト） ----
+  {
+    const mk = (register = true) => {
+      const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG, register });
+      const w = fr.dir;
+      gitOut(w, "branch", "develop");
+      gitOut(w, "update-ref", "refs/remotes/origin/main", "main");
+      gitOut(w, "update-ref", "refs/remotes/origin/develop", "develop");
+      return { w, cleanup: fr.cleanup };
+    };
+    const R = mk(true);
+    const w = R.w;
+    const judge = (cmd) => { const o = classifyCommand(cmd, w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+    const cfgRun = (k, v, cmds, branch) => {
+      if (branch) gitOut(w, "checkout", "-q", branch);
+      gitOut(w, "config", k, v);
+      try { return cmds.map((c) => judge(c)); } finally { gitOut(w, "config", "--unset", k); if (branch) gitOut(w, "checkout", "-q", "dev/foo"); }
+    };
+    const deny = (code) => ["deny", "notApplicable", code, null];
+    // 作業ブランチの作業ツリーからの fetch の同名更新（要件 1.2 の本来の使い方）
+    eq("sync-base-branch/4.1 作業ブランチ上から基底・保護ブランチへの fetch の同名更新は確認省略の対象（1.2）", ["git fetch origin main:main", "git fetch origin develop:develop", "git fetch origin main:main main:refs/remotes/origin/main"].map((c) => judge(c)), Array(3).fill(["eligibleForApproval", "skip", "sync-base-fast-forward", null]));
+    // fetch の従来分類（強制・別名・登録外・フラグ）は確定不能で拒否のまま。追跡ブランチだけの更新は照会のまま
+    eq("sync-base-branch/4.1 fetch の強制・フラグ・別名・登録外のリモート・. ・URL は従来どおり unresolved で拒否（1.5・6.4）", ["git fetch --force origin main:main", "git fetch -f origin main:main", "git fetch --update-head-ok origin main:main", "git fetch -u origin main:main", "git fetch --refmap= origin main:main", "git fetch origin +main:main", "git fetch . dev/foo:main", "git fetch https://example.com/x.git main:main", "git fetch upstream main:main", "git fetch origin main:other"].map((c) => judge(c)), Array(10).fill(deny("unresolved")));
+    eq("sync-base-branch/4.1 追跡ブランチだけを更新する fetch は照会のまま通る（6.3）", ["git fetch origin", "git fetch origin main:refs/remotes/origin/main"].map((c) => judge(c).slice(0, 3)), Array(2).fill(["pass", "notApplicable", "query"]));
+    eq("sync-base-branch/4.1 -c による設定の上書き・展開を含む引数は確定不能で拒否（1.5）", ["git -c pull.rebase=true pull --ff-only origin main", "git -c merge.ff=false merge origin/main", "git pull --ff-only $R main"].map((c) => judge(c)), Array(3).fill(deny("unresolved")));
+    // 設定と引数の組み合わせ（形 A は main 上で判定する）
+    eq("sync-base-branch/4.1 pull.ff=only の設定があっても --no-ff の引数が優先され拒否（1.4・1.5）", cfgRun("pull.ff", "only", ["git pull --no-ff origin main", "git pull origin main"], "main"), [deny("sync-not-fast-forward"), ["eligibleForApproval", "skip", "sync-base-fast-forward", null]]);
+    eq("sync-base-branch/4.1 merge.ff=only は merge・pull とも --ff-only 相当、merge.ff=false でも引数の --ff-only が優先（1.4）", [cfgRun("merge.ff", "only", ["git merge origin/main", "git pull origin main"], "main"), cfgRun("merge.ff", "false", ["git merge --ff-only origin/main", "git pull --ff-only origin main"], "main")], [Array(2).fill(["eligibleForApproval", "skip", "sync-base-fast-forward", null]), Array(2).fill(["eligibleForApproval", "skip", "sync-base-fast-forward", null])]);
+    eq("sync-base-branch/4.1 形 A でも branch.<名前>.rebase=true は拒否、pull.rebase=false は許可（1.5）", [cfgRun("branch.main.rebase", "true", ["git pull --ff-only origin main"], "main"), cfgRun("pull.rebase", "false", ["git pull --ff-only origin main"], "main")], [[deny("sync-not-fast-forward")], [["eligibleForApproval", "skip", "sync-base-fast-forward", null]]]);
+    eq("sync-base-branch/4.1 形 B: merge.ff=false・--ff 指定でも許可、branch.<名前>.rebase=true の pull は sync-rebase（2.2・2.4）", [cfgRun("merge.ff", "false", ["git merge origin/main"]), judge("git merge --ff origin/main"), cfgRun("branch.dev/foo.rebase", "true", ["git pull origin main"])], [[["eligibleForApproval", "skip", "sync-base-merge", null]], ["eligibleForApproval", "skip", "sync-base-merge", null], [deny("sync-rebase")]]);
+    // <元>:<先> の取り込み元（refspecDst）は形 A・B のどちらにも当たらない
+    gitOut(w, "checkout", "-q", "main");
+    eq("sync-base-branch/4.1 git pull origin main:main 系（refspecDst）は形 A にも当たらず拒否（1.5・6.4）", ["git pull --ff-only origin main:main", "git pull --ff-only origin main:dev/foo", "git pull --ff-only origin refs/heads/main:refs/heads/main"].map((c) => judge(c)), Array(3).fill(deny("merge-non-development")));
+    // detached HEAD: 取り込み先を確定できない pull・merge は拒否、fetch の同名更新は取り込み先がブランチ指定なので許可
+    gitOut(w, "checkout", "-q", "--detach");
+    eq("sync-base-branch/4.1 detached HEAD の pull・merge は取り込み先を確定できず拒否（1.6）", ["git pull --ff-only origin main", "git merge --ff-only origin/main", "git merge origin/main"].map((c) => judge(c)), Array(3).fill(deny("unresolved")));
+    eq("sync-base-branch/4.1 detached HEAD でも fetch の同名更新は許可される（更新先は fetch が示すブランチ）", judge("git fetch origin main:main"), ["eligibleForApproval", "skip", "sync-base-fast-forward", null]);
+    gitOut(w, "checkout", "-q", "dev/foo");
+    R.cleanup();
+    // 編集中の宣言（登録済みだが作業ツリーが HEAD と不一致）: 確認を省略せず通常の承認。判定の可否は登録の有無に依らない
+    const E = mk(true);
+    const we = E.w;
+    writeFileSync(join(we, ".branch-release-workflow.json"), JSON.stringify({ ...CONFIG, autoApprove: { push: true } }));
+    const judgeE = (cmd) => { const o = classifyCommand(cmd, we).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+    eq("sync-base-branch/4.1 編集中の宣言: 形 B（merge・pull）と --abort は通常の承認（確認を省略しない）", [judgeE("git merge origin/main"), judgeE("git pull origin main"), judgeE("git merge --abort")], [["pass", "normal", "sync-base-merge", "unregistered"], ["pass", "normal", "sync-base-merge", "unregistered"], ["pass", "normal", "merge-development", "no-source"]]);
+    eq("sync-base-branch/4.1 編集中の宣言: 形 A（pull・merge・fetch）も通常の承認で、拒否は変わらない", (() => {
+      const ok = ["git fetch origin main:main"].map((c) => judgeE(c));
+      gitOut(we, "checkout", "-q", "main");
+      const onMain = ["git pull --ff-only origin main", "git merge --ff-only origin/main"].map((c) => judgeE(c));
+      const rej = ["git pull origin main", "git pull --rebase origin main"].map((c) => judgeE(c).slice(0, 3));
+      gitOut(we, "checkout", "-q", "--", ".");
+      return [ok, onMain, rej];
+    })(), [[["pass", "normal", "sync-base-fast-forward", "unregistered"]], Array(2).fill(["pass", "normal", "sync-base-fast-forward", "unregistered"]), [["deny", "notApplicable", "sync-ff-only-required"], ["deny", "notApplicable", "sync-not-fast-forward"]]]);
+    E.cleanup();
+    // 取り込み元の指定が無い操作は、形 A の基底ブランチ上でも確認を省略しない（拒否）
+    const N = mk(true);
+    gitOut(N.w, "checkout", "-q", "main");
+    const jn = (cmd) => { const o = classifyCommand(cmd, N.w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code]; };
+    eq("sync-base-branch/4.1 取り込み元の指定が無い操作（--abort・--continue）は基底ブランチ上でも確認を省略せず拒否", [jn("git merge --abort"), jn("git merge --continue")], Array(2).fill(["deny", "notApplicable", "merge-non-development"]));
+    N.cleanup();
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));
