@@ -16,7 +16,8 @@
 //   reason       人に見せる理由。reasons は確定できなかった理由などの内訳。alternative は代わりに使える BRW の手順
 //   targets・facts  判定に使った対象のブランチ名と、その分類
 import { BRW_RUN } from "./brw-cmd.mjs";
-import { autoApproveOf, classifyBranch, configMatchesHead, loadConfig } from "./lib.mjs";
+import { autoApproveOf, classifyBranch, configMatchesHead, git, loadConfig } from "./lib.mjs";
+import { aliasHostOf, githubRepoOf } from "./remote-url.mjs";
 
 const CLASS_LABEL = {
   protected: "保護ブランチ",
@@ -169,6 +170,19 @@ function evalMerge(op, config, registered) {
   return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: "開発ブランチ同士のローカルマージです（PR は不要）。確認を省略できます。" });
 }
 
+/** 作業ディレクトリの remote に、github.com に解決できない SSH の別名ホストがあれば、その案内（要件 1.8）。無ければ空文字列。 */
+function aliasRemoteNote(dir) {
+  if (!dir) return "";
+  const hosts = new Set();
+  for (const n of (git(dir, "remote") ?? "").split("\n").filter(Boolean)) {
+    const url = git(dir, "remote", "get-url", n);
+    const h = aliasHostOf(url);
+    if (h && !githubRepoOf(url)) hosts.add(h);
+  }
+  if (!hosts.size) return "";
+  return `（remote のホスト ${[...hosts].join("・")} は SSH の別名で、github.com に解決できませんでした。GitHub を指す https の remote を足すか、~/.ssh/config の HostName を確認してください。）`;
+}
+
 // PR 作成の判定。起点が "agent"（既定。フック・brw guard・MCP の判定）のときは、規則に適合する作成も拒否して brw pr を案内する。
 // BRW 自身の公開（計画時と実行時）だけが "brw-publish" を渡し、従来の判定（禁止・適合・確認省略）を使う。渡し忘れは拒否側に倒れる
 function evalPrCreate(op, config, auto, registered, restrictions, origin) {
@@ -181,7 +195,7 @@ function evalPrCreateRules(op, config, auto, registered, restrictions) {
   const head = op.head;
   const baseName = op.base;
   if (!op.repository || op.repoMatchesCwd !== true)
-    return deny(op, "pr-create-repository", "PR の作成先が、この作業ディレクトリのリポジトリと一致すると確認できないため拒否します。", { compliance: "unresolved", facts: { repository: op.repository ?? null } });
+    return deny(op, "pr-create-repository", `PR の作成先が、この作業ディレクトリのリポジトリと一致すると確認できないため拒否します。${aliasRemoteNote(op.cwd)}`, { compliance: "unresolved", facts: { repository: op.repository ?? null } });
   if (head.owner)
     return deny(op, "pr-create-head", `取り込み元 '${head.owner}:${head.branch}' は別のリポジトリのブランチで、開発ブランチと確認できないため拒否します。`, { targets: [head.branch, baseName] });
   const hc = classifyBranch(config, head.branch);

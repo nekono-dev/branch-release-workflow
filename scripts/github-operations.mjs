@@ -12,6 +12,7 @@
 //                        refWrite が真のものは、ブランチやタグの先を直接動かしうる
 //     unparseable        変更かどうかも確定できない（未知のサブコマンド・ツールなど）
 //   unresolved: 対象（ホスト・リポジトリ・head・base など）を確定できなかった理由。空なら確定済み
+import { canonicalSshHost } from "./remote-url.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { git } from "./lib.mjs";
@@ -37,10 +38,11 @@ const sameRepo = (a, b) => a && b && a.host === b.host && a.owner.toLowerCase() 
  */
 export function parseRepoSpec(spec, defaultHost, bare) {
   const s = String(spec).trim();
-  let m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/([^/]+)\/([^/?#]+?)(?:\.git)?(?:[/?#].*)?$/.exec(s);
-  if (m && okPart(m[2]) && okPart(m[3])) return { host: normHost(m[1]), owner: m[2], name: m[3], explicitHost: true };
-  m = /^[^@/\s]+@([^:/\s]+):([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(s);
-  if (m && okPart(m[2]) && okPart(m[3])) return { host: normHost(m[1]), owner: m[2], name: m[3], explicitHost: true };
+  // ssh・scp 形式のホストは、SSH の別名が github.com に解決できるとき github.com として扱う（remote-url.mjs。通信なし）
+  let m = /^(https?|ssh|git):\/\/(?:([^@/]+)@)?([^/:]+)(?::(\d+))?\/([^/]+)\/([^/?#]+?)(?:\.git)?(?:[/?#].*)?$/.exec(s);
+  if (m && okPart(m[5]) && okPart(m[6])) return { host: normHost(m[1] === "ssh" ? canonicalSshHost(m[3], m[2], m[4]) : m[3]), owner: m[5], name: m[6], explicitHost: true };
+  m = /^([^@/\s]+)@([^:/\s]+):([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(s);
+  if (m && okPart(m[3]) && okPart(m[4])) return { host: normHost(canonicalSshHost(m[2], m[1])), owner: m[3], name: m[4], explicitHost: true };
   if (!bare) return null;
   const p = s.split("/");
   if (p.length === 2 && p.every(okPart)) return { host: defaultHost, owner: p[0], name: stripGit(p[1]), explicitHost: false };

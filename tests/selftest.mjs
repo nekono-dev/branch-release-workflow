@@ -20,6 +20,7 @@ import { runPrFlowChecks } from "./pr-flow.mjs";
 import { runPrTemplateChecks } from "./pr-template.mjs";
 import { runTidyChecks } from "./tidy.mjs";
 import { runDecisionChecks } from "./decision.mjs";
+import { runRemoteUrlChecks } from "./remote-url.mjs";
 import { runGithubWriteChecks } from "./github-write.mjs";
 import { runGithubClientChecks } from "./github-client.mjs";
 import { runGithubRulesetChecks } from "./github-ruleset.mjs";
@@ -582,6 +583,7 @@ await runGithubWriteChecks(eq);
 
 // ---- 操作可否の共通判定（brw-enforcement 2.3） ----
 await runDecisionChecks(eq);
+await runRemoteUrlChecks(eq);
 
 // ---- GitHub クライアントの土台（brw-enforcement 3.1） ----
 await runGithubClientChecks(eq);

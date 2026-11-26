@@ -11,6 +11,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { branchBase, classifyBranch, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
 import { createGitHubSession } from "./github-client.mjs";
 import * as publish from "./publish.mjs";
+import { unknownDestinationText } from "./remote-url.mjs";
 import { existingPr, runPublishPr } from "./publish-pr.mjs";
 
 const HOST = "github.com";
@@ -116,8 +117,9 @@ function sessionOf(d) {
 /** push 先の GitHub リポジトリを、GitHub の応答で照合して ID を確定する。通信は確認のための読み取りだけ。 */
 async function resolveRepo(cwd, session, branch, repositoryId) {
   const remote = publish.remoteNameOf(cwd, branch);
-  const gh = publish.githubRepoOf(git(cwd, "remote", "get-url", "--push", remote));
-  if (!gh) return { error: `push 先のリモート（${remote}）を GitHub のリポジトリとして確定できません。` };
+  const pushUrl = git(cwd, "remote", "get-url", "--push", remote);
+  const gh = publish.githubRepoOf(pushUrl);
+  if (!gh) return { error: unknownDestinationText(remote, pushUrl) };
   const t = await session.confirmTarget({ host: session.host, owner: gh.owner, name: gh.name, ...(repositoryId !== undefined ? { repositoryId } : {}) });
   if (!t.ok) return { error: FAILURE_TEXT[t.kind] ?? "GitHub で対象リポジトリを確認できませんでした。" };
   return { repo: { id: t.target.repositoryId, owner: gh.owner, name: gh.name } };
@@ -322,8 +324,10 @@ async function cmdPublish(args, d) {
   const w = publish.readWork(d.cwd, id);
   if (!w.ok) return fail(d.io, w.error.message);
   if (!w.work.ready) return fail(d.io, "準備済みの記録がありません。先に brw work ready と brw work plan を実行してください。");
-  const gh = publish.githubRepoOf(git(d.cwd, "remote", "get-url", "--push", publish.remoteNameOf(d.cwd, w.work.branch)));
-  if (!gh) return fail(d.io, "push 先のリモートを GitHub のリポジトリとして確定できません。");
+  const pubRemote = publish.remoteNameOf(d.cwd, w.work.branch);
+  const pubUrl = git(d.cwd, "remote", "get-url", "--push", pubRemote);
+  const gh = publish.githubRepoOf(pubUrl);
+  if (!gh) return fail(d.io, unknownDestinationText(pubRemote, pubUrl));
   const repository = { id: w.work.ready.repositoryId, owner: gh.owner, name: gh.name };
   const publication = w.work.ready.publication;
 
