@@ -2,6 +2,7 @@
 // ブランチ作成・再開のゲート（brw-branch-gate）。案内の書式（guidance）と、作成の置き換えの計画（planGate）を置く。
 // planGate は git を呼ばない純粋な関数。git の状態は gatherFacts（呼び出し側が作る）から受け取る。
 // 外部依存なし（Node 標準ライブラリと内部モジュールのみ）。
+import { BRW_RUN } from "./brw-cmd.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
