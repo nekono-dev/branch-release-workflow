@@ -49,6 +49,8 @@ export const runCleanupChecks = async (eq) => {
   const ok = setup();
   const r = run(ok);
   eq("brw-pr-handoff/4.1 安全が確認できたとき、worktree・ローカルブランチ・本文ファイル・作業状態を削除する", [r.kind, exists(ok), r.stateRemoved], ["cleaned", { wt: false, branch: false, state: false, body: false }, true]);
+  eq("brw-pr-handoff/4.2 片付けが完了したとき、その作業の作業状態の記録も削除される", existsSync(ok.state), false);
+  eq("brw-pr-handoff/4.3 片付けでリモートのブランチは削除しない", g(ok.main, "ls-remote", "origin", "refs/heads/dev/foo").trim().length > 0, true);
   eq("brw-pr-handoff/4.8 片付けの結果に、本体のパスと片付けた worktree を含める（案内に使う）", [r.main, r.worktree], [ok.main, ok.wt]);
 
   // 確認できないとき: 何も消さない

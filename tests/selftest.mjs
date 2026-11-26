@@ -130,6 +130,7 @@ eq("brw-branch-gate/1.6 guard は PR 作成の拒否を終了コード 1 で返�
 // brw-pr-handoff 1.1・1.6: 規則に適合する直接の PR 作成も、guard が終了コード 1 で拒否し、brw pr を案内する
 const guardPrOk = run(prRepo.dir, "guard", "gh pr create --base develop --head dev/foo --title t --body b");
 eq("brw-pr-handoff/1.6 guard は規則に適合する直接の PR 作成も拒否し、brw pr-template と brw pr を案内する", [guardPrOk.status, guardPrOk.stdout.includes("[deny]"), guardPrOk.stdout.includes("brw pr-template"), guardPrOk.stdout.includes("brw pr")], [1, true, true, true]);
+eq("brw-pr-handoff/6.3 直接の gh pr create を試みた呼び出し側に、BRW を知らなくても辿れる brw pr への案内を返す（guard の拒否）", [guardPrOk.status, guardPrOk.stdout.includes("brw pr-template"), guardPrOk.stdout.includes("brw pr")], [1, true, true]);
 prRepo.cleanup();
 const newSetup = mkRepo("develop", null);
 writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
@@ -290,6 +291,7 @@ const autoUp = mkRepo("develop", autoCfg);
 g(autoUp, "config", "branch.develop.merge", "refs/heads/main");
 g(autoUp, "config", "push.default", "upstream");
 eq("branch-guard/AC-14 送り先を省き、追跡先が別名なら省かない", [aa("git push", autoUp), aa("git push origin develop", autoUp)], [false, true]);
+eq("brw-pr-handoff/5.1 宣言ファイルは、片付けの有効・無効を表す設定（afterPublish.cleanup）を持てる", [validateConfig({ ...autoCfg, afterPublish: { cleanup: false } }), validateConfig({ ...autoCfg, afterPublish: { cleanup: true } })], [[], []]);
 eq("brw-pr-handoff/5.2 片付けの設定が省略された宣言は有効として読まれ、false の明示だけが無効になる", [normalizeConfig(autoCfg).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: {} }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: true } }).afterPublish.cleanup, normalizeConfig({ ...autoCfg, afterPublish: { cleanup: false } }).afterPublish.cleanup], [true, true, true, false]);
 eq("brw-pr-handoff/5.4 設定の無い既存の宣言も検証を通り、片付け有効・日本語で読まれる", [validateConfig(autoCfg), normalizeConfig(autoCfg).pullRequest.language], [[], "ja"]);
 eq("brw-pr-handoff/5.6 片付けの設定の型違い・未知のキー・オブジェクト以外は宣言の不正として報告する", [
