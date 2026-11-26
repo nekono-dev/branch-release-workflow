@@ -68,7 +68,7 @@
   - _Depends: 2.3_
   - _Boundary: 判定のテスト_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, 3.1, 3.3, 4.1, 4.2, 4.3_
-- [ ] 4.2 (P) 3 経路の同一判定と既存の規則の不変を結合テストで確かめる
+- [x] 4.2 (P) 3 経路の同一判定と既存の規則の不変を結合テストで確かめる
   - 同じ取り込みの入力に対し、Claude Code のフック・Codex のフック・`brw guard` が同じ許可・拒否と同じ案内を返すことを確かめる。BRW 未導入のリポジトリでは通ること、既存の拒否（保護ブランチへの commit・push、GitHub 上のマージ、開発ブランチ間のマージの扱い）と、追跡ブランチだけを更新する fetch の扱いが変わらないことも確かめる。
   - エージェント別のフックと `brw guard` の結合テストが全件通り、既存の保護の検査に変化が無い。
   - _Depends: 2.3_
@@ -90,3 +90,4 @@
 - 2.2 レビューで見つかった従来からの穴（未対応・要判断）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
 - 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。
 - 3.2: `brw merge` は開発ブランチ同士専用で `origin/<基底>` を取り込めない。拒否の案内 `ALT_SYNC` は `git merge origin/<基底>` に直した（設計の「`brw merge`」は開発ブランチ間の案内のみ）。
+- 4.2: `brw guard` は create・pr-create だけ共通判定の拒否を採る（`GUARD_OP_KINDS`）ので、取り込みは guard で止まらない（既存仕様。検査で固定）。拒否はフック（Claude・Codex の PreToolUse/PermissionRequest）が担う。
