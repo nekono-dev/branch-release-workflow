@@ -8,6 +8,7 @@ import {
   DEFAULT_ROLES, DEFAULT_TIERS, EFFORT_ORDER, buildCliCommand, checkChildModel, compareTier, effortAbove, effortCapFor, effortSupported,
   childMaxTier, familyOf, vendorOfFamily, resolveEffort, resolveModelName, resolveRole, validateSubagents,
 } from "./subagent-roles.mjs";
+import { bypassFlagSupported, readTrustSetting } from "./codex-trust.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -241,7 +242,13 @@ function launchChild({ target, name, effort, permission }, instructions) {
   }
   try {
     if (!fstatSync(fd).isFile()) return stop(`指示のファイルが通常のファイルではありません: ${instructions}。子は起動しません`);
-    const cmd = buildCliCommand(target, { permission, effort }, name, root);
+    // Codex の子は、設定 codex.trustHooks が false でなければ承認を省く指定を付ける（既定は true）
+    const useBypass = target === "codex" && readTrustSetting(root);
+    if (useBypass && !bypassFlagSupported()) {
+      return stop("この Codex は承認を省く指定（--dangerously-bypass-hook-trust）を受け付けません。Codex を更新するか、設定 codex.trustHooks を false にして、対話の画面で手でフックを承認してください。子は起動しません");
+    }
+    if (useBypass) process.stderr.write("delegate: 承認の確認を省く指定（--dangerously-bypass-hook-trust）を付けて委任先を起動します\n");
+    const cmd = buildCliCommand(target, { permission, effort, ...(useBypass ? { bypassHookTrust: true } : {}) }, name, root);
     const env = { ...process.env };
     if (cmd.command === "claude") for (const k of CLAUDE_ENV_TO_DROP) delete env[k];
     const r = spawnSync(cmd.command, cmd.args, { cwd: root, env, stdio: [fd, "inherit", "inherit"] });
@@ -250,6 +257,10 @@ function launchChild({ target, name, effort, permission }, instructions) {
     }
     const code = r.status ?? 1;
     process.stderr.write(code === 0 ? "委任先の終了: 成功（終了コード 0）\n" : `委任先の終了: 失敗（終了コード ${code}）\n`);
+    // 指定を付けた子が終了コード 2 のときは、指定が受け付けられなかった可能性を案内する
+    if (useBypass && code === 2) {
+      process.stderr.write("delegate: 終了コード 2 は引数の拒否の可能性があります。承認を省く指定が受け付けられなかった場合は、Codex を更新するか、設定 codex.trustHooks を false にして手でフックを承認してください\n");
+    }
     return code;
   } finally {
     closeSync(fd);

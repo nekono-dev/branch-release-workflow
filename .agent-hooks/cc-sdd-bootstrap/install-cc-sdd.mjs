@@ -344,6 +344,23 @@ async function runUserPromptSubmit(tool) {
   process.exitCode = 0;
 }
 
+/**
+ * 導入の成功後に承認の記録を書き、結果の表示行を出す（4.3）。
+ * codex-trust*.mjs は動的 import で読む（古い導入先で配置物が無くても、導入の結果を変えないため）。
+ * 失敗は標準エラー出力へ 1 行だけ出し、終了コードは変えない。
+ */
+async function reportCodexTrust() {
+  try {
+    const { applyCodexTrust } = await import('./codex-trust.mjs');
+    const { messageTrust } = await import('./codex-trust-rules.mjs');
+    const result = applyCodexTrust({ repoRoot: root, mode: 'write' });
+    for (const line of messageTrust(result)) writeOutput(`${line}\n`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`承認の記録を扱えませんでした（${reason}）\n`);
+  }
+}
+
 function runCli() {
 const args = process.argv.slice(2);
 if (args[0] === 'user-prompt-submit') {
@@ -404,6 +421,8 @@ try {
     process.exit();
   }
   process.exitCode = 0;
+  // 導入が成功した経路（skip・rewrite-section・install）だけがここに来る。失敗の経路は process.exit で止まる
+  void reportCodexTrust();
 } catch (error) {
   if (error instanceof BusyInstallError) {
     const facts = readInstallFacts();

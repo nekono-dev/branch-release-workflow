@@ -600,7 +600,8 @@ export function effortSupported(vendor, effort, catalogLevels) {
 /**
  * 別の提供元の CLI を起動するコマンドと引数を組み立てる（起動はしない。指示は標準入力で渡す）。
  * @param {Vendor} target
- * @param {{ permission: string, effort: string }} setting
+ * bypassHookTrust が true の Codex だけ、exec の直後に承認を省く指定を足す（設定ファイルへは保存しない）。
+ * @param {{ permission: string, effort: string, bypassHookTrust?: boolean }} setting
  * @param {string} modelName
  * @param {string} root 作業場所
  * @returns {{ command: string, args: string[] }}
@@ -608,9 +609,11 @@ export function effortSupported(vendor, effort, catalogLevels) {
 export function buildCliCommand(target, setting, modelName, root) {
   const readOnly = setting.permission === "read-only";
   if (target === "codex") {
+    // 承認を省く指定は true のときだけ足す。それ以外は今までの引数の並びと同じにする
+    const bypass = setting.bypassHookTrust === true ? ["--dangerously-bypass-hook-trust"] : [];
     return {
       command: "codex",
-      args: ["-a", "never", "exec", "--sandbox", readOnly ? "read-only" : "workspace-write", "--model", modelName,
+      args: ["-a", "never", "exec", ...bypass, "--sandbox", readOnly ? "read-only" : "workspace-write", "--model", modelName,
         "--config", `model_reasoning_effort="${setting.effort}"`, "--cd", root, "-"],
     };
   }

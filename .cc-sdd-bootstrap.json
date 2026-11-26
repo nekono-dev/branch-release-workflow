@@ -6,8 +6,14 @@
     "keepTemplates": false
   },
   "codex": {
-    "enabled": true
+    "enabled": true,
+    "trustHooks": true
   },
   "models": {},
-  "subagents": {}
+  "subagents": {},
+  "workflow": {
+    "branchGate": true,
+    "prAfterValidate": true,
+    "baseBranches": "main,master,develop"
+  }
 }

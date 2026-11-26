@@ -12,6 +12,7 @@
 //   undetermined needsJudgment のうち、対象を確定できなかった操作（理由は op.unresolved）
 //   passes       needsJudgment が空（通常の照会・未導入のリポジトリ・リポジトリ外）
 // classifyMcpCall(toolName, toolInput, cwd) は MCP ツールの呼び出しを同じ形（加えて scope・server・tool）で返す。
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { GH_TARGET_ENV, ghOperations, httpClientOperations, isGh, mcpOperations } from "./github-operations.mjs";
@@ -263,6 +264,12 @@ const localBranchExists = (cwd, name) => refExists(cwd, `refs/heads/${name}`);
 const oidOf = (cwd, ref) => git(cwd, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
 const currentBranchOf = (cwd) => git(cwd, "branch", "--show-current") || null;
 const cfg = (cwd, key) => git(cwd, "config", "--get", key);
+// from が to の祖先か（読み取りのみ）。終了コード 0 → true、1 → false、それ以外（失敗）→ null
+function isAncestor(cwd, from, to) {
+  const r = spawnSync("git", ["merge-base", "--is-ancestor", from, to], { cwd, stdio: "ignore" });
+  if (r.error || r.status === null) return null;
+  return r.status === 0 ? true : r.status === 1 ? false : null;
+}
 const cfgAll = (cwd, key) => (git(cwd, "config", "--get-all", key) ?? "").split("\n").filter(Boolean);
 
 // 値を取るオプションを飛ばして、位置引数だけを集める。valueOpts は値を取るオプション名
@@ -414,6 +421,81 @@ function mergeSource(cwd, name, remotes) {
   if (remote) return { name, branch: name.slice(remote.length + 1), remote, oid: oidOf(cwd, `refs/remotes/${name}`) };
   const oid = oidOf(cwd, name);
   return { name, branch: null, remote: null, oid, reason: oid ? `'${name}' はブランチと確認できません（コミット指定）。` : `'${name}' を解決できません。` };
+}
+
+// git の真偽値の設定値を読む。真偽でなければ undefined
+function parseBool(v) {
+  const x = String(v).trim().toLowerCase();
+  if (["true", "yes", "on", "1"].includes(x)) return true;
+  if (["false", "no", "off", "0", ""].includes(x)) return false;
+  return undefined;
+}
+
+// pull・merge の fast-forward 指定とリベースの実効値、その由来を取り出す。
+// 引数（--ff-only・--ff・--no-ff、-r・--rebase[=値]・--no-rebase）は最後の指定を採り、無ければ設定を読む。
+// 設定の値が読めないときは add で確定不能の理由を足す
+function mergeFacts(sub, a, dir, branch, valueOpts, add) {
+  let ffArg = null;
+  let rebaseArg = null;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    if (x === "--") break;
+    if (valueOpts.includes(x)) { i++; continue; }
+    if (x === "--ff-only") ffArg = "only";
+    else if (x === "--ff") ffArg = "allow";
+    else if (x === "--no-ff") ffArg = "never";
+    else if (sub === "pull") {
+      if (x === "-r") rebaseArg = true;
+      else if (x === "--rebase") rebaseArg = true;
+      else if (x.startsWith("--rebase=")) {
+        const v = x.slice("--rebase=".length);
+        const b = parseBool(v);
+        rebaseArg = b !== undefined ? b : ["merges", "interactive", "m", "i"].includes(v) ? true : (add(`--rebase=${v} の値を読めず、リベースになるか確定できません。`), true);
+      } else if (x === "--no-rebase") rebaseArg = false;
+    }
+  }
+  const configKeys = [];
+  const configValues = {};
+  const basis = { ff: "default", rebase: "default", configKeys, configValues };
+  let ff = "allow";
+  if (ffArg !== null) { ff = ffArg; basis.ff = "arg"; }
+  else {
+    const keys = sub === "pull" ? ["pull.ff", "merge.ff"] : ["merge.ff"];
+    for (const key of keys) {
+      const v = cfg(dir, key);
+      if (v === null) continue;
+      const l = v.trim().toLowerCase();
+      const b = parseBool(v);
+      if (l === "only") ff = "only";
+      else if (b === false) ff = "never";
+      else if (b === true) ff = "allow";
+      else { add(`設定 ${key}=${v} の値を読めず、fast-forward の指定を確定できません。`); continue; }
+      basis.ff = "config";
+      configKeys.push(key);
+      configValues[key] = v.trim();
+      break;
+    }
+  }
+  let rebase = false;
+  if (sub === "pull") {
+    if (rebaseArg !== null) { rebase = rebaseArg; basis.rebase = "arg"; }
+    else {
+      const keys = [...(branch ? [`branch.${branch}.rebase`] : []), "pull.rebase"];
+      for (const key of keys) {
+        const v = cfg(dir, key);
+        if (v === null) continue;
+        const b = parseBool(v);
+        if (b !== undefined) rebase = b;
+        else if (["merges", "interactive", "m", "i"].includes(v.trim().toLowerCase())) rebase = true;
+        else { add(`設定 ${key}=${v} の値を読めず、リベースになるか確定できません。`); continue; }
+        basis.rebase = "config";
+        configKeys.push(key);
+        configValues[key] = v.trim();
+        break;
+      }
+    }
+  }
+  return { ff, rebase, basis };
 }
 
 const SWITCH_VALUE = ["-c", "-C", "--create", "--force-create", "--orphan", "--conflict"];
@@ -779,6 +861,7 @@ function gitOp(args, ctx, assigns, envTarget) {
     const remotes = remoteList(dir);
     const sources = [];
     let mode = sub;
+    const facts = mergeFacts(sub, a, dir, branch, sub === "merge" ? MERGE_VALUE_OPTS : PULL_VALUE_OPTS, add);
     if (sub === "merge") {
       if (hasFlag(a, "--abort", "--continue", "--quit")) mode = "control";
       else {
@@ -798,19 +881,28 @@ function gitOp(args, ctx, assigns, envTarget) {
       }
     } else if (!dynArgs) {
       const pos = positionals(a, PULL_VALUE_OPTS);
-      const rebase = hasFlag(a, "-r", "--rebase");
-      if (rebase) mode = "pull-rebase";
+      if (facts.rebase) mode = "pull-rebase";
       const remote = pos[0] ?? (branch && cfg(dir, `branch.${branch}.remote`)) ?? "origin";
       if (pos[0] !== undefined && !remotes.includes(pos[0])) add(`pull 元 '${pos[0]}' は登録済みの remote ではありません。`);
       const specs = pos.slice(1);
-      if (specs.length) for (const sp of specs) { const b = sp.replace(/^\+/, "").split(":")[0].replace(/^refs\/heads\//, ""); sources.push({ name: `${remote}/${b}`, branch: b, remote, oid: null }); }
+      if (specs.length) for (const sp of specs) {
+        const b = sp.replace(/^\+/, "").split(":")[0].replace(/^refs\/heads\//, "");
+        // <元>:<先> の形は手元の別のブランチを更新しうるため、印を付ける
+        sources.push({ name: `${remote}/${b}`, branch: b, remote, oid: null, ...(sp.includes(":") ? { refspecDst: true } : {}) });
+      }
       else {
         const m = branch && cfg(dir, `branch.${branch}.merge`);
         if (m) sources.push({ name: `${remote}/${m.replace(/^refs\/heads\//, "")}`, branch: m.replace(/^refs\/heads\//, ""), remote, oid: null });
         else add("pull 元のブランチが指定されておらず、追跡先も無いため確定できません。");
       }
     }
-    op = makeOp("merge", dir, unresolved, { branch, sources, via: sub, mode });
+    // merge で取り込み元が 1 つかつ ID が確定しているときだけ、先端が取り込み元の祖先かを読み取りで確かめる。それ以外（pull など）は確認不能（null）
+    let fastForwardable = null;
+    if (sub === "merge" && mode !== "control" && sources.length === 1 && sources[0].oid) {
+      const tip = oidOf(dir, "HEAD");
+      if (tip) fastForwardable = isAncestor(dir, tip, sources[0].oid);
+    }
+    op = makeOp("merge", dir, unresolved, { branch, sources, via: sub, mode, ff: facts.ff, rebase: facts.rebase, basis: facts.basis, fastForwardable });
   } else if (["switch", "checkout", "branch", "worktree"].includes(sub)) {
     if (dynArgs) add(`${sub} の引数に展開・ワイルドカードが含まれ、対象を確定できません。`);
     const c = dynArgs ? { action: "create", via: sub, branch: null, start: null, branchOnly: false } : createOp(sub, a, dir, add);
@@ -830,7 +922,23 @@ function gitOp(args, ctx, assigns, envTarget) {
     if (hasFlag(a, "--refmap")) add("fetch の --refmap で更新先が変わりうるため、確定できません。");
     const pos = positionals(a, ["--depth", "--deepen", "--shallow-since", "--shallow-exclude", "-j", "--jobs", "-o", "--server-option", "--upload-pack", "--negotiation-tip", "--filter", "--refmap", "--recurse-submodules"]);
     const specs = pos.slice(1).filter((x) => x.includes(":"));
-    if (specs.some((x) => local(x.slice(x.indexOf(":") + 1)))) add("fetch の更新先がローカルのブランチになりえます（remote 追跡ブランチ以外）。");
+    // 「同名の fast-forward 更新」の形（<リモート> <元>:<先>）だけは取り込み操作として取り出す。それ以外は従来どおり確定不能にする
+    const localSpecs = specs.filter((x) => local(x.slice(x.indexOf(":") + 1)));
+    const bare = (n) => n.replace(/^refs\/heads\//, "");
+    const sameName = (x) => {
+      const i = x.indexOf(":");
+      const src = bare(x.slice(0, i));
+      const dst = bare(x.slice(i + 1));
+      return !x.startsWith("+") && src !== "" && src === dst && !/^refs\//.test(src) && !/[*^:?[\\]/.test(src);
+    };
+    const forbidden = a.some((x) => ["--force", "-f", "--update-head-ok", "-u", "--refmap", "--all", "--multiple"].includes(x) || x.startsWith("--refmap=") || /^-[A-Za-z]*[fu]/.test(x) && !x.startsWith("--"));
+    const fetchUpdate = !dynArgs && !forbidden && !dirty && pos.length >= 2 && remoteList(dir).includes(pos[0]) && localSpecs.length === 1 && sameName(localSpecs[0]);
+    if (fetchUpdate) {
+      const name = bare(localSpecs[0].slice(localSpecs[0].indexOf(":") + 1));
+      op = makeOp("merge", dir, unresolved, { branch: name, sources: [{ name: `${pos[0]}/${name}`, branch: name, remote: pos[0], oid: null }], via: "fetch", mode: "fetch-update", ff: "only", rebase: false, basis: { ff: "default", rebase: "default", configKeys: [], configValues: {} }, fastForwardable: null });
+      return op;
+    }
+    if (localSpecs.length) add("fetch の更新先がローカルのブランチになりえます（remote 追跡ブランチ以外）。");
     // refspec を省いた fetch は remote.<名前>.fetch の設定に従う
     if (pos.length <= 1) {
       const lines = (git(dir, "config", "--get-regexp", "^remote\\..*\\.fetch$") ?? "").split("\n");

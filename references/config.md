@@ -114,3 +114,12 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 - 宣言が未登録か、作業ツリーで `HEAD` から書き換えたもの（作業中に自分で許可を足せないようにする）
 
 切り出し元・保護ブランチへのマージ（`gh pr merge` など）は対象外で、常に確認を求める。Codex の `brw guard` には影響しない。
+
+### 基底の更新・取り込みの確認の省略
+
+次の取り込みは、`autoApprove` のキーとは別に、宣言が登録済みで作業ツリーの宣言が `HEAD` と一致するときに確認を省く。未登録・編集中のときは省かず、通常の承認に任せる。手順は SKILL.md の「基底ブランチへの追従」。
+
+- 基底・保護ブランチの fast-forward 更新: `git pull --ff-only origin <基底>`、基底を確認していない作業ツリーでの `git fetch origin <基底>:<基底>`、確認中の作業ツリーを指す `git -C <その作業ツリー> pull --ff-only origin <基底>`
+- 開発ブランチへの基底・保護ブランチの取り込み: `git merge origin/<基底>`、`git pull origin <基底>`
+
+対象外（拒否される。確認の省略以前に実行できない）のは、リベース（`--rebase`、`pull.rebase` などの設定）、基底の更新での `--ff-only` の無い `git pull`・`--no-ff`・`--squash`・`+` 付きの更新、分岐した merge、`origin` 以外のリモートや手元の別ブランチからの取り込み。取り込み元の指定がない操作（`git merge --abort` など）は確認を省かない。`git pull origin <元>:<先>` の形の pull は、手元のブランチを書き換えうるため、取り込み元が開発ブランチでも許可しない。fast-forward にならない分岐は git が止める。`pull`・`fetch` は取得前に判定するので、分岐は事前には確かめない（診断の限界 `sync-ff-unverified`）。

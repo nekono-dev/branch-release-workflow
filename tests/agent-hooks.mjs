@@ -13,6 +13,7 @@ import { hookInput } from "./support/hook-fixtures.mjs";
 // scripts/agent-hooks.mjs は 6.1 で作る。未実装の間は「未実装」として失敗する（RED の確認用）
 const agentModule = await import("../scripts/agent-hooks.mjs").catch(() => null);
 const handleHook = agentModule?.handleHook ?? (() => ({ missing: "未実装" }));
+const denyOfCommand = agentModule?.denyOfCommand ?? (() => null);
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BRW = join(root, "scripts/brw.mjs");
@@ -60,6 +61,98 @@ const planned = (fn, opts = {}) => {
 const publishCmd = (id, plan, extra = "") => `node ${BRW} publish --work ${id} --plan ${plan} ${extra}`.trim();
 
 export const runAgentHookChecks = async (eq) => {
+  // ---- sync-base-branch 2.3 フックの出力（500 文字の上限内）に案内の 3 点が残る ----
+  {
+    const r = repoOf();
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+    gitOut(r.dir, "branch", "dev/bar");
+    const guide = (host, cmd) => { const t = preReasonOf(host, cmd, r.dir); return [/git -C <[^>]+> pull --ff-only origin/.test(t), /PR/.test(t), /merge origin\//.test(t)]; };
+    gitOut(r.dir, "checkout", "-q", "main");
+    gitOut(r.dir, "config", "pull.rebase", "true");
+    const cases = [["main", "git pull --ff-only origin main"], ["main", "git pull origin main"], ["main", "git fetch origin dev/bar:dev/bar"]];
+    const got = [];
+    for (const host of ["claude", "codex"]) for (const [, cmd] of cases) got.push(guide(host, cmd));
+    gitOut(r.dir, "checkout", "-q", "dev/foo");
+    for (const host of ["claude", "codex"]) got.push(guide(host, "git pull origin main"));
+    eq("sync-base-branch/2.3 フック出力に別の作業ツリーでの pull --ff-only・PR・merge origin/ の案内が残る（Claude・Codex）", got, Array(8).fill([true, true, true]));
+    // 2.4 <元>:<先> の pull の拒否も、フック出力（500 文字）に理由と案内が残る
+    gitOut(r.dir, "checkout", "-q", "dev/foo");
+    const got24 = [];
+    for (const host of ["claude", "codex"]) { const t = preReasonOf(host, "git pull origin dev/bar:main", r.dir); got24.push([/手元のブランチを書き換える pull は許可しません/.test(t), /git pull origin <ブランチ>/.test(t), /pull --ff-only origin/.test(t)]); }
+    eq("sync-base-branch/2.4 フック出力に <元>:<先> の pull の拒否理由と代わりの手順が残る（Claude・Codex）", got24, Array(2).fill([true, true, true]));
+    r.cleanup();
+  }
+
+  // ---- sync-base-branch 4.2取り込みの 3 経路（Claude のフック・Codex のフック・brw guard）の同一判定と既存の規則の不変 ----
+  {
+    const r = repoOf();
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/main", "main");
+    gitOut(r.dir, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+    gitOut(r.dir, "branch", "dev/bar");
+    gitOut(r.dir, "branch", "dev/other");
+    const where = (branch) => gitOut(r.dir, "checkout", "-q", branch);
+    const guardOf = (command) => { const g = spawnSync("node", [BRW, "guard", command], { cwd: r.dir, encoding: "utf8" }); return [g.status, g.stdout.trim()]; };
+    /** 3 経路の結果。理由の文は Claude の PreToolUse・Codex の PreToolUse・Codex の PermissionRequest で同じ。 */
+    const trio = (command) => {
+      const cl = handleHook("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: r.dir, command }))?.hookSpecificOutput;
+      const cx = handleHook("codex", "PreToolUse", hookInput("codex", "PreToolUse", { cwd: r.dir, command }))?.hookSpecificOutput;
+      const px = handleHook("codex", "PermissionRequest", hookInput("codex", "PermissionRequest", { cwd: r.dir, command }))?.hookSpecificOutput?.decision;
+      return { claude: cl?.permissionDecision ?? null, codex: cx?.permissionDecision ?? null, codexPerm: px?.behavior ?? null, claudeText: cl?.permissionDecisionReason ?? "", codexText: cx?.permissionDecisionReason ?? "", permText: px?.message ?? "" };
+    };
+    // [作業ブランチ, コマンド, Claude, Codex の PreToolUse, Codex の PermissionRequest, 拒否の code]
+    const cases = [
+      ["main", "git pull --ff-only origin main", "allow", null, "allow", null],
+      ["main", "git pull origin main", "deny", "deny", "deny", "sync-ff-only-required"],
+      ["main", "git pull --rebase origin main", "deny", "deny", "deny", "sync-not-fast-forward"],
+      ["dev/foo", "git merge origin/main", "allow", null, "allow", null],
+      ["dev/foo", "git pull --rebase origin main", "deny", "deny", "deny", "sync-rebase"],
+      ["dev/foo", "git merge main", "deny", "deny", "deny", null],
+      ["main", "git fetch origin main:main", "allow", null, "allow", null],
+      ["main", "git fetch origin dev/bar:dev/bar", "deny", "deny", "deny", null],
+    ];
+    const rows = cases.map(([b, cmd, cl, cx, px, code]) => {
+      where(b);
+      const t = trio(cmd);
+      const denial = denyOfCommand(cmd, r.dir);
+      const same = t.claudeText === t.codexText && t.codexText === t.permText;
+      const text = t.claudeText.replace(/^\[branch-release-workflow\] /, "");
+      const textOk = cl === "deny"
+        ? same && text.startsWith(denial?.reason ?? "\0") && (code === null || denial.code === code)
+        : denial === null && t.codexText === "" && t.permText === "" && (cl === "allow") === (t.claudeText !== "");
+      return [[t.claude, t.codex, t.codexPerm], textOk, [cl, cx, px]];
+    });
+    eq("sync-base-branch/5.1 取り込みの許可・拒否が Claude・Codex（PreToolUse・PermissionRequest）で一致し、拒否の理由と code が共通の判定（denyOfCommand）と同じ", rows.map((x) => x[0]), rows.map((x) => x[2]));
+    eq("sync-base-branch/5.1 拒否の理由が 3 つの応答で同じ文で、共通の判定の理由・code と一致し、許可の理由は Claude にだけ付く", rows.map((x) => x[1]), Array(cases.length).fill(true));
+    // 5.2 brw guard は作成・PR 作成の拒否だけを共通の判定から採る。取り込み・fetch はこれまでどおり判定せず、出力と終了コードを変えない
+    const guards = cases.map(([b, cmd]) => { where(b); return guardOf(cmd); });
+    eq("sync-base-branch/5.2 brw guard は取り込み・fetch の拒否を採らず、従来どおり終了コード 0 と [allow] を返す（フックが拒否する入力でも変わらない）", guards, Array(cases.length).fill([0, "[allow]"]));
+    where("dev/foo");
+    eq("sync-base-branch/5.2 brw guard が共通の判定の拒否を採る種類は create・pr-create のままで、取り込みの拒否は含まれない", [guardOf("git switch -c dev/x")[0], guardOf("gh pr create --base dev/bar --head dev/foo --title t")[0], guardOf("git pull --rebase origin main")[0], denyOfCommand("git pull --rebase origin main", r.dir)?.kinds.includes("create") || denyOfCommand("git pull --rebase origin main", r.dir)?.kinds.includes("pr-create")], [1, 1, 0, false]);
+
+    // 6.x 既存の規則の不変
+    where("dev/foo");
+    eq("sync-base-branch/6.1 保護ブランチへの commit・push と GitHub 上のマージの拒否は変わらない（取り込みの許可と併存）", (() => {
+      const out = [];
+      where("main");
+      out.push(preOf("claude", "git commit -m x", r.dir), preOf("claude", "git push origin main", r.dir), preOf("claude", "gh pr merge 5", r.dir));
+      where("dev/foo");
+      out.push(preOf("claude", "git push origin HEAD:main", r.dir), preOf("claude", "gh pr merge 5 --auto", r.dir), preOf("codex", "git push origin main", r.dir));
+      return out;
+    })(), ["deny", "deny", "deny", "deny", "deny", "deny"]);
+    eq("sync-base-branch/6.2 開発ブランチ間のマージ git merge dev/other の扱い（ローカルマージとして許可、Codex は PermissionRequest だけ許可）は変わらない", bothOf("git merge dev/other", r.dir), { claude: "allow", codex: null, codexPerm: "allow" });
+    eq("sync-base-branch/6.3 追跡ブランチだけを更新する fetch は判定に回さず通す（応答なし。Claude・Codex）", ["git fetch origin", "git fetch origin main", "git fetch origin main:refs/remotes/origin/main"].map((c) => bothOf(c, r.dir)), Array(3).fill({ claude: null, codex: null, codexPerm: null }));
+    r.cleanup();
+
+    // 5.3 BRW を導入していないリポジトリでは取り込みを通す（拒否も確認省略もしない）
+    const plain = repoOf({ config: null });
+    gitOut(plain.dir, "update-ref", "refs/remotes/origin/main", "main");
+    const plainOut = ["git pull origin main", "git pull --rebase origin main", "git merge main", "git merge origin/main", "git fetch origin main:main", "git fetch origin dev/bar:dev/bar"].map((c) => bothOf(c, plain.dir));
+    eq("sync-base-branch/5.3 BRW を導入していないリポジトリでは取り込み・fetch が通る（Claude・Codex とも応答なし）", plainOut, Array(6).fill({ claude: null, codex: null, codexPerm: null }));
+    eq("sync-base-branch/5.3 BRW 未導入では brw guard も取り込みを止めない", ["git pull --rebase origin main", "git merge main"].map((c) => spawnSync("node", [BRW, "guard", c], { cwd: plain.dir, encoding: "utf8" }).status), [0, 0]);
+    plain.cleanup();
+  }
+
   // ---- 応答の形（両ホストの契約） ----
   {
     const r = repoOf();

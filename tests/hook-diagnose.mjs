@@ -94,7 +94,7 @@ const EXPECTED_LIMIT_IDS = [
   "body-file-swap", "cloud-managed-only", "codex-command-hooks-caller", "codex-format-unverified", "codex-hooks-disabled-partial",
   "codex-pretooluse-no-ask", "codex-trust-by-caller", "external-script-git", "gh-host-only", "gh-repo-flag-uncloned",
   "graphql-indeterminate", "mcp-pr-approval", "mcp-update-base", "nested-shell", "origin-trust-base", "other-mcp", "outside-hooks",
-  "over-detection", "post-stop-unobserved", "ref-moving-local", "tool-response-format", "url-without-github",
+  "over-detection", "post-stop-unobserved", "ref-moving-local", "sync-ff-unverified", "tool-response-format", "url-without-github",
 ];
 
 export const runHookDiagnoseChecks = async (eq) => {
@@ -383,6 +383,11 @@ export const runHookDiagnoseChecks = async (eq) => {
     eq("hook-diagnose/6.4 対応していない経路の一覧は、申し送りの全項目と完全に一致する", ids, [...EXPECTED_LIMIT_IDS].sort());
     eq("hook-diagnose/6.4 限界の各項目はホストを持ち、説明文がある", (res.limits ?? []).every((l) => ["claude", "codex", "both"].includes(l.host) && typeof l.text === "string" && l.text.length > 0), true);
     const codexOnly = diagnoseHooks({ env: {}, host: "codex" }).limits.map((l) => l.id);
+    // 3.1: pull・fetch による基底の更新は取得前で分岐を確かめない旨が、両方のエージェントの欄に出る
+    for (const host of ["claude", "codex"]) {
+      const item = diagnoseHooks({ env: {}, host }).limits.find((l) => l.id === "sync-ff-unverified");
+      eq(`hook-diagnose/3.1 ${host} の限界に sync-ff-unverified が出て、取得前・--ff-only・分岐を説明する`, Boolean(item) && ["pull", "fetch", "取得前", "--ff-only", "分岐"].every((w) => item.text.includes(w)), true);
+    }
     eq("hook-diagnose/6.4 Codex だけの限界は Claude の経路では出さない", codexOnly.includes("codex-pretooluse-no-ask") && !diagnoseHooks({ env: {}, host: "claude" }).limits.some((l) => l.host === "codex"), true);
   }
 

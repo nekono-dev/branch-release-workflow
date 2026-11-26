@@ -1,0 +1,100 @@
+# 実装計画: sync-base-branch
+
+> 順序が依存を表す。`(P)` は直前の兄弟タスクと並行できるもの。変更は取り込み操作の事実の取り出しと、その可否の判定に閉じる（フック・`brw guard` の入出力は変えない）。要件 1〜6 の対応は各タスクの末尾に書く。
+
+- [ ] 1. 基盤: 取り込み操作の事実を取り出す
+- [x] 1.1 pull・merge の fast-forward 指定とリベースの実効値、その由来を取り出す
+  - 引数（`--ff-only`・`--ff`・`--no-ff`、`-r`・`--rebase`・`--no-rebase`）は最後の指定を採り、引数が無ければ設定（`pull.ff`・`merge.ff`、`pull.rebase`・`branch.<名前>.rebase`）を読む。実効値と、その由来（引数・設定・既定）と読んだ設定のキーを、取り込み操作に載せる。
+  - `pull` の更新元の指定が `<元>:<先>` の形（手元の別のブランチを更新しうる形）のとき、その取り込み元に印を付ける。
+  - 読めない設定、`-c` による設定の上書き、値が展開で決まる引数は、従来どおり確定不能として扱う。
+  - 取り込み操作を解釈した結果に、引数だけの指定・設定だけの指定・両方がある場合（引数が優先）の実効値と由来が現れる。
+  - _Boundary: 取り込みの事実の取り出し_
+  - _Requirements: 1.1, 1.4, 1.5, 1.6, 2.4, 3.3_
+- [x] 1.2 merge で取り込み元の ID が確定しているとき、fast-forward になるかを載せる
+  - 取り込み先の先端と取り込み元の ID が確定しているときだけ、先端が取り込み元の祖先かを読み取りで確かめ、結果を取り込み操作に載せる。確認できない場合（取得前の pull、ID が未確定）は「確認不能」とする。
+  - 履歴が分岐している `git merge origin/main` で「fast-forward にならない」、先に進めるだけの場合は「なる」、`pull` では「確認不能」が現れる。判定の中で `git fetch` など、リポジトリを変える操作を行わない。
+  - _Depends: 1.1_
+  - _Boundary: 取り込みの事実の取り出し_
+  - _Requirements: 1.3, 3.3_
+- [x] 1.3 fetch の同名更新の形を取り込み操作として取り出す
+  - `git fetch <リモート> <元>:<先>` のうち、リモートが登録済みの名前で、元と先から `refs/heads/` の接頭辞を外した名前が同じで、先頭に `+` が無く、`--force`・`-f`・`--update-head-ok`・`-u`・`--refmap` が無く、ローカルを更新する更新先がちょうど 1 つの形だけを、更新先のブランチを取り込み先、同名の追跡ブランチを取り込み元とする取り込み操作として取り出す。fast-forward に限られる形として扱う。
+  - 登録されていないリモート（`.`・URL）、別名への更新（`main:other`）、強制、複数のローカル更新、設定に由来する更新先は従来の分類（確定不能・照会ではない）のまま変えない。追跡ブランチだけを更新する fetch は従来どおり照会とする。
+  - `git fetch origin main:main` と `git fetch origin refs/heads/main:refs/heads/main` が取り込み操作として現れ、`git fetch origin`・`git fetch origin main` は照会のまま、`git fetch . dev/foo:main`・`git fetch origin +main:main` は従来の分類のまま変わらない。
+  - _Depends: 1.1_
+  - _Boundary: 取り込みの事実の取り出し_
+  - _Requirements: 1.2, 1.5, 1.6, 6.3, 6.4_
+
+- [ ] 2. 中核: 取り込みの可否を判定する
+- [x] 2.1 基底・保護ブランチの更新（形 A）を許可し、保証が付かない更新を拒否する
+  - 取り込み先が基底・保護ブランチ、取り込み元が `origin` の同名の追跡ブランチ 1 つで、fast-forward に限られる形（fetch による更新、または `--ff-only` の指定・同等の設定。リベース・`--no-ff`・`--squash` でない）で、かつ実行前に分岐と確認できていないとき、拒否せず許可する。確認省略は、宣言が登録済みなら省略、未登録・編集中なら通常の承認、取り込み元の指定が無いものは省略しない、とする。
+  - 保証が付かない形（`--ff-only` が無い pull）は「保証が付く形で再実行する」旨を理由にして拒否し、分岐・`--no-ff`・`--squash`・リベースを伴うものと、実行前に分岐と確認できた merge は、履歴を分岐させる更新として拒否する。取り込み元が `origin` 以外・別名・複数の場合は従来どおり拒否する。
+  - `main` 上の `git pull --ff-only origin main`・`git merge --ff-only origin/main` が、登録済みの宣言で確認省略の対象、未登録で通常の承認になり、`--ff-only` の無い pull・分岐した merge・`--no-ff`・`--rebase` が、それぞれ決められた識別子で拒否される。
+  - _Depends: 1.1, 1.2, 1.3_
+  - _Boundary: 取り込みの判定_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 3.1, 4.1, 4.2, 4.3_
+- [x] 2.2 開発ブランチへの基底の取り込み（形 B）を許可し、リベースを伴うものを拒否する
+  - 取り込み先が宣言上の開発ブランチで、取り込み元のすべてが、従来の許可に当たる開発ブランチ、または `origin` の追跡ブランチのうち基底・保護ブランチに当たるもののとき、マージコミットの作成を理由にせず許可する。確認省略は 2.1 と同じ分岐に従う。
+  - リベースになる取り込みは許可しない。取り込み先が開発ブランチ以外・宣言外のとき、取り込み元が手元の別ブランチ・`origin` 以外のリモート・宣言外のブランチのときは、従来どおり拒否する。
+  - `dev/foo` 上の `git merge origin/main`・`git pull origin main` が許可になり、`git pull --rebase origin main` が専用の識別子で拒否され、`git merge main`（手元の `main`）・`git merge origin/other`・別のリモートからの取り込みが従来どおり拒否される。
+  - _Depends: 2.1_
+  - _Boundary: 取り込みの判定_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 4.1, 4.2, 4.3_
+- [x] 2.3 拒否の案内と判定の根拠を整える
+  - 拒否の理由に、取り込み先・取り込み元の分類と、代替手段（基底の fast-forward 更新、基底を別の作業ツリーで確認している場合の `git -C <その作業ツリー> pull --ff-only origin <基底>`、PR による反映、`brw merge`）を含める。fetch による更新で形 A に当たらないものは、更新を許さない旨で拒否する。
+  - 実効値を設定から読んで判定したとき、理由に設定のキーと値を含め、判定の事実に実効値と由来を載せる。同じ状態には同じ判定・同じ案内を返す。
+  - 設定によってリベースになる pull の拒否に、設定のキーと値が含まれ、基底を別の作業ツリーで確認している場合の案内が表示され、同じ入力を 2 回判定して識別子・理由・案内が一致する。 `via: "fetch"` の操作は形 A 以外を必ず `merge-non-development`（更新を許さない旨）で拒否し、`git fetch origin dev/bar:dev/bar`（開発ブランチ）が拒否になることをテストで固定する（1.3 の時点では暫定で確認省略の許可になる）。
+  - _Depends: 2.2_
+  - _Boundary: 取り込みの判定_
+  - _Requirements: 3.2, 3.3, 6.4_
+- [x] 2.4 `<元>:<先>` の形の pull を常に拒否する
+  - 取り込み元に `refspecDst` の印が付いた取り込み（`git pull <リモート> <元>:<先>`）を、取り込み元の分類（開発・基底・保護）にかかわらず、確認を省略せず `merge-non-development` で拒否する。理由に「手元のブランチを書き換える pull は許可しない」旨を含め、案内に `git pull <リモート> <ブランチ>` の形と基底の fast-forward 更新を示す。フック経路の 500 文字の切り詰めに収める。
+  - `dev/foo` 上の `git pull origin dev/bar:main`・`git pull origin dev/bar:dev/baz`・`git pull origin main:main`・`git pull --ff-only origin main:main`（基底上）が拒否になり、`git pull origin dev/bar`・`git pull origin main` は従来どおり許可される。登録済み・未登録のどちらでも拒否が変わらない。
+  - _Depends: 2.3_
+  - _Boundary: 取り込みの判定_
+  - _Requirements: 3.4, 6.2_
+
+- [ ] 3. 診断と手順書
+- [x] 3.1 (P) 判定の限界を診断の一覧に載せる
+  - 「`pull`・`fetch` による基底の更新は、取得前のため分岐を確かめない。fast-forward の保証は `--ff-only`・`+` なしの更新が持ち、分岐していれば git が止める」旨を、導入状態の診断の限界の一覧に項目として足す。
+  - 診断の出力に、この項目が両方のエージェントの欄で現れる。
+  - _Depends: 2.3_
+  - _Boundary: 診断_
+  - _Requirements: 1.3, 3.2_
+- [x] 3.2 (P) 取り込みの手順と確認省略の対象を手順書に書く
+  - 基底の更新（`git pull --ff-only origin <基底>`、基底を確認していない作業ツリーでの `git fetch origin <基底>:<基底>`、確認中の作業ツリーが別にある場合の `git -C <その作業ツリー> pull --ff-only origin <基底>`）と、作業ブランチへの基底の取り込み（`git merge origin/<基底>`）の手順を書く。許可した取り込みが確認省略の対象であること、リベースと `origin` 以外のリモートは対象外であることも書く。
+  - 手順書と設定の資料を読めば、基底の更新と作業ブランチへの取り込みの手順、確認省略の対象、対象外の取り込みが分かる。
+  - _Depends: 2.3_
+  - _Boundary: 手順書_
+  - _Requirements: 1.1, 1.2, 2.1, 4.1, 6.2_
+
+- [ ] 4. 検証: テストと実機の確認
+- [x] 4.1 (P) 判定の単体テストを足し、既存の期待を更新する
+  - 形 A・B の許可と拒否（`--ff-only` の有無、`pull.ff`・`pull.rebase` の設定、`--no-ff`・`--squash`・リベース、分岐した merge、fetch の同名更新・`+`・`--force`・別名・登録外のリモート、手元の別ブランチ・別のリモートからの取り込み）、確認省略の分岐（登録済み・未登録・取り込み元なし）、同じ入力の判定の一致を確かめる。開発ブランチ上の `git pull origin main` の拒否を期待していた既存の検査を、許可外の例（手元の別ブランチ・宣言外のブランチ）に差し替える。
+  - 判定の自己テストが全件通り、本仕様の各拒否・許可の識別子が少なくとも 1 件ずつ検査に現れる。
+  - _Depends: 2.3_
+  - _Boundary: 判定のテスト_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, 3.1, 3.3, 4.1, 4.2, 4.3_
+- [x] 4.2 (P) 3 経路の同一判定と既存の規則の不変を結合テストで確かめる
+  - 同じ取り込みの入力に対し、Claude Code のフック・Codex のフック・`brw guard` が同じ許可・拒否と同じ案内を返すことを確かめる。BRW 未導入のリポジトリでは通ること、既存の拒否（保護ブランチへの commit・push、GitHub 上のマージ、開発ブランチ間のマージの扱い）と、追跡ブランチだけを更新する fetch の扱いが変わらないことも確かめる。
+  - エージェント別のフックと `brw guard` の結合テストが全件通り、既存の保護の検査に変化が無い。
+  - _Depends: 2.3_
+  - _Boundary: フック・guard の結合テスト_
+  - _Requirements: 5.1, 5.2, 5.3, 6.1, 6.2, 6.3_
+- [x] 4.3 使い捨てのリポジトリで、実際の git の挙動を検査に加える
+  - 判定のテストが使う実 git の使い捨てのリポジトリで、履歴が分岐した状態の `git pull --ff-only`・`git merge --ff-only`・`git fetch origin main:main` が git に止められて手元が変わらないこと、`main` を別の作業ツリーで確認している状態の `git fetch origin main:main` が git に止められ、`git -C <その作業ツリー> pull --ff-only origin main` が判定を通り、実行すると更新できることを確かめる。
+  - 上記の挙動が検査として再現でき、判定の限界の周知と手順書の案内に矛盾が無い。
+  - _Depends: 3.1, 3.2, 4.1_
+  - _Boundary: 判定のテスト_
+  - _Requirements: 1.2, 1.3, 1.4_
+
+## Implementation Notes
+- 1.1: `mode` は設定由来のリベースでも `pull-rebase` になる（判定は `mode` か `rebase` で拒否できる）。`basis.configKeys` は実効値を決めた設定のキーだけ。設定の読み取り失敗と未設定は区別しない。git の長いオプションの省略形（`--reb` 等）は未対応（従来と同じ）。
+- 1.2: `fastForwardable` は `true|false|null`（null=確認不能）。同一コミットの merge は true。判定側（2.x）は「false のときだけ分岐」と扱う（`!== false` は許可側）。
+- 1.3: fetch の同名更新は暫定で `git fetch origin dev/bar:dev/bar` が `merge-development`（許可）になる。2.1 で形 A を足すときに `via:"fetch"` の形 A 以外を拒否にする（2.3 の完了条件に追記済み）。`--all`・`--multiple`・`-f`/`-u` を含む短い束は取り出さず従来分類のまま。
+- 2.1: 優先順位は sync-not-fast-forward → sync-ff-only-required → 許可。fetch の形 A 以外の拒否に仮の `ALT_SYNC` を付けた（2.3 で整える）。Decision の facts に ff・rebase・basis はまだ載せていない（2.3）。
+- 2.2: `merge --squash origin/main` は開発ブランチ上で許可（リベースだけを除外）。開発ブランチ同士のリベースは従来の許可のまま。既存期待 `enforcement/3.2` の「開発ブランチ上の `git pull origin main` 拒否」は要件 2.1 により許可へ変わったため `git merge dev/other main` に差し替えた。
+- 2.2 レビューで見つかった従来からの穴（利用者が拒否を採用し、要件 3.4・タスク 2.4 で対応）: `git pull origin dev/bar:main` は取り込み元が開発ブランチで `refspecDst` 付きでも `merge-development`（確認省略）で許可になり、手元の保護ブランチの先端を動かしうる（git の既定で fast-forward のみ）。要件 1.5・6.4 の趣旨から絞り込み候補。
+- 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。
+- 3.2: `brw merge` は開発ブランチ同士専用で `origin/<基底>` を取り込めない。拒否の案内 `ALT_SYNC` は `git merge origin/<基底>` に直した（設計の「`brw merge`」は開発ブランチ間の案内のみ）。
+- 4.2: `brw guard` は create・pr-create だけ共通判定の拒否を採る（`GUARD_OP_KINDS`）ので、取り込みは guard で止まらない（既存仕様。検査で固定）。拒否はフック（Claude・Codex の PreToolUse/PermissionRequest）が担う。
+- 2.4: `<元>:<先>` の pull は `+`・`refs/heads/` 付き・追跡ブランチ宛を含め、`refspecDst` が付く形をすべて `merge-non-development` で拒否する（`.` は従来どおり確定不能で拒否）。
