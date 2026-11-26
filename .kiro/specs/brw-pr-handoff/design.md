@@ -159,9 +159,9 @@ sequenceDiagram
   participant H as GitHub
   A->>B: brw pr --title … （現在のブランチ = 分岐元）
   B->>B: 事前確認（導入済み・作成先が保護ブランチ・本文）
-  B->>G: ① fetch、先行(origin/base..base)の確認、ff-only で取り込み
+  B->>G: ① fetch、先行(<リモート>/base..base)の確認、ff-only で取り込み
   G-->>B: 最新 / 先行・分岐なら停止
-  B->>G: 差の確認（origin/保護..origin/base が 0 なら停止）
+  B->>G: 差の確認（<リモート>/保護..<リモート>/base が 0 なら停止）
   B->>H: ② 同じ head・base のオープンな PR を探す（あれば再利用）
   B->>H: PR を作成（承認は autoApprove.pullRequest）
   H-->>B: PR の URL
@@ -272,9 +272,11 @@ function runPr(args: string[], deps?: PrDeps): Promise<number>; // 終了コー�
 | 要件 | 1.8〜1.11、2.8、4.12 |
 
 **責務と制約**
+- `<リモート>` は、分岐元の push 先のリモート名（`publish.mjs` の `remoteNameOf`。`branch.<分岐元>.pushRemote` → `remote.pushDefault` → `branch.<分岐元>.remote` → `origin`）。`origin` を固定で使わない（`cleanup.mjs` と同じ扱い。SSH の別名の URL も `remote-url.mjs` で読む）。
 - 呼ばれるのは、現在のブランチの分類が `base` のときだけ（`pr-flow` が振り分ける）。作業の記録（`brw work start`・準備・計画）は作らず、`tidy`・`cleanup`・push・マージを呼ばない。
 - 作成先の決定: `--target` があればそれ、無ければ宣言の保護ブランチが 1 つのときそれ。分類が `protected` でない・複数で決められない・無いときは、理由を表示して止まる。
-- 順序: ① 本文の確認（既存の `brw pr` と同じ。本文ファイルが無い・未記入なら、副作用の前に `brw pr-template` を案内して止まる）。② `syncBase`: `git fetch origin <分岐元> <保護>`（失敗なら止まる）→ `git rev-list --count origin/<分岐元>..<分岐元>` が 1 以上なら、リモートへ未 push の commit があるとして止まる → 現在のブランチ（分岐元）で `git merge --ff-only origin/<分岐元>`（できなければ分岐・未コミットの衝突として止まる）。③ `countDiff`: `git rev-list --count origin/<保護>..origin/<分岐元>` が 0 なら、取り込む差が無いとして止まる。④ `existingPr` で同じ head・base のオープンな PR を探し、あれば再利用して⑥へ。⑤ 無ければ、承認の判定（`evaluateAll`、origin `"brw-publish"`、`autoApprove.pullRequest`。承認が必要なら、既存の `brw pr --confirmed`（利用者の端末）の案内）を経て `createOrReusePr`。⑥ PR の URL を表示して終了コード 0。
+- 順序: ① 本文の確認（既存の `brw pr` と同じ。本文ファイルが無い・未記入なら、副作用の前に `brw pr-template` を案内して止まる）。② `syncBase`: `git fetch <リモート> <分岐元> <保護>`（失敗なら止まる）→ `git rev-list --count <リモート>/<分岐元>..<分岐元>` が 1 以上なら、リモートへ未 push の commit があるとして止まる → 現在のブランチ（分岐元）で `git merge --ff-only <リモート>/<分岐元>`（できなければ分岐・未コミットの衝突として止まる）。③ `countDiff`: `git rev-list --count <リモート>/<保護>..<リモート>/<分岐元>` が 0 なら、取り込む差が無いとして止まる。④ `existingPr` で同じ head・base のオープンな PR を探し、あれば再利用して⑥へ。⑤ 無ければ、承認の判定（`evaluateAll`、origin `"brw-publish"`、`autoApprove.pullRequest`）を経て `createOrReusePr`。`existingPr`・`createOrReusePr` には、head の OID として `git rev-parse <リモート>/<分岐元>`（②の後はローカルの分岐元と同じ）を渡し、既存の作成後の照合（`pullDifferences`）で食い違えば止める。⑥ PR の URL を表示して終了コード 0。
+- **承認と `--confirmed`**: 承認が必要なとき（`autoApprove.pullRequest` が無効、または宣言が未登録・編集中）は、PR を作らず、利用者の端末で実行する `brw pr --confirmed …` の全文を案内して終了コード 1。`--confirmed` が付いて実行されたときは、`base-pr` 自身が標準入力の端末判定を行い（`publish-cli.mjs` の `--confirmed` と同じ判定）、端末でなければ何もせず拒否する。端末なら承認済みとして続ける。`--confirmed` は `pr-flow.mjs` の引数の定義（`FLAGS`）に既にある。①の fast-forward 更新は承認の前に行ってよい（ローカルの追従だけで、外部に影響しない）。
 - 作業ツリーに未コミットの変更があっても commit しない。「未コミットの変更が N 件あり、PR には含まれない」と表示して進める（2.8）。
 - 書き込みは、ローカルの分岐元の fast-forward 更新と PR の作成だけ（1.9）。`git merge --ff-only` は `brw` の中の処理で、フックの判定（`sync-base-branch` の許可と同じ形）を経ない。分岐元が本体のチェックアウトにあっても、片付けは呼ばないため、ブランチ・作業場所は削除されない（4.12）。
 
@@ -289,12 +291,12 @@ export function syncBase(cwd: string, base: string):
   | { ok: true, updated: boolean }
   | { ok: false, code: "ahead" | "diverged" | "fetch-failed" | "ff-failed", message: string };
 
-/** origin/<base> にあって origin/<target>（保護ブランチ）に無い commit の数。0 なら取り込む差が無い。 */
+/** <リモート>/<base> にあって <リモート>/<target>（保護ブランチ）に無い commit の数。0 なら取り込む差が無い。 */
 export function countDiff(cwd: string, target: string, base: string): number;
 ```
 
 - 事前条件: `branch` の分類が `base`。事後条件: 終了コード 0 のとき、`base` を head、`target`（保護）を base とするオープンな PR が 1 つ存在する。
-- **先行の検出が必要な理由（PoC）**: ローカルの分岐元がリモートより先行しているとき、`git merge --ff-only origin/<分岐元>` は成功（「すでに最新」）してしまうため、先行は `rev-list --count origin/<分岐元>..<分岐元>` で別に検出する（`poc/base-sync.sh` の 3 番）。
+- **先行の検出が必要な理由（PoC）**: ローカルの分岐元がリモートより先行しているとき、`git merge --ff-only <リモート>/<分岐元>` は成功（「すでに最新」）してしまうため、先行は `rev-list --count <リモート>/<分岐元>..<分岐元>` で別に検出する（`poc/base-sync.sh` の 3 番）。
 - 不変条件: 同じ状態での再実行は、PR を重複して作らない。
 
 
@@ -326,7 +328,7 @@ function instruction(ctx: TemplateContext): string;             // 自己完結�
 - 優先順位: `.github/PULL_REQUEST_TEMPLATE.md`（worktree の作業ツリー）→ 同梱の `assets/pr-template.<language>.md`。
 - 差し込み: 「作業外の変更」の節へ `previewTidy` の一覧と、ブランチ内の既存の別コミット（件名が `TIDY_SUBJECT`）のファイル一覧。「検証」の節へ `--verification`・`--failed`（未通過なら冒頭に「検証未通過」）。リポジトリ側の雛形には節が無いことがあるため、差し込みは節の見出しが見つかったときだけ行い、無ければ末尾に追記する。
 - `brw pr-template` は本文ファイルを `bodyPathOf` に書き出し（既に記入済みなら上書きせず、そのパスを案内）、標準出力に記入指示を出す。指示は次を含み、BRW・特定の呼び出し側の事前知識を要しない: 本文ファイルのパス、各節に書くこと（事実のみ・推測しない・読み手は人）、参照すべき情報（`git log <base>..HEAD`・`git diff --stat <base>`）、書き終えた後に実行する `brw pr` のコマンド。
-- 現在のブランチが恒常的な分岐元のときも出力する（要件 3.10）。作成元を分岐元、作成先を保護ブランチとして示し、「作業外の変更」の節は該当なしとして扱う（`previewTidy` は呼ばない）。参照すべき情報は `git log origin/<保護>..<分岐元>`・`git diff --stat origin/<保護>...<分岐元>`。
+- 現在のブランチが恒常的な分岐元のときも出力する（要件 3.10）。作成元を分岐元、作成先を保護ブランチとして示し、「作業外の変更」の節は該当なしとして扱う（`previewTidy` は呼ばない）。参照すべき情報は `git log <リモート>/<保護>..<分岐元>`・`git diff --stat <リモート>/<保護>...<分岐元>`。
 
 ### 片付け（`scripts/cleanup.mjs`）
 
@@ -389,6 +391,7 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 - `cleanup`: 未 push の commit・未コミット変更で残る。既知の PR を渡すと `gh` なしで片付く。状態ファイルと本文ファイルが、worktree の削除に成功した後だけ消える。削除後に子プロセスを走らせない（4）。
 - `lib.mjs`: 2 キーの検証・既定値・不正値の報告（5）。
 - `base-pr`: 一時リポジトリと bare remote で、分岐元の最新・リモートが先行（ff で取り込む）・ローカルが先行（止まる）・分岐（止まる）・差なし（止まる）を確かめる（`poc/base-sync.sh` の各状態）。作成先が保護ブランチでない・複数の保護ブランチで決められない場合に止まる。偽の GitHub 接続で、PR の作成・既存 PR の再利用・承認が必要な場合の案内を確かめる。作業の記録・状態ファイルを作らないこと、`tidy`・`cleanup`・push を呼ばないこと、分岐元のブランチと作業場所が残ること、未コミットの変更が残り件数が表示されること（1.8〜1.10、2.8、4.12）。
+- `base-pr`（続き）: `branch.<分岐元>.pushRemote` が `origin` 以外のとき、そのリモートで fetch・比較すること。承認が必要な宣言では PR を作らず `--confirmed` の全文を案内すること、`--confirmed` が端末でない標準入力では何もせず拒否すること、端末では続行すること、head の OID を渡して作成後の照合が働くこと。
 - `operation-decision`: 分岐元→保護ブランチの組が規則に適合する扱いになり、ほかの組の拒否は変わらない。`prAlternative` が、`brw pr` で作れない組に `brw pr` を示さず、作成画面の URL を示す（1.11）。`brw pr-template` が分岐元で出力される（3.10）。
 
 ### 統合
@@ -409,3 +412,4 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 ## 改訂メモ
 
 - 2026-11-26: 要件 1.8〜1.11、2.8、3.10、4.12（恒常的な分岐元から保護ブランチへの PR）の設計を追加した。利用者の決定により、作業の記録は作業ブランチにだけ適用し、分岐元からの PR は「取り込み → 作成 → 報告」の 3 段だけの軽い経路（`base-pr`）にした（案 P2）。判定の 5 か所の前提のうち、直接の PR 作成の判定（`evalPrCreateRules`）と `brw pr` の事前確認・雛形・案内だけを変え、作業の記録に結び付く `work start`・準備・計画・push は変えない。PoC で、ローカルの分岐元が先行していると `merge --ff-only` が成功してしまうことが分かったため、先行を別に検出する。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。
+- 2026-11-26（設計の検証）: `base-pr` が `origin` を固定で使っていた点を、`remoteNameOf` で解決するリモートに改めた。承認が必要な場合の `--confirmed`（`base-pr` 自身が端末判定を持つ）と、PR 作成時の head の OID の照合を設計に足した。
