@@ -25,7 +25,7 @@
   - _Requirements: 1.2, 1.5, 1.6, 6.3, 6.4_
 
 - [ ] 2. 中核: 取り込みの可否を判定する
-- [ ] 2.1 基底・保護ブランチの更新（形 A）を許可し、保証が付かない更新を拒否する
+- [x] 2.1 基底・保護ブランチの更新（形 A）を許可し、保証が付かない更新を拒否する
   - 取り込み先が基底・保護ブランチ、取り込み元が `origin` の同名の追跡ブランチ 1 つで、fast-forward に限られる形（fetch による更新、または `--ff-only` の指定・同等の設定。リベース・`--no-ff`・`--squash` でない）で、かつ実行前に分岐と確認できていないとき、拒否せず許可する。確認省略は、宣言が登録済みなら省略、未登録・編集中なら通常の承認、取り込み元の指定が無いものは省略しない、とする。
   - 保証が付かない形（`--ff-only` が無い pull）は「保証が付く形で再実行する」旨を理由にして拒否し、分岐・`--no-ff`・`--squash`・リベースを伴うものと、実行前に分岐と確認できた merge は、履歴を分岐させる更新として拒否する。取り込み元が `origin` 以外・別名・複数の場合は従来どおり拒否する。
   - `main` 上の `git pull --ff-only origin main`・`git merge --ff-only origin/main` が、登録済みの宣言で確認省略の対象、未登録で通常の承認になり、`--ff-only` の無い pull・分岐した merge・`--no-ff`・`--rebase` が、それぞれ決められた識別子で拒否される。
@@ -85,3 +85,4 @@
 - 1.1: `mode` は設定由来のリベースでも `pull-rebase` になる（判定は `mode` か `rebase` で拒否できる）。`basis.configKeys` は実効値を決めた設定のキーだけ。設定の読み取り失敗と未設定は区別しない。git の長いオプションの省略形（`--reb` 等）は未対応（従来と同じ）。
 - 1.2: `fastForwardable` は `true|false|null`（null=確認不能）。同一コミットの merge は true。判定側（2.x）は「false のときだけ分岐」と扱う（`!== false` は許可側）。
 - 1.3: fetch の同名更新は暫定で `git fetch origin dev/bar:dev/bar` が `merge-development`（許可）になる。2.1 で形 A を足すときに `via:"fetch"` の形 A 以外を拒否にする（2.3 の完了条件に追記済み）。`--all`・`--multiple`・`-f`/`-u` を含む短い束は取り出さず従来分類のまま。
+- 2.1: 優先順位は sync-not-fast-forward → sync-ff-only-required → 許可。fetch の形 A 以外の拒否に仮の `ALT_SYNC` を付けた（2.3 で整える）。Decision の facts に ff・rebase・basis はまだ載せていない（2.3）。

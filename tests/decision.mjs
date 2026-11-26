@@ -231,6 +231,57 @@ export const runDecisionChecks = async (eq) => {
     fr.cleanup();
   }
 
+  // ---- sync-base-branch 2.1 基底・保護ブランチの更新（形 A） ----
+  {
+    const mk = (register) => {
+      const fr = mkRepoWithRemote({ branch: "dev/foo", config: CONFIG, register });
+      const w = fr.dir;
+      gitOut(w, "branch", "develop");
+      gitOut(w, "update-ref", "refs/remotes/origin/main", "main");
+      gitOut(w, "update-ref", "refs/remotes/origin/develop", "develop");
+      gitOut(w, "update-ref", "refs/remotes/origin/dev/bar", "dev/foo");
+      gitOut(w, "remote", "add", "upstream", "/tmp/brw-upstream-dummy");
+      gitOut(w, "update-ref", "refs/remotes/upstream/main", "main");
+      gitOut(w, "branch", "dev/bar");
+      gitOut(w, "checkout", "-q", "main");
+      return { w, cleanup: fr.cleanup };
+    };
+    const judge = (w, cmd) => { const o = classifyCommand(cmd, w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+    const A = mk(true);
+    const okReg = ["eligibleForApproval", "skip", "sync-base-fast-forward", null];
+    eq("sync-base-branch/2.1 登録済みの宣言: main の fast-forward 更新（pull --ff-only・merge --ff-only・fetch 同名）は確認省略の対象", ["git pull --ff-only origin main", "git merge --ff-only origin/main", "git fetch origin main:main", "git fetch origin refs/heads/main:refs/heads/main"].map((c) => judge(A.w, c)), Array(4).fill(okReg));
+    gitOut(A.w, "checkout", "-q", "develop");
+    eq("sync-base-branch/2.1 基底ブランチ（develop）の更新も形 A", [judge(A.w, "git pull --ff-only origin develop"), judge(A.w, "git merge --ff-only origin/develop")], Array(2).fill(okReg));
+    gitOut(A.w, "checkout", "-q", "main");
+    eq("sync-base-branch/2.1 --ff-only の無い pull・merge は sync-ff-only-required で拒否", ["git pull origin main", "git merge origin/main", "git pull --ff origin main"].map((c) => judge(A.w, c).slice(0, 3)), Array(3).fill(["deny", "notApplicable", "sync-ff-only-required"]));
+    eq("sync-base-branch/2.1 --no-ff・--squash・リベースは sync-not-fast-forward で拒否", ["git pull --no-ff origin main", "git merge --no-ff origin/main", "git merge --squash origin/main", "git pull --rebase origin main", "git pull --ff-only --rebase origin main", "git pull -r --ff-only origin main"].map((c) => judge(A.w, c).slice(0, 3)), Array(6).fill(["deny", "notApplicable", "sync-not-fast-forward"]));
+    eq("sync-base-branch/2.1 拒否の理由に再実行の案内（--ff-only）が含まれる", (() => { const o = classifyCommand("git pull origin main", A.w).operations[0]; const x = evaluate(o, contextFor(o)); return [/--ff-only/.test(x.reason), x.compliance]; })(), [true, "violation"]);
+    eq("sync-base-branch/2.1 取り込み元が origin の同名でないものは従来どおり merge-non-development で拒否", ["git pull --ff-only origin develop", "git merge --ff-only dev/bar", "git merge --ff-only origin/develop", "git pull --ff-only origin main:develop", "git pull --ff-only origin main develop", "git merge --ff-only origin/main origin/develop", "git merge --abort", "git pull --ff-only upstream main", "git merge --ff-only upstream/main", "git fetch upstream main:main", "git pull --ff-only origin main other"].map((c) => judge(A.w, c).slice(0, 3)), Array(11).fill(["deny", "notApplicable", "merge-non-development"]));
+    eq("sync-base-branch/2.1 保護・基底以外へ向かう fetch の同名更新（開発ブランチ・宣言外）は merge-non-development で拒否", (() => {
+      gitOut(A.w, "branch", "other/z"); gitOut(A.w, "update-ref", "refs/remotes/origin/other/z", "main");
+      return ["git fetch origin dev/bar:dev/bar", "git fetch origin other/z:other/z"].map((c) => { const x = judge(A.w, c); const o = classifyCommand(c, A.w).operations[0]; const d2 = evaluate(o, contextFor(o)); return [...x.slice(0, 3), /fetch|更新/.test(d2.reason)]; });
+    })(), Array(2).fill(["deny", "notApplicable", "merge-non-development", true]));
+    // 実行前に分岐と確認できた merge（main が origin/main に対して先行・分岐している）
+    gitOut(A.w, "commit", "-q", "--allow-empty", "-m", "main の独自コミット");
+    gitOut(A.w, "update-ref", "refs/remotes/origin/main", "dev/foo");
+    gitOut(A.w, "checkout", "-q", "-B", "tmp", "dev/foo"); gitOut(A.w, "commit", "-q", "--allow-empty", "-m", "origin 側の更新"); gitOut(A.w, "update-ref", "refs/remotes/origin/main", "tmp"); gitOut(A.w, "checkout", "-q", "main");
+    eq("sync-base-branch/2.1 分岐が確認できた merge は --ff-only でも sync-not-fast-forward で拒否", [judge(A.w, "git merge --ff-only origin/main").slice(0, 3), judge(A.w, "git merge origin/main").slice(0, 3)], Array(2).fill(["deny", "notApplicable", "sync-not-fast-forward"]));
+    eq("sync-base-branch/2.1 pull・fetch は取得前のため分岐を確認できず許可（git が止める）", [judge(A.w, "git pull --ff-only origin main")[2], judge(A.w, "git fetch origin main:main")[2]], ["sync-base-fast-forward", "sync-base-fast-forward"]);
+    A.cleanup();
+    const U = mk(false);
+    eq("sync-base-branch/2.1 未登録の宣言では許可しても通常の承認（確認を省略しない）", ["git pull --ff-only origin main", "git merge --ff-only origin/main", "git fetch origin main:main"].map((c) => judge(U.w, c)), Array(3).fill(["pass", "normal", "sync-base-fast-forward", "unregistered"]));
+    eq("sync-base-branch/2.1 未登録でも拒否は変わらない", [judge(U.w, "git pull origin main")[2], judge(U.w, "git pull --rebase origin main")[2]], ["sync-ff-only-required", "sync-not-fast-forward"]);
+    U.cleanup();
+    const S = mk(true);
+    gitOut(S.w, "config", "pull.ff", "only");
+    const cfgOk = judge(S.w, "git pull origin main")[2];
+    gitOut(S.w, "config", "--unset", "pull.ff"); gitOut(S.w, "config", "pull.rebase", "true");
+    const cfgRb = judge(S.w, "git pull --ff-only origin main")[2];
+    gitOut(S.w, "config", "--unset", "pull.rebase");
+    eq("sync-base-branch/2.1 pull.ff=only の設定は --ff-only と同等、pull.rebase=true は拒否", [cfgOk, cfgRb], ["sync-base-fast-forward", "sync-not-fast-forward"]);
+    S.cleanup();
+  }
+
   // ---- 3.3 保護対象への PR は作成まで ----
   const pr = (head, base, extra = "") => ev(`gh pr create --head ${head} --base ${base} --title t --body b ${extra}`);
   eq("enforcement/3.3 開発ブランチから保護対象・恒常的な分岐元への PR 作成は適合・確認省略の対象", [pr("dev/foo", "main"), pr("dev/foo", "develop")].map((x) => sig(x)), Array(2).fill(["eligibleForApproval", "compliant", "skip", "pr-create-protected"]));
