@@ -76,10 +76,15 @@ export const runAgentHookChecks = async (eq) => {
     gitOut(r.dir, "checkout", "-q", "dev/foo");
     for (const host of ["claude", "codex"]) got.push(guide(host, "git pull origin main"));
     eq("sync-base-branch/2.3 フック出力に別の作業ツリーでの pull --ff-only・PR・merge origin/ の案内が残る（Claude・Codex）", got, Array(8).fill([true, true, true]));
+    // 2.4 <元>:<先> の pull の拒否も、フック出力（500 文字）に理由と案内が残る
+    gitOut(r.dir, "checkout", "-q", "dev/foo");
+    const got24 = [];
+    for (const host of ["claude", "codex"]) { const t = preReasonOf(host, "git pull origin dev/bar:main", r.dir); got24.push([/手元のブランチを書き換える pull は許可しません/.test(t), /git pull origin <ブランチ>/.test(t), /pull --ff-only origin/.test(t)]); }
+    eq("sync-base-branch/2.4 フック出力に <元>:<先> の pull の拒否理由と代わりの手順が残る（Claude・Codex）", got24, Array(2).fill([true, true, true]));
     r.cleanup();
   }
 
-  // ---- sync-base-branch 4.2 取り込みの 3 経路（Claude のフック・Codex のフック・brw guard）の同一判定と既存の規則の不変 ----
+  // ---- sync-base-branch 4.2取り込みの 3 経路（Claude のフック・Codex のフック・brw guard）の同一判定と既存の規則の不変 ----
   {
     const r = repoOf();
     gitOut(r.dir, "update-ref", "refs/remotes/origin/main", "main");

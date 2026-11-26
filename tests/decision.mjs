@@ -426,9 +426,23 @@ export const runDecisionChecks = async (eq) => {
     const jn = (cmd) => { const o = classifyCommand(cmd, N.w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code]; };
     eq("sync-base-branch/4.1 取り込み元の指定が無い操作（--abort・--continue）は基底ブランチ上でも確認を省略せず拒否", [jn("git merge --abort"), jn("git merge --continue")], Array(2).fill(["deny", "notApplicable", "merge-non-development"]));
     N.cleanup();
+    // 2.4 <元>:<先> の形の pull は、取り込み元・取り込み先の分類や登録の有無にかかわらず拒否（3.4・6.2）
+    for (const reg of [true, false]) {
+      const Q = mk(reg);
+      const jq = (cmd) => { const o = classifyCommand(cmd, Q.w).operations[0]; const x = evaluate(o, contextFor(o)); return [x.verdict, x.approval, x.code, x.approvalWhy]; };
+      const dn = ["deny", "notApplicable", "merge-non-development", null];
+      eq(`sync-base-branch/2.4 開発ブランチ上の <元>:<先> の pull は常に拒否、<元> のみの pull は従来どおり（登録${reg ? "済み" : "なし"}）`,
+        [["git pull origin dev/bar:main", "git pull origin dev/bar:dev/baz", "git pull origin main:main", "git pull origin main:dev/foo"].map(jq), jq("git pull origin dev/bar")[2], jq("git pull origin main")[2]],
+        [Array(4).fill(dn), "merge-development", "sync-base-merge"]);
+      gitOut(Q.w, "checkout", "-q", "main");
+      eq(`sync-base-branch/2.4 基底上の git pull --ff-only origin main:main も拒否し、理由と案内を持つ（登録${reg ? "済み" : "なし"}）`,
+        (() => { const o = classifyCommand("git pull --ff-only origin main:main", Q.w).operations[0]; const x = evaluate(o, contextFor(o)); return [jq("git pull --ff-only origin main:main"), jq("git pull --ff-only origin main")[2], /手元のブランチを書き換える pull は許可しません/.test(x.reason), /git pull origin <ブランチ>/.test(x.alternative) && /pull --ff-only origin/.test(x.alternative)]; })(),
+        [dn, "sync-base-fast-forward", true, true]);
+      Q.cleanup();
+    }
   }
 
-  // ---- sync-base-branch 4.3 実際の git の挙動（使い捨てのリポジトリで git を実行して確かめる） ----
+  // ---- sync-base-branch 4.3実際の git の挙動（使い捨てのリポジトリで git を実行して確かめる） ----
   {
     const { mkdtempSync, rmSync } = await import("node:fs");
     const ALLOW = ["eligibleForApproval", "skip", "sync-base-fast-forward", null];

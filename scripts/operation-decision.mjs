@@ -36,6 +36,8 @@ const ALT_PR_FLOW = `PR の作成は \`${BRW_RUN} pr-template\` で本文の下�
 const ALT_SYNC = (b) => b === "<基底>"
   ? `基底の更新は fast-forward に限ります。\`git pull --ff-only origin <基底>\`（基底を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin <基底>\`）で更新し、分岐する反映は PR で、開発ブランチへの取り込みは \`git merge origin/<基底>\` で行ってください。`
   : `fast-forward で更新してください: \`git pull --ff-only origin ${b}\`（${b} を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin ${b}\`）。分岐する反映は PR で、開発ブランチへの取り込みは \`git merge origin/${b}\` で行ってください。`;
+// <元>:<先> の pull の拒否の案内（フック経路の 500 文字に収めるため短く保つ）
+const ALT_PULL_PLAIN = "取り込みは `git pull origin <ブランチ>` の形で行い、基底の更新は `git pull --ff-only origin <基底>`（別の作業ツリーで確認中なら `git -C <その作業ツリー> pull --ff-only origin <基底>`）で行ってください。";
 // 実効値（ff・rebase）を設定から読んだときの根拠。設定のキーと値を示す（無ければ空文字列）
 const basisNote = (op) => {
   const b = op.basis;
@@ -173,6 +175,9 @@ function evalMerge(op, config, registered) {
   const srcLabel = sources.length ? `取り込み元 ${sources.map((s) => `'${s.name}'（${label(srcCls[s.name])}）`).join("、")}` : "取り込み元なし";
   const targets = [op.branch, ...sources.map((s) => s.branch).filter(Boolean)];
   const isFetch = op.via === "fetch";
+  // <元>:<先> の形の pull は、取り込み元・取り込み先の分類や登録の有無にかかわらず拒否する（手元のブランチを書き換えうるため。要件 3.4・6.2）。fetch は refspecDst を持たない別経路
+  if (!isFetch && sources.some((s) => s.refspecDst))
+    return deny(op, "merge-non-development", `${srcLabel} は <元>:<先> の形で、手元のブランチを書き換える pull は許可しません。`, { alternative: ALT_PULL_PLAIN, targets, facts });
   // 形 A: 基底・保護ブランチを、origin の同名の追跡ブランチ 1 つから fast-forward で更新する
   if ((target === "protected" || target === "base") && sources.length === 1) {
     const s = sources[0];

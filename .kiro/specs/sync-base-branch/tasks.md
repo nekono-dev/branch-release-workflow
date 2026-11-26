@@ -46,7 +46,7 @@
   - _Depends: 2.2_
   - _Boundary: 取り込みの判定_
   - _Requirements: 3.2, 3.3, 6.4_
-- [ ] 2.4 `<元>:<先>` の形の pull を常に拒否する
+- [x] 2.4 `<元>:<先>` の形の pull を常に拒否する
   - 取り込み元に `refspecDst` の印が付いた取り込み（`git pull <リモート> <元>:<先>`）を、取り込み元の分類（開発・基底・保護）にかかわらず、確認を省略せず `merge-non-development` で拒否する。理由に「手元のブランチを書き換える pull は許可しない」旨を含め、案内に `git pull <リモート> <ブランチ>` の形と基底の fast-forward 更新を示す。フック経路の 500 文字の切り詰めに収める。
   - `dev/foo` 上の `git pull origin dev/bar:main`・`git pull origin dev/bar:dev/baz`・`git pull origin main:main`・`git pull --ff-only origin main:main`（基底上）が拒否になり、`git pull origin dev/bar`・`git pull origin main` は従来どおり許可される。登録済み・未登録のどちらでも拒否が変わらない。
   - _Depends: 2.3_
@@ -97,3 +97,4 @@
 - 2.3: フック経路は reason+alternative を 500 文字で切る（`sanitize`）。拒否の理由・`ALT_SYNC` は短く保ち、tests/agent-hooks.mjs で案内の 3 点が残ることを固定した。導入先のパスが極端に長いと `${BRW_RUN}` で末尾の `brw merge` が切れうる。`basis.configValues` を設計に追記した。
 - 3.2: `brw merge` は開発ブランチ同士専用で `origin/<基底>` を取り込めない。拒否の案内 `ALT_SYNC` は `git merge origin/<基底>` に直した（設計の「`brw merge`」は開発ブランチ間の案内のみ）。
 - 4.2: `brw guard` は create・pr-create だけ共通判定の拒否を採る（`GUARD_OP_KINDS`）ので、取り込みは guard で止まらない（既存仕様。検査で固定）。拒否はフック（Claude・Codex の PreToolUse/PermissionRequest）が担う。
+- 2.4: `<元>:<先>` の pull は `+`・`refs/heads/` 付き・追跡ブランチ宛を含め、`refspecDst` が付く形をすべて `merge-non-development` で拒否する（`.` は従来どおり確定不能で拒否）。

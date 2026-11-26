@@ -122,4 +122,4 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 - 基底・保護ブランチの fast-forward 更新: `git pull --ff-only origin <基底>`、基底を確認していない作業ツリーでの `git fetch origin <基底>:<基底>`、確認中の作業ツリーを指す `git -C <その作業ツリー> pull --ff-only origin <基底>`
 - 開発ブランチへの基底・保護ブランチの取り込み: `git merge origin/<基底>`、`git pull origin <基底>`
 
-対象外（拒否される。確認の省略以前に実行できない）のは、リベース（`--rebase`、`pull.rebase` などの設定）、基底の更新での `--ff-only` の無い `git pull`・`--no-ff`・`--squash`・`+` 付きの更新、分岐した merge、`origin` 以外のリモートや手元の別ブランチからの取り込み。取り込み元の指定がない操作（`git merge --abort` など）は確認を省かない。fast-forward にならない分岐は git が止める。`pull`・`fetch` は取得前に判定するので、分岐は事前には確かめない（診断の限界 `sync-ff-unverified`）。
+対象外（拒否される。確認の省略以前に実行できない）のは、リベース（`--rebase`、`pull.rebase` などの設定）、基底の更新での `--ff-only` の無い `git pull`・`--no-ff`・`--squash`・`+` 付きの更新、分岐した merge、`origin` 以外のリモートや手元の別ブランチからの取り込み。取り込み元の指定がない操作（`git merge --abort` など）は確認を省かない。`git pull origin <元>:<先>` の形の pull は、手元のブランチを書き換えうるため、取り込み元が開発ブランチでも許可しない。fast-forward にならない分岐は git が止める。`pull`・`fetch` は取得前に判定するので、分岐は事前には確かめない（診断の限界 `sync-ff-unverified`）。
