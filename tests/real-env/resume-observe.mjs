@@ -64,37 +64,38 @@ export function parseStreamJson(text) {
  * 観測の判定。項目ごとに「一致（想定どおり）」「不一致」「未観測」のどれかを返す。想定と異なる結果は一致にしない。
  * inside=true は作業場所の中でセッションを開始した場合（削除後にフックが動かない既知の限界を確かめる）。
  */
-export function judge({ sessionId, recordSession, hookLog, answer2, commands2, branchesBefore, branchesAfter, worktreeBranches, branch, inside }) {
+export function judge({ sessionId, recordSession, hookLog, answer2, commands2, branchesBefore, branchesAfter, worktreeBranches, branch, inside, ctx2 }) {
   const item = (name, verdict, detail) => ({ name, verdict, detail });
   const out = [];
-  // (a) 片付け後の記録に、セッションが付いたか（PostToolUse の関連付け）
+  // (a) 片付け後の記録に、セッションが付いたか（実行前のメモからの関連付け）
   if (recordSession === undefined) out.push(item("a", "未観測", "再開の記録を読めない"));
   else if (sessionId && recordSession === sessionId) out.push(item("a", "一致", "片付け後の記録に、そのセッションの ID が付いた"));
   else out.push(item("a", "不一致", `記録のセッション: ${recordSession ?? "空"}（期待: ${sessionId ?? "不明"}）`));
-  // (b) ターン 2 で UserPromptSubmit の案内がモデルに届いたか（フックの発火と、答えに案内の再開コマンドが出たこと）
-  // ターン 2 の入力で発火したか（同じセッションの UserPromptSubmit は、ターン 1 と 2 で 2 回）
+  // (b) ターン 2 の UserPromptSubmit で BRW が案内（brw resume を含む additionalContext）を返したか（ラッパーの記録）。
+  //     モデルへの到達は、答えが案内の文言（「新しい作業なら無視してかまいません」）の有無を「あり」と答えたことで確かめる
   const fired = hookLog.filter((e) => e.event === "UserPromptSubmit" && e.session_id === sessionId).length >= 2;
-  const mentioned = typeof answer2 === "string" && answer2.includes(`resume ${branch}`);
-  const guided = Boolean(sessionId) && recordSession === sessionId; // 案内の前提: 同じセッションの記録が付いていること
-  if (!inside && fired && !guided) {
-    out.push(item("b", "不一致", "案内の前提（同じセッションの記録）が無いため、案内は出ていない。答えの再開コマンドは前のターンの出力に由来しうる"));
-  } else if (inside) {
-    out.push(fired
-      ? item("b", "不一致", "作業場所の中で開始したのに、削除後に UserPromptSubmit が動いた（想定と異なる）")
-      : item("b", "一致", "想定どおり（既知の限界）: 削除後にフックが動かず、案内は届かない"));
-  } else if (fired && mentioned) out.push(item("b", "一致", "UserPromptSubmit が動き、答えに案内の再開コマンドが出た"));
-  else if (fired) out.push(item("b", "不一致", "フックは動いたが、答えに案内の再開コマンドが出なかった"));
-  else out.push(item("b", "不一致", "ターン 2 で UserPromptSubmit が動いていない"));
-  // (c) モデルが brw resume を実行し、作業場所を作り直したか
+  const returned = typeof ctx2 === "string" && ctx2.includes(`resume ${branch}`);
+  const answerSaysPresent = typeof answer2 === "string" && /^\s*あり/.test(answer2);
+  if (inside) {
+    if (!fired) out.push(item("b", "一致", "想定どおり（既知の限界）: 削除後に UserPromptSubmit は動かず、案内は届かない"));
+    else out.push(item("b", "不一致", returned ? "想定と異なる: 削除後に UserPromptSubmit が動き、BRW が案内を返した" : "想定と異なる: 削除後に UserPromptSubmit が動いたが、BRW は案内を返さなかった"));
+  } else if (!fired) out.push(item("b", "不一致", "ターン 2 で UserPromptSubmit が動いていない"));
+  else if (!returned) out.push(item("b", "不一致", "ターン 2 で UserPromptSubmit は動いたが、BRW は案内（brw resume を含む文脈）を返さなかった"));
+  else if (answerSaysPresent) out.push(item("b", "一致", "BRW が案内を返し（記録）、モデルが案内の文言の有無に「あり」と答えた"));
+  else out.push(item("b", "不一致", "BRW は案内を返したが、モデルの答えが案内の文言を示さなかった（モデルへの到達を確認できない）"));
+  // (c) モデルが brw resume を実行し、作業場所を作り直したか。案内によるとは、(b) が一致した回（答えに案内の文言がある回）だけ言う
   const ranResume = commands2.some((c) => /brw\.mjs'?\s+resume\s/.test(c) && c.includes(branch));
-  // 作業場所の中で開始した場合: 作業場所が作り直されたときだけ一致。試みたが作り直されなかったときは、シェルが使えないため判定の対象外（未観測）
-  if (inside) out.push(ranResume && worktreeBranches.includes(branch) ? item("c", "一致", "想定外に、resume で作業場所が作り直された") : item("c", "未観測", ranResume ? "resume を試みたが作業場所が作り直されていない（削除後のシェルでは実行できない）" : "案内が届かず、resume を実行していない"));
-  else if (ranResume && worktreeBranches.includes(branch)) out.push(item("c", "一致", guided ? "brw resume を実行し、作業場所が作り直された（案内に従った）" : "brw resume を実行し、作業場所が作り直された（案内は出ていないため、フックの効果とは言えない）"));
-  else if (ranResume) out.push(item("c", "不一致", "brw resume は実行されたが、作業場所が作り直されていない"));
+  const created = worktreeBranches.includes(branch);
+  const bOk = out[1].verdict === "一致";
+  if (inside) {
+    out.push(ranResume && created ? item("c", "一致", "想定外に、resume で作業場所が作り直された") : item("c", "未観測", ranResume ? "resume を試みたが作業場所が作り直されていない（削除後のシェルでは実行できない）" : "案内が届かず、resume を実行していない"));
+  } else if (ranResume && created) {
+    out.push(item("c", "一致", bOk ? "brw resume を実行し作業場所が作り直された。答えに案内の文言があるため、案内によるとみてよい" : "brw resume を実行し作業場所が作り直された。答えに案内の文言が無いため、案内によるとは確認できない"));
+  } else if (ranResume) out.push(item("c", "不一致", "brw resume は実行されたが、作業場所が作り直されていない"));
   else out.push(item("c", "不一致", "brw resume を実行していない"));
   // (d) 新しい作業ブランチを作っていないか
-  const created = branchesAfter.filter((b) => !branchesBefore.includes(b));
-  out.push(created.length === 0 ? item("d", "一致", "新しいブランチを作っていない") : item("d", "不一致", `新しいブランチを作った: ${created.join(", ")}`));
+  const created2 = branchesAfter.filter((x) => !branchesBefore.includes(x));
+  out.push(created2.length === 0 ? item("d", "一致", "新しいブランチを作っていない") : item("d", "不一致", `新しいブランチを作った: ${created2.join(", ")}`));
   return out;
 }
 
@@ -138,6 +139,16 @@ appendFileSync(C.log, JSON.stringify({ method, path: url.pathname + url.search, 
 process.stdout.write("HTTP/2.0 " + status + " " + (status < 300 ? "OK" : "Error") + "\\r\\ncontent-type: application/json\\r\\n\\r\\n" + JSON.stringify(resp));
 `;
 // 偽の ssh（bare remote へ向ける。受け取り・取得の呼び出しを記録する）
+const WRAPPER = `import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
+let t = ""; for await (const c of process.stdin) t += c;
+let i = {}; try { i = JSON.parse(t); } catch {}
+const r = spawnSync("node", [process.env.BRW_OBS_AGENT, "claude", "UserPromptSubmit"], { input: t, encoding: "utf8", env: process.env });
+const out = r.stdout ?? "";
+appendFileSync(process.env.BRW_OBS_HOOK_LOG, JSON.stringify({ at: new Date().toISOString(), event: "UserPromptSubmit", session_id: i.session_id ?? null, cwd: i.cwd ?? null, prompt40: String(i.prompt ?? "").slice(0, 40), out, exit: r.status }) + "\\n");
+process.stdout.write(out);
+process.exitCode = r.status ?? 0;
+`;
 const FAKE_SSH = `#!/bin/sh
 printf '%s\\n' "$2" >> "$BRW_OBS_SSHLOG"
 cmd=$(printf '%s' "$2" | sed "s#acme/app.git#$BRW_OBS_BARE#")
@@ -149,7 +160,7 @@ let t = ""; for await (const c of process.stdin) t += c;
 let i = {}; try { i = JSON.parse(t); } catch {}
 const tr = i.tool_response === undefined ? null : (typeof i.tool_response === "string" ? { kind: "string", head: i.tool_response.slice(0, 60) } : { kind: "object", keys: Object.keys(i.tool_response), exit_code: i.tool_response.exit_code ?? null, interrupted: i.tool_response.interrupted ?? null });
 const command = typeof i.tool_input?.command === "string" ? i.tool_input.command.slice(0, 600) : null;
-appendFileSync(process.env.BRW_OBS_HOOK_LOG, JSON.stringify({ at: new Date().toISOString(), event: i.hook_event_name, session_id: i.session_id ?? null, cwd: i.cwd ?? null, command, tool_response: tr }) + "\\n");
+appendFileSync(process.env.BRW_OBS_HOOK_LOG, JSON.stringify({ at: new Date().toISOString(), event: i.hook_event_name, session_id: i.session_id ?? null, cwd: i.cwd ?? null, command, tool_response: tr, keys: Object.keys(i).sort() }) + "\\n");
 `;
 
 /** 一時の環境を作る（リポジトリ・bare remote・worktree・宣言・本文・偽の gh・偽の ssh・フック）。 */
@@ -167,6 +178,7 @@ function setupSandbox(stage) {
   writeFileSync(join(base, "gh-shim.mjs"), GH_SHIM);
   writeFileSync(join(base, "fake-ssh.sh"), FAKE_SSH, { mode: 0o755 });
   writeFileSync(join(base, "hook-logger.mjs"), LOGGER);
+  writeFileSync(join(base, "hook-wrapper-ups.mjs"), WRAPPER);
   const ghConfig = join(base, "gh-config.json");
   writeFileSync(ghConfig, JSON.stringify({ log: files.ghLog, state: files.state, bare }));
   g(base, "init", "--bare", "-q", "-b", "main", bare);
@@ -196,10 +208,10 @@ function setupSandbox(stage) {
   const hook = (event) => ({ type: "command", command: `node "${AGENT}" claude ${event}` });
   const settings = {
     hooks: {
-      PreToolUse: [{ matcher: "Bash", hooks: [hook("PreToolUse")] }, { matcher: "EnterWorktree", hooks: [hook("PreToolUse")] }, { matcher: "mcp__.*", hooks: [hook("PreToolUse")] }],
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `node "${join(base, "hook-logger.mjs")}"` }, hook("PreToolUse")] }, { matcher: "EnterWorktree", hooks: [hook("PreToolUse")] }, { matcher: "mcp__.*", hooks: [hook("PreToolUse")] }],
       PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `node "${join(base, "hook-logger.mjs")}"` }, hook("PostToolUse")] }],
       Stop: [{ hooks: [hook("Stop")] }],
-      UserPromptSubmit: [{ hooks: [{ type: "command", command: `node "${join(base, "hook-logger.mjs")}"` }, hook("UserPromptSubmit")] }],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: `node "${join(base, "hook-wrapper-ups.mjs")}"` }] }],
     },
   };
   const settingsText = JSON.stringify(settings);
@@ -221,6 +233,7 @@ function setupSandbox(stage) {
     BRW_OBS_SSHLOG: files.sshLog,
     BRW_OBS_BARE: bare,
     BRW_OBS_HOOK_LOG: files.hookLog,
+    BRW_OBS_AGENT: AGENT,
   };
   return { base, main, wt, bare, files, env, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
@@ -259,6 +272,18 @@ function runClaude(cwd, env, turns) {
   });
 }
 
+/** PreToolUse（brw pr の呼び出し）の入力に session_id・cwd・tool_input.command があり、session_id が UserPromptSubmit と同じか。 */
+export function preToolUseCheck(hookLog, sessionId) {
+  const pre = hookLog.filter((e) => e.event === "PreToolUse" && typeof e.command === "string" && e.command.includes("pr --title"));
+  const ups = hookLog.find((e) => e.event === "UserPromptSubmit" && e.session_id);
+  return {
+    count: pre.length,
+    hasFields: pre.length > 0 && pre.every((e) => e.session_id && e.cwd && e.command && Array.isArray(e.keys) && ["session_id", "cwd"].every((k) => e.keys.includes(k))),
+    sessionIsClaudeSession: pre.length > 0 && pre.every((e) => e.session_id === sessionId),
+    sameAsUserPromptSubmit: pre.length > 0 && Boolean(ups) && pre.every((e) => e.session_id === ups.session_id),
+  };
+}
+
 /** 1 回の観測（環境を作り、2 ターン動かし、項目を判定する）。終わったら一時の環境を消す。 */
 async function observeOnce(stage) {
   const s = setupSandbox(stage);
@@ -270,16 +295,25 @@ async function observeOnce(stage) {
     const turn1 = variantCd
       ? `次の作業を実行してください。作業場所（${s.wt}）は commit 済みです。次のコマンドを 1 回だけ実行してください: cd '${s.wt}' && ${prCmd} ; cd '${s.main}'。gh や git push を直接使わないでください。最後に、実行結果の要点を 1 行で報告してください。`
       : `次の作業を、この順に実行してください。作業場所（${s.wt}）は commit 済みです。作業場所の中で次のコマンドを 1 回だけ実行してください: ${prCmd}。gh や git push を直接使わないでください。最後に、実行結果の要点を 1 行で報告してください。`;
-    const turn2 = `検証が通らなかったので、同じ PR の続きを直してください。まず、このセッションに追加された文脈（フックからの案内）に書かれていた、作業を再開する方法を 1 行で答えてください（無ければ「なし」と答えてください）。新しい作業ブランチは作らないでください。`;
+    const turn2 = `検証が通らなかったので、同じ PR の続きを直してください。作業を始める前に、このセッションに追加された文脈（フックからの案内）に「新しい作業なら無視してかまいません」という文が含まれるかを、「あり」か「なし」の 1 語で答えてください。新しい作業ブランチは作らないでください。`;
     const run = await runClaude(start, s.env, [turn1, turn2]);
     const parsed = parseStreamJson(run.out);
     const records = existsSync(join(s.main, ".git", "brw", "resume.json")) ? JSON.parse(readFileSync(join(s.main, ".git", "brw", "resume.json"), "utf8")).entries : null;
     const recordSession = records ? (records.find((e) => e.branch === BRANCH)?.sessionId ?? null) : undefined;
     const hookLog = existsSync(s.files.hookLog) ? readFileSync(s.files.hookLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+    const upsOfSession = hookLog.filter((e) => e.event === "UserPromptSubmit" && e.session_id === parsed.sessionId);
+    const ctx2 = (() => {
+      try {
+        return JSON.parse(upsOfSession[1]?.out || "{}")?.hookSpecificOutput?.additionalContext ?? null;
+      } catch {
+        return null;
+      }
+    })();
     const judged = judge({
       sessionId: parsed.sessionId,
       recordSession,
       hookLog,
+      ctx2,
       answer2: parsed.results[1] ?? undefined,
       commands2: parsed.bash.map((b) => b.command),
       branchesBefore,
@@ -295,6 +329,9 @@ async function observeOnce(stage) {
       claude: { exit: run.code, turnsDone: run.turnsDone, stderr: run.err, sessionId: parsed.sessionId, results: parsed.results.map((r) => r.slice(0, 300)), unparsed: parsed.unparsed },
       hookFires: hookLog.map((e) => e.event),
       hookLog,
+      ups: upsOfSession.map((e) => ({ cwd: e.cwd, prompt40: e.prompt40, exit: e.exit, returned: Boolean(e.out && e.out.trim()), ctxHead: (() => { try { return (JSON.parse(e.out || "{}")?.hookSpecificOutput?.additionalContext ?? "").slice(0, 60); } catch { return ""; } })() })),
+      ctx2,
+      preToolUse: preToolUseCheck(hookLog, parsed.sessionId),
       bashCalls: parsed.bash.map((b) => ({ command: b.command.slice(0, 600), isError: b.isError, output: (b.output ?? "").slice(0, 160) })),
       writes: { prCreated: posts, receivePacks: pushes },
       items: judged,

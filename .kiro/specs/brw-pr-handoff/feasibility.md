@@ -14,7 +14,7 @@
 
 ## 設計の確認
 
-- 判定: 未通過
+- 判定: 通過
 
 確認日 2026-11-26。根拠の無い前提: なし。
 
@@ -68,3 +68,11 @@
 | `PreToolUse` の入力に `session_id`・`cwd`・`tool_input.command` が含まれ、`session_id` が後続の `UserPromptSubmit` の `session_id` と同じ | 両ホストのフックの入力 | **未確認**（`UserPromptSubmit` の入力は 9.1 の PoC で確認済みだが、`PreToolUse` の `session_id` が同じ値かは未観測）。9.8 で観測する |
 | Codex でも `PreToolUse` が届き、同じ入力の項目を持つ | Codex 0.172.0 のフック | **未確認**（8.4 に PreToolUse の入力の観測はあるが、`session_id` の項目と `UserPromptSubmit` との一致は未観測。Codex は認証が無く、この環境では再観測できない可能性がある） |
 | `PostToolUse` は片付けつきの `brw pr` では届かない（本体で開始） | Claude Code のフック | **実機の観測** 9.6 後半（Claude Code 2.1.329、3 回とも）。このため `PostToolUse` に頼らない設計にした |
+
+### 9.8 の再観測の結果（2026-11-27、Claude Code 2.1.329）
+
+- `PreToolUse` の入力に `session_id`・`cwd`・`tool_input.command` が含まれ、`session_id` は `UserPromptSubmit` と同じ値（6 回中 6 回）。→ 上の表の 2 番目の前提に**根拠が付いた（実機の観測、`tests/real-env/README.md` の 9.8）**。
+- PreToolUse のメモで、片付け後の記録に `sessionId` が付いた（本体で開始・作業場所の中で開始とも 3/3）。ラッパーの記録で、ターン 2 の `UserPromptSubmit` に BRW が案内（`brw resume` を含む）を返した（6 回中 6 回）。モデルが案内の文言を答えに示した確認はできなかったが、`additionalContext` がモデルへ届くことは 9.1 の PoC（両ホスト）で確認済み。
+- Codex の `PreToolUse` の入力: 実機の既存の観測（`tests/real-env/README.md` 8.4。`session_id` に thread_id が渡り、BRW の関連付けと一致した）を根拠とする。今回は認証が無く再観測していない。→ 3 番目の前提に根拠あり（8.4）。
+- 作業場所の中で開始したセッションでは、削除後でも `UserPromptSubmit` が動き案内が返ることがあった（3 回中 3 回）。設計の「動かない」は保証ではなく**最低限の限界**とする（動くときは案内が届く。動かないときは `brw resume` の一覧と手順書）。
+- 根拠の無い前提: なし（Codex の実機での案内の通し確認と、モデルが案内を答えに示した確認は未実施の観測として README に記録）。

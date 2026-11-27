@@ -175,7 +175,7 @@
   - _Boundary: 利用者向け手順_
   - _Depends: 7.4_
   - _Requirements: 1.8, 1.11, 3.10_
-- [ ] 9. 公開後の続きの作業を、削除済みの作業場所から再開できるようにする
+- [x] 9. 公開後の続きの作業を、削除済みの作業場所から再開できるようにする
 - [x] 9.1 実機の前提を、実際のホストで再現できる検証にする
   - 使い捨てのリポジトリで、Claude Code と Codex に `UserPromptSubmit` のフックを登録し、`additionalContext` がモデルへ届くこと、入力に `session_id` と `cwd` が含まれること、作業場所の削除後の同じセッションのフックの発火（本体で開始した場合と作業場所の中で開始した場合）を観測し、再実行できる PoC（`poc/user-prompt-submit.mjs`・`poc/user-prompt-submit-after-remove.mjs`）と結果を残す。結果で feasibility.md の設計の確認・タスク計画の確認を更新する。
   - 2026-11-27 に実施済み（Claude Code 2.1.329・Codex 0.172.0）。到達・入力の項目は両ホストで確認、本体開始は削除後もフックが動き、作業場所内の開始は削除後にフックが動かない。
@@ -204,8 +204,8 @@
   - _Boundary: 利用者向け手順_
   - _Depends: 9.3_
   - _Requirements: 7.1, 7.3, 7.7_
-- [ ] 9.6 続きの再開を統合・実環境で確かめる
-  - _Blocked: 実機の観測で、PostToolUse が届かず記録に sessionId が付かないため UserPromptSubmit の案内（要件 7.4）が届かない。設計の見直しが必要（feasibility.md の追記）。前半の統合試験は完了_
+- [x] 9.6 続きの再開を統合・実環境で確かめる
+  - _(解消: 9.7・9.8 で設計を改訂し再観測。下の実装メモ)_ _Blocked: 実機の観測で、PostToolUse が届かず記録に sessionId が付かないため UserPromptSubmit の案内（要件 7.4）が届かない。設計の見直しが必要（feasibility.md の追記）。前半の統合試験は完了_
   - 一時リポジトリ・bare remote・偽の GitHub 接続で、`brw pr` の片付け → 記録 → `brw resume`（作業場所が push 済みの状態から作り直される）→ 続きの変更 → `brw pr` で既存の PR が再利用され重複しないことを確認する。実機の Claude Code と Codex（使い捨てのリポジトリ・偽の GitHub）で、片付けの後の同じセッションの次の入力で、`UserPromptSubmit` の案内が届き、エージェントが `brw resume` で作業場所を作り直せることを観測する。観測結果を記録し、想定と異なる結果は成功として記録しない。
   - _Boundary: 統合テスト、実環境検証_
   - _Depends: 9.3, 9.4, 9.5_
@@ -216,7 +216,7 @@
   - _Boundary: フック変換、再開の記録_
   - _Depends: 9.2, 9.4_
   - _Requirements: 7.2, 7.4_
-- [ ] 9.8 実機で案内の到達を再観測する
+- [x] 9.8 実機で案内の到達を再観測する
   - 9.6 後半の観測の道具（`tests/real-env/resume-observe.mjs`）で、実機の Claude Code（本体で開始）の同じセッションの次の入力に案内が届くこと（記録の `sessionId` が付き、`UserPromptSubmit` の案内が届く）を再観測し、結果を README に追記する。Codex は認証が無ければ「未観測」のまま記録する。想定と異なる結果は成功として記録せず、一致したら `feasibility.md` の設計の確認を `通過` に戻す。
   - _Boundary: 実環境検証_
   - _Depends: 9.7_
@@ -238,3 +238,4 @@
 - 9.6 前半（2026-11-27、統合試験。レビュー 2 回＋後始末の追加修正は親が確認）: `tests/integration-resume.mjs`（22 件。実際の `brw.mjs`・`agent-hooks.mjs` を spawn、一時リポジトリ・bare remote・偽の gh・試験用 ssh）で、`brw pr`（片付け）→ 記録 → PostToolUse の関連付け → UserPromptSubmit（副作用なし）→ `brw resume`（作り直し）→ 続きの `brw pr`（既存の PR を再利用、POST が増えない・PR 1 件・記録 1 件）→ Codex 形式、を確認。**不具合を発見して修正**: 片付けで `branch.<名>.brwBase`（切り出し元の記録）が消え、再開後の続きの `brw pr` が既定の取り込み先で既存の PR と食い違って止まった（書き込み無しの安全側の停止）→ 再開の記録に任意の `base` を追加（片付けの前に `branchBase` を読んで保存。後方互換、不正値は null）、`brw resume` が作り直したとき brwBase が未設定・記録に有効な base・宣言で認められた名前のときだけ復元（設定後に読み直して確認し、失敗は警告）。設計書（`ResumeEntry`・復元）を更新。要件は変えていない。後半（実機の Claude Code・Codex での観測）は未実施。
 - 9.6 後半（2026-11-27、**差し戻し**）: 実機（Claude Code 2.1.329、Codex は認証なしで未観測）の観測の道具 `tests/real-env/resume-observe.mjs`（単体試験 `tests/resume-observe.mjs`）。結果は `tests/real-env/README.md`。**想定と異なる結果**: 本体で開始したセッションでは、`brw pr`（片付けつき）の Bash 呼び出しが「Exit code 1」と報告され（作業ディレクトリが消えるため）`PostToolUse` が届かず、記録の `sessionId` が空のまま → ターン 2 の `UserPromptSubmit` の案内は 3 回とも出ない（作業場所の再作成はモデルが依頼文から行ったもので、フックの効果ではない）。`; cd <本体>` で戻す形は `PostToolUse` が届くが字句解析が `;` を解釈せず付かない。作業場所の中で開始しても削除後にフックが動くことがあった（3 回中 1 回）。設計（9.4 の `attachSession` が前提）と現実の食い違いのため、`feasibility.md` の設計の確認を `未通過` に戻し、9.6 を Blocked にした。
 - 9.7（2026-11-27、完了。レビュー 3 回で、残る指摘 1 件は**受け入れた限界**として記録）: `resume-record.mjs` の `writeSessionHint`・`readSessionHint`（`<git 共通ディレクトリ>/brw/session-hint.json`、`{version:1, sessionId, dir, at}`。0600・一時ファイル→rename・ロック下で検証→採用→消費を一体化・削除できなければ返さない・読み取りは `O_NOFOLLOW|O_NONBLOCK` で開いた fd を `fstat`（通常ファイル・4 KiB 以内）し上限つきで読む＝FIFO で止まらない。`resume.json` の読み取りも同じ `readCapped`）、`agent-hooks.mjs` の `PreToolUse`（信頼済み `brw pr`・session_id あり・本体が決まるときだけメモを書く。許可・拒否の判定は不変）、`finishUp` が削除前に読んで記録の `sessionId` に入れる（作業場所と同じ・配下の `dir`・10 分以内）。統合試験で `PostToolUse` を一切送らなくても案内が出る。**受け入れた限界（レビューの未解決の指摘）**: 同じ作業場所で複数のセッションの `brw pr` が重なり、後続の呼び出しが拒否・失敗して（または書き込みに失敗して）メモが残ると、別のセッションのメモを採用しうる。呼び出しを識別する手段（ホストの入力・環境）が無く、プロセスの親子を辿る方式は移植性・複雑さの割に得るものが小さいと判断した。**影響は、別セッションへの `brw resume` を勧める文脈の注入だけ（副作用なし。「新しい作業なら無視してよい」を添える。要件 7.5）**。要件 7.6 の「別のセッションなら何も渡さない」の例外的な誤作動になるため、最終検証で利用者へ報告する。
+- 9.8（2026-11-27、完了）: 実機の Claude Code 2.1.329 で再観測（`tests/real-env/README.md` の 9.8 と追記）。**関連付けは解消**（PreToolUse のメモで記録に `sessionId` が付く 6/6、PreToolUse の `session_id` は UserPromptSubmit と同じ 6/6）。ラッパーの記録で、ターン 2 の UserPromptSubmit に BRW が案内を返したのは 6/6。**未確認として残る**: モデルが案内の文言を答えに示した確認（Haiku が問いに答えない回があり確認できず。到達は 9.1 の PoC で確認済み）、Codex の実機（認証なし）。**想定と異なる結果**: 作業場所の中で開始したセッションでも削除後に UserPromptSubmit が動き案内が返った（3/3）ため、設計の「動かない」は保証ではなく最低限の限界とした。`feasibility.md` の設計の確認を `通過` にした（根拠の無い前提なし）。
