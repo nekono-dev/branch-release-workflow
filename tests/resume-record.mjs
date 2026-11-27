@@ -322,6 +322,27 @@ export const runResumeRecordChecks = async (eq) => {
     eq("brw-pr-handoff/9.2 付けた記録の他の項目（時刻・ブランチ）は変わらない", list[0], { ...entryOf("dev/a", { ago: 30 * 1000 }), sessionId: "s1" });
   });
 
+  // ---- attachSession の branch 指定: そのブランチの記録だけを対象にする（9.4）。指定なしの動作は上の試験のまま ----
+  inRepo((dir) => {
+    writeRecord(dir, entryOf("dev/b", { ago: 10 * 1000 }));
+    writeRecord(dir, entryOf("dev/a", { ago: 60 * 1000 }));
+    eq("brw-pr-handoff/9.4 branch を指定すると、新しい別ブランチの記録ではなく、そのブランチの記録に付ける", [attachSession(dir, "s1", NOW, { branch: "dev/a" }), readRecords(dir).map((e) => [e.branch, e.sessionId])], [{ ok: true, attached: true }, [["dev/a", "s1"], ["dev/b", null]]]);
+  });
+  inRepo((dir) => {
+    writeRecord(dir, entryOf("dev/b", { ago: 10 * 1000 }));
+    const before = readOrNull(fileOf(dir));
+    eq("brw-pr-handoff/9.4 branch に対応する記録が無ければ、別ブランチの新しい記録には付けず attached:false", attachSession(dir, "s1", NOW, { branch: "dev/zz" }), { ok: true, attached: false });
+    eq("brw-pr-handoff/9.4 branch 指定で対象が無いときは記録の内容を変えない", readOrNull(fileOf(dir)), before);
+  });
+  inRepo((dir) => {
+    writeRecord(dir, entryOf("dev/a", { ago: 3 * MIN }));
+    eq("brw-pr-handoff/9.4 branch 指定でも 2 分を超えた記録には付けない", attachSession(dir, "s1", NOW, { branch: "dev/a" }), { ok: true, attached: false });
+  });
+  inRepo((dir) => {
+    writeRecord(dir, entryOf("dev/a", { ago: 10 * 1000, sessionId: "sx" }));
+    eq("brw-pr-handoff/9.4 branch 指定でも sessionId が既にある記録は対象外", attachSession(dir, "s1", NOW, { branch: "dev/a" }), { ok: true, attached: false });
+  });
+
   inRepo((dir) => {
     writeRecord(dir, entryOf("dev/a", { ago: 3 * MIN }));
     const before = readOrNull(fileOf(dir));

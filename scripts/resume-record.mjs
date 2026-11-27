@@ -12,6 +12,10 @@ import { classifyBranch, git, loadConfig } from "./lib.mjs";
 import { acquire, remoteNameOf } from "./publish.mjs";
 import { mainWorktreeOf, worktreeList } from "./work-remainder.mjs";
 
+// 片付け後の案内（pr-flow の finishUp が出す「続きの再開」の行）の頭。出力とフックの判定（Codex の文字列の成功）が同じ文字列を使う
+export const RESUME_LINE_HEAD = "続きの再開: ";
+// 手動の案内の形（brw resume の行）の後ろの注記。pr-flow の出力と、フックの行全体の一致の判定が同じ文言を使う
+export const RESUME_MANUAL_NOTE = "（BRW の実行方法は利用している環境に従う）";
 const VERSION = 1;
 // 記録の上限（先頭が最新）
 export const MAX_RECORDS = 10;
@@ -255,11 +259,13 @@ export function resumableFor(cwd, sessionId, now) {
 /**
  * 直近 2 分以内に書かれ sessionId が null の記録のうち最新の 1 件に、sessionId を付けて保存する。
  * 対象が無ければ何も書かず {ok:true, attached:false}。保存するときは検証に通った記録だけを残す。
+ * branch を指定したときは、そのブランチの記録だけを対象にする（9.4。案内の行から取ったブランチ名で絞る）。
  * @returns {{ok: true, attached: boolean} | {ok: false, message: string}}
  */
-export function attachSession(main, sessionId, now, { lockWaitMs = LOCK_WAIT_MS } = {}) {
+export function attachSession(main, sessionId, now, { lockWaitMs = LOCK_WAIT_MS, branch } = {}) {
   try {
     if (!isSafeSession(sessionId) || sessionId === null) return fail("セッションの識別子が不正です。");
+    if (branch !== undefined && !isSafeBranch(branch)) return fail("ブランチ名が不正です。");
     const nowMs = now instanceof Date ? now.getTime() : NaN;
     if (!Number.isFinite(nowMs)) return fail("現在時刻が不正です。");
     const p = pathsOf(main);
@@ -275,6 +281,7 @@ export function attachSession(main, sessionId, now, { lockWaitMs = LOCK_WAIT_MS 
       let targetMs = -Infinity;
       list.forEach((e, i) => {
         if (e.sessionId !== null) return;
+        if (branch !== undefined && e.branch !== branch) return;
         const at = timeOf(e.at);
         const diff = nowMs - at;
         if (diff < 0 || diff > ATTACH_WINDOW_MS) return;

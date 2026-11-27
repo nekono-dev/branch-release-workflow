@@ -13,7 +13,7 @@
 // Stop は読み取りだけで、準備済みで未公開の作業があるときに、同じ作業 ID での再試行か中断を block の応答で案内する。
 //
 // 実行ファイルとしても使える: `node scripts/agent-hooks.mjs <claude|codex> <イベント名>` が標準入力の JSON を読み、応答を標準出力へ書く。
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BRW_RUN } from "./brw-cmd.mjs";
@@ -22,11 +22,15 @@ import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoR
 import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
-import { declaredNoPushOf, remainderGuidance, remaindersOf } from "./work-remainder.mjs";
+import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, attachSession as attachResumeRecord, resumableFor } from "./resume-record.mjs";
+import { declaredNoPushOf, mainWorktreeOf, remainderGuidance, remaindersOf } from "./work-remainder.mjs";
 
 const PREFIX = "[branch-release-workflow] ";
 /** ホストごとに扱うイベント。PostToolUse（関連付け）と Stop（案内）は 6.2 で扱う。 */
-export const HOST_EVENTS = { claude: ["PreToolUse", "PostToolUse", "Stop"], codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop"] };
+export const HOST_EVENTS = {
+  claude: ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"],
+  codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"],
+};
 const BRW_CLI = join(dirname(fileURLToPath(import.meta.url)), "brw.mjs");
 // 信頼済み BRW の CLI の実体（シンボリックリンクを解決した絶対パス）。読めなければ信頼できる呼び出しは無い
 const BRW_CLI_REAL = (() => { try { return realpathSync(BRW_CLI); } catch { return null; } })();
@@ -917,15 +921,171 @@ function stopGuidance(input) {
   }
 }
 
+// ---- 続きの作業の案内（UserPromptSubmit）と再開の関連付け（PostToolUse の brw pr の成功）（brw-pr-handoff 9.4） ----
+
+/** 案内の文字数の上限。モデルへ渡す文脈なので短く保つ。 */
+const RESUME_MAX = 500;
+
+/**
+ * 表示や案内文を乱す文字（制御・書式・行区切り・私用・未割り当て・代理）を除き、空白を 1 つにまとめる。
+ * 空白の扱いを先に決めるため、改行や行区切りは空白になる。\p 指定で書くため、ソースに生の文字は入らない。
+ */
+export function harmlessText(s) {
+  return String(s).replace(/\s+/g, " ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}]/gu, "").replace(/ +/g, " ").trim();
+}
+
+/**
+ * 本体（メインの worktree）の場所。実行先（cwd・cd 先）のリポジトリの本体を使う。
+ * 実行先が Git のリポジトリでないときは、CLAUDE_PROJECT_DIR が <本体>/.claude/worktrees/<別名> の形のときの本体を使う。
+ * ただし実行先が消えている（削除済みの作業場所）ときは、その実行先が導いた本体の配下（<本体>/ で始まり、.. を含まない）のときだけ使う。
+ * どれにも当てはまらなければ null（付けない側に倒す）。読み取りだけを行う。UserPromptSubmit と PostToolUse（brw pr）が共通で使う。
+ * strict（PostToolUse）のときは、存在する Git の外の実行先からは導出しない（消えている実行先の導出だけを認める）。
+ */
+function mainOfStart(start, { strict = false } = {}) {
+  const direct = start ? mainWorktreeOf(start) : null;
+  if (direct) return direct;
+  if (strict && (!start || existsSync(start))) return null;
+  const pd = process.env.CLAUDE_PROJECT_DIR;
+  const m = typeof pd === "string" ? /^(.+)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+$/.exec(pd) : null;
+  if (!m) return null;
+  if (start && !existsSync(start)) {
+    if (start.split(/[\\/]/).includes("..") || !resolve(start).startsWith(resolve(m[1]) + sep)) return null;
+  }
+  return mainWorktreeOf(m[1]);
+}
+
+/**
+ * 案内の文面。ブランチ名は無害化して入れる。BRW の実行形（絶対パス）で長すぎるときは短い形（brw）にし、
+ * それでも上限を超えるなら null（案内しない側に倒す）。
+ */
+function resumeTextOf(branch) {
+  const b = harmlessText(branch);
+  const make = (run) => `${PREFIX}作業ブランチ ${b} の作業場所は削除済みです。この PR の続きの作業（検証のやり直し・レビューの指摘への対応など）なら \`${run} resume ${b}\` で作業場所を作り直してください。新しい作業なら \`${run} create <名前>\` を使ってください（新しい依頼なら、この案内は無視してかまいません）。`;
+  for (const run of [BRW_RUN, "brw"]) {
+    const text = make(run);
+    if (text.length <= RESUME_MAX) return text;
+  }
+  return null;
+}
+
+/**
+ * UserPromptSubmit: 続きの作業の案内を文脈（additionalContext）として返す。
+ * 対象が無い・判定できない・例外のときは何も返さない。読み取りだけを行い、作業場所・記録・通信は変えない（作業場所は brw resume が作る）。
+ */
+function resumeGuidanceOf(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev) return null;
+    const session = sessionOf(ev);
+    if (!session) return null;
+    const start = mainOfStart(cwdOf(ev));
+    if (!start) return null;
+    const entry = resumableFor(start, session, new Date());
+    if (!entry) return null;
+    const text = resumeTextOf(entry.branch);
+    if (text === null) return null;
+    return { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: text } };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 信頼済みの `node <brw.mjs の実体> pr …` の呼び出しか。オプションの形は問わない（失敗した実行は成功の判定で外す）。
+ * 戻り値: null（pr ではない・信頼できない）| { dir }
+ */
+function brwPrCallOf(command, cwd) {
+  const cd = stripCd(command);
+  if (!cd.ok) return null;
+  const w = scanWords(cd.rest);
+  if (!w || w[0] !== "node" || w[2] !== "pr") return null;
+  const dir = cd.dir === null ? cwd : resolve(cwd, cd.dir);
+  if (w[1] === undefined || !isTrustedCli(resolve(dir, w[1]))) return null;
+  return { dir };
+}
+
+/** brw pr の出力の本文。Claude のオブジェクトは既存の successOutput（成功のときだけ本文）、Codex の文字列はそのまま。 */
+const prOutputText = (tr) => (typeof tr === "string" ? tr : successOutput(tr));
+
+/** 案内の行の見出し（末尾の空白を除いた RESUME_LINE_HEAD）。本文が空の行も見出しで判定する。 */
+const RESUME_HEADING = RESUME_LINE_HEAD.trimEnd();
+/** 正規表現の文字を文字どおりに一致させる。 */
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// pr-flow が生成する 2 形式の行全体（本文の後ろに余計な文字があれば一致しない）。CLI の部分は shq で単一引用符に入る
+const RESUME_NODE_RE = /^node '(?:[^']|'\\'')*' resume ([\w./-]+|'(?:[^']|'\\'')*')$/;
+const RESUME_MANUAL_RE = new RegExp(`^brw resume \`([^\`]+)\`${escapeRe(RESUME_MANUAL_NOTE)}$`);
+
+/**
+ * 案内の行（見出しで始まる 1 行）からブランチ名を取り出す。
+ * 行全体が pr-flow の生成する 2 形式のどちらかに一致するときだけ取り出す。見出しだけ・末尾に余計な本文のある行は null。
+ */
+function branchOfResumeLine(line) {
+  if (!line.startsWith(RESUME_LINE_HEAD)) return null;
+  const rest = line.slice(RESUME_LINE_HEAD.length);
+  const manual = RESUME_MANUAL_RE.exec(rest);
+  if (manual) return manual[1];
+  const node = RESUME_NODE_RE.exec(rest);
+  if (!node) return null;
+  const v = node[1];
+  return v.startsWith("'") ? v.slice(1, -1).replace(/'\\''/g, "'") : v;
+}
+
+/**
+ * brw pr（片付けの後）の出力から、案内の行（見出し「続きの再開:」）のブランチ名を 1 つ取り出す。
+ * エラーの行があるとき、見出しの行が無いとき、見出しの行のうち 1 つでも取り出せないとき（本文が空を含む）、
+ * ブランチが 2 種類以上のときは null（付けない側に倒す）。
+ */
+function resumeBranchOfPrOutput(text) {
+  const ls = text.split("\n").map((l) => l.trim());
+  if (ls.some((l) => l.startsWith("エラー:"))) return null;
+  const lines = ls.filter((l) => l.startsWith(RESUME_HEADING));
+  if (lines.length === 0) return null;
+  const names = new Set();
+  for (const l of lines) {
+    const b = branchOfResumeLine(l);
+    if (b === null) return null;
+    names.add(b);
+  }
+  return names.size === 1 ? [...names][0] : null;
+}
+
+/**
+ * PostToolUse: 信頼済みの brw pr が成功したとき、直近 2 分以内の再開の記録（sessionId が空の最新 1 件）にセッションを付ける。
+ * 成功の根拠は、出力に案内の行があり、エラーの行が無いこと（Claude のオブジェクトは従来の成功判定も満たすこと）。
+ * 付けるのは案内の行のブランチの記録だけ。本体は cwd（削除済みなら CLAUDE_PROJECT_DIR の導出）で決め、決まらなければ付けない。出力の内容では本体を決めない。応答は返さず、失敗しても何もしない。
+ */
+function attachResumeSession(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.tool_name !== "Bash" || typeof ev.tool_input?.command !== "string") return;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return;
+    const call = brwPrCallOf(ev.tool_input.command, cwd);
+    if (!call) return;
+    const text = prOutputText(ev.tool_response);
+    if (text === null) return;
+    const branch = resumeBranchOfPrOutput(text);
+    if (branch === null) return;
+    const main = mainOfStart(call.dir, { strict: true });
+    if (!main) return;
+    attachResumeRecord(main, session, new Date(), { branch });
+  } catch {
+    // 関連付けに失敗しても、ホストの処理は止めない（記録されないだけ）
+  }
+}
+
 /** ホストのイベントを処理し、応答（オブジェクトまたは null）を返す。 */
 export function handleHook(host, event, input) {
   if (!HOST_EVENTS[host]?.includes(event)) return null;
   // PostToolUse は関連付けだけを行い、応答は返さない。Stop は Claude・Codex とも block の形で案内する
   if (event === "PostToolUse") {
     recordWorkStart(input);
+    attachResumeSession(input);
     return null;
   }
   if (event === "Stop") return stopGuidance(input);
+  if (event === "UserPromptSubmit") return resumeGuidanceOf(input);
   return responseOf(host, event, decideHook(host, event, input));
 }
 

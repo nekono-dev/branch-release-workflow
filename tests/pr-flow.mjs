@@ -8,7 +8,7 @@ import { BRW_RUN } from "../scripts/brw-cmd.mjs";
 import { runPr } from "../scripts/pr-flow.mjs";
 import { bodyPathOf, UNFILLED_MARK } from "../scripts/pr-template.mjs";
 import * as publish from "../scripts/publish.mjs";
-import { readRecords } from "../scripts/resume-record.mjs";
+import { RESUME_LINE_HEAD, readRecords } from "../scripts/resume-record.mjs";
 import { createFakeGitHub } from "./support/fake-github.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
@@ -249,6 +249,7 @@ export const runPrFlowChecks = async (eq) => {
       const text = out.join("\n");
       const wtCli = join(t.wt, "scripts", "brw.mjs");
       const mainCli = join(t.dir, "scripts", "brw.mjs");
+      eq(`brw-pr-handoff/9.4 片付けの実出力（本体の複製 ${withMain}）に、共有の案内の行の頭（RESUME_LINE_HEAD）で始まる行がある`, text.split("\n").some((l) => l.trimStart().startsWith(RESUME_LINE_HEAD)), true);
       if (withMain) eq("brw-pr-handoff/4.9 作業場所の中の CLI で片付けたとき、本体に複製があれば、案内の実行形は実在する本体の brw.mjs を指す", [code, text.includes(`node '${mainCli}' resume dev/foo`), existsSync(mainCli), text.includes(wtCli), branchExists(t)], [0, true, true, false, false]);
       else eq("brw-pr-handoff/4.9 作業場所の中の CLI で片付けたとき、本体に複製が無ければ、消えた作業場所のパスを示さず、利用している環境に従う手動の案内にする", [code, text.includes(wtCli), text.includes("利用している環境に従う"), text.includes("brw resume `dev/foo`"), branchExists(t)], [0, false, true, true, false]);
       t.cleanup();

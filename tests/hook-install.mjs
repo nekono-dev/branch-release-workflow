@@ -92,7 +92,7 @@ export const runHookInstallChecks = async (eq) => {
     try {
       const first = installCodexHooks({ repoDir: r.dir, launcherPath: ODD });
       const doc = readJson(codexFile(r.dir));
-      eq("hook-install/6.3 Codex の新規導入は信頼待ちの untrusted を返し、4 イベントを登録する", [first.status, first.trust, Object.keys(doc.hooks).sort()], ["untrusted", "review-required", ["PermissionRequest", "PostToolUse", "PreToolUse", "Stop"]]);
+      eq("hook-install/6.3 Codex の新規導入は信頼待ちの untrusted を返し、5 イベントを登録する（9.4 で UserPromptSubmit を追加）", [first.status, first.trust, Object.keys(doc.hooks).sort()], ["untrusted", "review-required", ["PermissionRequest", "PostToolUse", "PreToolUse", "Stop", "UserPromptSubmit"]]);
       eq("hook-install/6.3 ランチャーは実体の絶対パスを空白と引用符を含めて 1 語に埋め込む", doc.hooks.PreToolUse[0].hooks[0].command, "node '/opt/brw'\\''s clone/scripts/agent-hooks.mjs' codex PreToolUse");
       eq("hook-install/6.3 Stop は matcher を持たず、PreToolUse は Bash と mcp__ の 2 件に分かれる", [doc.hooks.Stop?.[0]?.matcher, doc.hooks.PreToolUse?.map((g) => g.matcher)], [undefined, ["Bash", "mcp__.*"]]);
       const before = readFileSync(codexFile(r.dir), "utf8");
@@ -216,7 +216,7 @@ export const runHookInstallChecks = async (eq) => {
   // ---- 純粋な変換（mergeCodexHooks）----
   {
     const m = mergeCodexHooks({}, LAUNCHER);
-    eq("hook-install/6.3 空の設定へのマージは 6 件の追加を報告する", [m.changes.length, m.blocked ?? null], [6, null]);
+    eq("hook-install/6.3 空の設定へのマージは 7 件の追加を報告する（9.4 で UserPromptSubmit を追加）", [m.changes.length, m.blocked ?? null], [7, null]);
   }
 
   // ---- 導入スクリプト（install-codex.mjs --repo）----

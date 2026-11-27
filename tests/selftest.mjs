@@ -59,6 +59,7 @@ import { runBasePrObserveChecks } from "./base-pr-observe.mjs";
 import { runRealEnvCleanupChecks } from "./real-env-cleanup.mjs";
 import { runResumeRecordChecks, runResumeRecordStrictChecks } from "./resume-record.mjs";
 import { runResumeListChecks } from "./resume-list.mjs";
+import { runUserPromptSubmitChecks } from "./user-prompt-submit.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -647,6 +648,9 @@ await runAgentHookChecks(eq);
 
 // ---- 作業 ID の関連付けと終了時の案内（brw-enforcement 6.2） ----
 await runAgentHookSessionChecks(eq);
+
+// ---- 再開の案内（UserPromptSubmit）と登録・診断（brw-pr-handoff 9.4） ----
+await runUserPromptSubmitChecks(eq);
 
 // ---- フックの登録と導入状態（brw-enforcement 6.3） ----
 await runHookInstallChecks(eq);

@@ -12,7 +12,7 @@ import * as publish from "./publish.mjs";
 import { runPublish, runWork } from "./publish-cli.mjs";
 import { basePrGuidance, bodyPathOf, UNFILLED_MARK } from "./pr-template.mjs";
 import { BRW_CLI_PATH } from "./brw-cmd.mjs";
-import { writeRecord } from "./resume-record.mjs";
+import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, writeRecord } from "./resume-record.mjs";
 import { plainPath, visible } from "./work-remainder.mjs";
 import { tidyChanges } from "./tidy.mjs";
 
@@ -268,9 +268,9 @@ function cliPathFor(cli, worktree, main) {
  */
 function resumeLine(branch, main, worktree) {
   const cli = cliPathFor(BRW_CLI_PATH, worktree, main);
-  if (!plainPath(branch) || cli === null || !plainPath(cli)) return `  続きの再開: brw resume ${visible(branch)}（BRW の実行方法は利用している環境に従う）`;
+  if (!plainPath(branch) || cli === null || !plainPath(cli)) return `  ${RESUME_LINE_HEAD}brw resume ${visible(branch)}${RESUME_MANUAL_NOTE}`;
   const word = /^[\w./-]+$/.test(branch) ? branch : shq(branch);
-  return `  続きの再開: node ${shq(cli)} resume ${word}`;
+  return `  ${RESUME_LINE_HEAD}node ${shq(cli)} resume ${word}`;
 }
 
 /** 作業場所が消えた後に移る本体の案内（cd のコマンド）。表示に使えないパスは、コマンドを示さない。 */

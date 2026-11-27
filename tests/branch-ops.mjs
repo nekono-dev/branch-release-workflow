@@ -77,7 +77,7 @@ export const runBranchOpsChecks = async (eq) => {
       const wt = join(t.dir, ".claude/worktrees/dev-hooked");
       const wtd = (trust) => diagnoseHooks({ pluginRoot: dirname(dirname(BRW)), codexRepoDir: wt, host: "codex", codexTrust: trust, env: {} }).routes.filter((x) => x.environment === "local").map((x) => x.status);
       eq("branch-ops/8.4 親に登録があれば create は worktree の .codex/ を有効化して案内する（hooks.json は作らない。診断は信頼済みで active・未信頼で untrusted）",
-        [made.status, existsSync(join(wt, ".codex")), existsSync(join(wt, ".codex/hooks.json")), /有効にしました/.test(made.stdout), wtd("trusted"), wtd("untrusted")], [0, true, false, true, Array(4).fill("active"), Array(4).fill("untrusted")]);
+        [made.status, existsSync(join(wt, ".codex")), existsSync(join(wt, ".codex/hooks.json")), /有効にしました/.test(made.stdout), wtd("trusted"), wtd("untrusted")], [0, true, false, true, Array(5).fill("active"), Array(5).fill("untrusted")]);
       gitOut(t.dir, "branch", "dev/loc2", "develop");
       const res = brw(t.dir, ["resume", "dev/loc2"], env);
       eq("branch-ops/8.4 resume が作る worktree も有効化される", [res.status, existsSync(join(t.dir, ".claude/worktrees/dev-loc2/.codex"))], [0, true]);

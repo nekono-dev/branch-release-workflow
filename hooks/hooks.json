@@ -49,6 +49,16 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-hooks.mjs\" claude UserPromptSubmit"
+          }
+        ]
+      }
     ]
   }
 }

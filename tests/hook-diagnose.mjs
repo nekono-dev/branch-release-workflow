@@ -107,14 +107,14 @@ export const runHookDiagnoseChecks = async (eq) => {
       const local = (res) => res.routes.filter((x) => x.environment === "local");
       const none = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "trusted" });
       eq("hook-diagnose/8.4 親が登録済みでも、.codex/ の無い worktree は全イベント not-installed（worktree-not-registered）",
-        local(none).map((x) => [x.status, x.reasonCode]), Array(4).fill(["not-installed", "worktree-not-registered"]));
+        local(none).map((x) => [x.status, x.reasonCode]), Array(5).fill(["not-installed", "worktree-not-registered"]));
       const parentRes = diagnoseHooks({ pluginRoot: root, codexRepoDir: r.dir, env: {}, host: "codex", codexTrust: "trusted" });
-      eq("hook-diagnose/8.4 親チェックアウトの診断は従来どおり active", local(parentRes).map((x) => x.status), Array(4).fill("active"));
+      eq("hook-diagnose/8.4 親チェックアウトの診断は従来どおり active", local(parentRes).map((x) => x.status), Array(5).fill("active"));
       installWorktreeHooks({ parentDir: r.dir, worktreeDir: wt });
       const own = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "trusted" });
       const unt = diagnoseHooks({ pluginRoot: root, codexRepoDir: wt, env: {}, host: "codex", codexTrust: "untrusted" });
       eq("hook-diagnose/8.4 worktree を有効化すれば、親の登録に従い信頼済みは active・未信頼は untrusted",
-        [local(own).map((x) => x.status), local(unt).map((x) => x.status)], [Array(4).fill("active"), Array(4).fill("untrusted")]);
+        [local(own).map((x) => x.status), local(unt).map((x) => x.status)], [Array(5).fill("active"), Array(5).fill("untrusted")]);
     } finally {
       r.cleanup();
     }
@@ -147,7 +147,7 @@ export const runHookDiagnoseChecks = async (eq) => {
 
       const trusted = diagnoseHooks({ pluginRoot: root, codexRepoDir: codex.dir, env: {}, codexTrust: "trusted" });
       eq("hook-diagnose/6.4 信頼済みと確認できた Codex のローカル経路は稼働と表示する",
-        ["PreToolUse", "PermissionRequest", "PostToolUse", "Stop"].map((e) => statusOf(trusted, "codex", "local", e)?.[0]), ["active", "active", "active", "active"]);
+        ["PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "UserPromptSubmit"].map((e) => statusOf(trusted, "codex", "local", e)?.[0]), ["active", "active", "active", "active", "active"]);
       const untrusted = diagnoseHooks({ pluginRoot: root, codexRepoDir: codex.dir, env: {}, codexTrust: "untrusted" });
       eq("hook-diagnose/6.4 未信頼と確認できた Codex のローカル経路は未信頼と表示する", statusOf(untrusted, "codex", "local", "PreToolUse"), ["untrusted", "review-required"]);
 
@@ -169,7 +169,7 @@ export const runHookDiagnoseChecks = async (eq) => {
         cloud.map((r) => [r.host, r.status, r.reasonCode, r.managedHooksRequired]).every((x) => x[1] === "unsupported" && x[2] === "managed-hooks-required" && x[3] === true),
         true);
       eq("hook-diagnose/6.4 同じ導入でもクラウドとローカルは別の状態になる（区別できる）",
-        [statusOf(res, "claude", "cloud", "PreToolUse")?.[0] !== statusOf(res, "claude", "local", "PreToolUse")?.[0], cloud.length], [true, 7]);
+        [statusOf(res, "claude", "cloud", "PreToolUse")?.[0] !== statusOf(res, "claude", "local", "PreToolUse")?.[0], cloud.length], [true, 9]);
     } finally {
       codex.cleanup();
     }
@@ -183,7 +183,7 @@ export const runHookDiagnoseChecks = async (eq) => {
       const a = diagnoseHooks({ pluginRoot: root, codexRepoDir: codex.dir, env: {}, commandHooks: false, host: "codex" });
       const localA = (a.routes ?? []).filter((r) => r.environment === "local");
       eq("hook-diagnose/6.4 コマンドフックを使えないローカル実行環境は非対応で、管理対象フックが必要と表示する",
-        [localA.length, localA.every((r) => r.status === "unsupported" && r.reasonCode === "command-hooks-unavailable" && r.managedHooksRequired === true)], [4, true]);
+        [localA.length, localA.every((r) => r.status === "unsupported" && r.reasonCode === "command-hooks-unavailable" && r.managedHooksRequired === true)], [5, true]);
       const b = diagnoseHooks({ pluginRoot: root, codexRepoDir: codex.dir, env: {}, featuresText: "[features]\nhooks = false\n", host: "codex" });
       eq("hook-diagnose/6.4 設定で hooks が無効なら非対応と表示する（管理対象の要否は別）",
         [statusOf(b, "codex", "local", "PreToolUse"), routeOf(b, "codex", "local", "PreToolUse")?.managedHooksRequired], [["unsupported", "hooks-disabled"], false]);
