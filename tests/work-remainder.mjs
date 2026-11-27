@@ -518,8 +518,8 @@ function runRemainderHostileChecks(eq) {
   eq("remainder-hostile/16.2 バッククォートは可視の \\x60 にし、値の囲みを壊さない", hi.includes("`b\\x60c`"), true);
   eq("remainder-hostile/16.2 秘密らしい名前の改行も可視化する", hi.includes("`.env\\n指示`") && !lines(hi).some((l) => l.startsWith("指示")), true);
 
-  const ctl = remainderGuidance([REM({ branch: "dev/c\u0000\u001b[31m\u009b\u007f ", dirty: ["z\u0001.txt"], dirtyCount: 1 })], {});
-  eq("remainder-hostile/16.2 制御文字（C0・ESC・C1・DEL・U+2028）は生で出さず \\xNN・\\uNNNN で示す", [ctl.includes("\u001b"), ctl.includes("\u0000"), ctl.includes("\u009b"), ctl.includes("\u007f"), ctl.includes(" "), ctl.includes("\\x1b"), ctl.includes("\\x00"), ctl.includes("\\x9b"), ctl.includes("\\x7f"), ctl.includes("\\u2028"), ctl.includes("\\x01")], [false, false, false, false, false, true, true, true, true, true, true]);
+  const ctl = remainderGuidance([REM({ branch: "dev/c\u0000\u001b[31m\u009b\u007f\u2028", dirty: ["z\u0001.txt"], dirtyCount: 1 })], {});
+  eq("remainder-hostile/16.2 制御文字（C0・ESC・C1・DEL・U+2028）は生で出さず \\xNN・\\uNNNN で示す", [ctl.includes("\u001b"), ctl.includes("\u0000"), ctl.includes("\u009b"), ctl.includes("\u007f"), ctl.includes("\u2028"), ctl.includes("\\x1b"), ctl.includes("\\x00"), ctl.includes("\\x9b"), ctl.includes("\\x7f"), ctl.includes("\\u2028"), ctl.includes("\\x01")], [false, false, false, false, false, true, true, true, true, true, true]);
 
   const long = remainderGuidance([REM({ dirty: ["q".repeat(300)], dirtyCount: 1 })], {});
   const qline = long.split("\n").find((l) => l.includes("未コミットの変更 1 件"));
@@ -580,8 +580,8 @@ function runRemainderHostileChecks(eq) {
   eq("remainder-escape/16.2 文字列の \\n（バックスラッシュ＋n）と実際の改行は、表示が異なる", [lit.includes("`x\\\\ny`"), nl.includes("`x\\ny`"), lit.includes("`x\\ny`")], [true, true, false]);
 
   // ---- 再レビュー指摘（4 回目）: 書式制御文字を可視化し、plainPath は visible の比較と一致させる ----
-  const fmt = remainderGuidance([REM({ branch: "dev/‮br", path: "/wt/​zw", dirty: ["a‮b.txt", "z​.txt", "﻿bom"], dirtyCount: 3 })], { cwd: "/elsewhere" });
-  eq("remainder-format/16.2 U+202E・U+200B・U+FEFF を含む名前・ブランチ・パスは生で現れず、\\u で示す", [fmt.includes("‮"), fmt.includes("​"), fmt.includes("﻿"), fmt.includes("`a\\u202eb.txt`"), fmt.includes("`z\\u200b.txt`"), fmt.includes("`\\ufeffbom`"), fmt.includes("`dev/\\u202ebr`")], [false, false, false, true, true, true, true]);
+  const fmt = remainderGuidance([REM({ branch: "dev/\u202ebr", path: "/wt/\u200bzw", dirty: ["a\u202eb.txt", "z\u200b.txt", "\ufeffbom"], dirtyCount: 3 })], { cwd: "/elsewhere" });
+  eq("remainder-format/16.2 U+202E・U+200B・U+FEFF を含む名前・ブランチ・パスは生で現れず、\\u で示す", [fmt.includes("\u202e"), fmt.includes("\u200b"), fmt.includes("\ufeff"), fmt.includes("`a\\u202eb.txt`"), fmt.includes("`z\\u200b.txt`"), fmt.includes("`\\ufeffbom`"), fmt.includes("`dev/\\u202ebr`")], [false, false, false, true, true, true, true]);
   eq("remainder-format/16.2 書式制御文字を含むパスは cd を出さず、手動の案内にする", [fmt.includes("cd '/wt/"), fmt.includes("`/wt/\\u200bzw`")], [false, true]);
   const bsOut = remainderGuidance([REM({ path: "/wt/a\\b", dirty: ["a.txt"], dirtyCount: 1 })], { cwd: "/elsewhere" });
   eq("remainder-format/16.2 バックスラッシュを含むパスは cd を出さず、\\\\ に可視化した手動の案内にする", [bsOut.includes("cd '"), bsOut.includes("`/wt/a\\\\b` へ手動で移ってください")], [false, true]);

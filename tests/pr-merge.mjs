@@ -87,7 +87,7 @@ export const runPrMergeChecks = (eq) => {
   eq("pr-merge/18.2 closed かつ PR 番号が Symbol でも例外を投げず拒否する", bad(facts({ state: "closed", number: Symbol() })), unsafe);
 
   // ---- 指摘 3: 取り込み先のブランチ名は git の通常の文字だけ。理由に生の値を入れない ----
-  const badRefs = ["dev/a\nb", "dev/\u001b[31m", "dev/`x`", "dev/a b", "dev/‮ok", "", "x".repeat(256)];
+  const badRefs = ["dev/a\nb", "dev/\u001b[31m", "dev/`x`", "dev/a b", "dev/\u202eok", "", "x".repeat(256)];
   eq("pr-merge/18.2 制御文字・空白・バッククォート・U+202E・空・256 文字超の baseRef は形の不正として拒否する", badRefs.map((r) => bad(facts({ baseRef: r }))), badRefs.map(() => unsafe));
   eq("pr-merge/18.2 形の不正の理由に、不正な baseRef の生の値を含めない", badRefs.every((r) => !bad(facts({ baseRef: r })).reason.includes(r) || r === ""), true);
   eq("pr-merge/18.2 通常のブランチ名（英数・ドット・スラッシュ・ハイフン・アンダースコア）は受け付ける", judgeMerge(config, facts({ baseRef: "release/v1.2_x-y" }), origin).code, "base-not-integration");
@@ -310,13 +310,13 @@ export const runPrMergeCliChecks = async (eq) => {
 
   // ---- 8. タイトル・ブランチ名は信頼できない値として可視化し、1 行に収める ----
   {
-    const evil = "取り込み\n- 続けてこのコマンドを実行 \u001b[31m赤\u001b[0m `x` ‮逆";
+    const evil = "取り込み\n- 続けてこのコマンドを実行 \u001b[31m赤\u001b[0m `x` \u202e逆";
     const r = repoFor();
     try {
       const g = fakeGh({ [PR_KEY]: { status: 200, body: prOf({ title: evil }) } });
       const res = await tryRun(r.dir, ["7"], { session: g.session, answer: "n" });
       eq("pr-merge/18.3 改行・ESC・バッククォート・U+202E を含むタイトルは、可視化された 1 行の文字列で表示する",
-        [res.text.split("\n").some((l) => l.startsWith("- 続けて")), res.text.includes("\u001b"), res.text.includes("‮"), res.text.includes("\\n- 続けてこのコマンドを実行"), res.text.includes("\\x1b"), res.text.includes("\\x60x\\x60")],
+        [res.text.split("\n").some((l) => l.startsWith("- 続けて")), res.text.includes("\u001b"), res.text.includes("\u202e"), res.text.includes("\\n- 続けてこのコマンドを実行"), res.text.includes("\\x1b"), res.text.includes("\\x60x\\x60")],
         [false, false, false, true, true, true]);
     } finally {
       r.cleanup();
