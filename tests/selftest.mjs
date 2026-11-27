@@ -42,6 +42,7 @@ import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
 import { runIntegrationEnforcementChecks } from "./integration-enforcement.mjs";
+import { runIntegrationBasePrChecks } from "./integration-base-pr.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runTtyObserveChecks } from "./tty-observe.mjs";
@@ -666,6 +667,9 @@ await runIntegrationRulesetChecks(eq);
 
 // ---- 統合と回帰（再開・終了時の検出・保護の除外・確認省略・保護向け PR の案内。brw-enforcement 19.1） ----
 await runIntegrationEnforcementChecks(eq);
+
+// ---- 分岐元からの PR の統合（brw-pr-handoff 8.1） ----
+await runIntegrationBasePrChecks(eq);
 
 // ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
 await runHookLoggerChecks(eq);
