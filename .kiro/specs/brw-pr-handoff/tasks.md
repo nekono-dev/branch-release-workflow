@@ -103,13 +103,13 @@
   - 資料から一連の手順が読み取れ、評価ケースが定義の検証を通る。
   - _Requirements: 6.5_
 
-- [ ] 5. 実機の前提を、実際の git と GitHub で再現できる検証にする
+- [x] 5. 実機の前提を、実際の git と GitHub で再現できる検証にする
 - [x] 5.1 分岐元の取り込みと差の判定を、実際の git で再現する検証を用意する
   - bare remote の一時リポジトリで、分岐元が最新・リモートが先行・ローカルが先行・分岐・保護ブランチと差なし・未コミットの変更あり（衝突する場合としない場合）の各状態を作り、`fetch`・`merge --ff-only`・先行の数・保護ブランチとの差の数の結果を観測する（`poc/base-sync.sh` を検証基盤に取り込む）。
   - ローカルが先行していても `ff-only` が成功することを含め、各状態の観測結果が再実行できる形で残る。BRW 本体の実装には依存しない。
   - _Boundary: 検証基盤_
   - _Requirements: 1.8, 1.10_
-- [ ] 5.2 (P) 使い捨ての GitHub リポジトリで、分岐元を head とする PR を作れることを確かめる準備をする
+- [x] 5.2 (P) 使い捨ての GitHub リポジトリで、分岐元を head とする PR を作れることを確かめる準備をする
   - 実環境検証の基盤（使い捨てのブランチ・認証・片付け）を使い、分岐元に当たる使い捨てのブランチと保護ブランチに当たるブランチの組を用意し、head を分岐元とする PR が GitHub の API で作成でき、差が無いときは作成できないことを観測する手順と後始末を用意する。
   - 手順が再実行でき、作った PR・ブランチが後始末で消える。通常運用のブランチを使わない。
   - _Boundary: 実環境検証_
@@ -156,14 +156,14 @@
   - _Depends: 7.3_
   - _Requirements: 1.4, 1.8, 3.10_
 
-- [ ] 8. 検証と資料
+- [x] 8. 検証と資料
 - [x] 8.1 分岐元からの PR の統合試験を書く
   - 一時リポジトリ・bare remote・偽の GitHub 接続で、分岐元が最新・リモート先行（取り込んで進む）・ローカル先行（止まる）・分岐（止まる）・差なし（止まる）の各状態から `brw pr` を実行し、PR の作成・再利用・URL の報告、別コミットも push も片付けも行わないこと、未コミットの変更が残り件数が表示されること、分岐元の worktree とブランチが残ることを確認する。
   - 直接の `gh pr create` の拒否の案内が、作れる組には `brw pr` を、作れない組には作成画面の URL を示すことを確認する。
   - _Boundary: 統合テスト_
   - _Depends: 6.2, 7.4_
   - _Requirements: 1.8, 1.9, 1.10, 1.11, 2.8, 4.12_
-- [ ] 8.2 実機で分岐元からの PR を確かめる
+- [x] 8.2 実機で分岐元からの PR を確かめる
   - `claude -p` と使い捨ての GitHub リポジトリで、分岐元のチェックアウトから本文の記入 → `brw pr` を実行し、分岐元のブランチと作業場所が残ったまま PR が作成され、再実行で重複しないことを確認する。承認が必要な宣言では、`--confirmed` の案内が出ることを確認する。
   - 観測結果を記録し、想定と異なる結果は成功として記録しない。
   - _Boundary: 実環境検証_
@@ -183,3 +183,4 @@
 - 7.4（2026-11-27、完了。レビュー 3 回。7 群はこれで完了）: `brw pr`（`pr-flow.mjs` の `runPr`）の事前確認が、開発ブランチは従来の流れ、恒常的な分岐元は `runBasePr`（循環 import は無い: pr-flow → base-pr → pr-template・base-sync）、それ以外（保護・宣言外・detached）は分類に応じた理由と手順で止まる。停止時の案内は `basePrGuidance(config)`（`pr-template.mjs`）: 「保護でない恒常的な分岐元」が宣言に 1 つ以上あるときだけ「分岐元（<一覧>）のチェックアウトで `brw pr`」を案内し、無い（`main` が唯一の分岐元かつ保護）ときは「`brw pr` では作れない。GitHub 上で作成するか宣言（baseBranch・baseBranches・protectedBranches）を見直す」。`brw pr-template`（`brw.mjs` の `prTemplateFromBase`）は分岐元でも雛形と記入指示を出し、作成元・作成先（保護ブランチが 1 つのときそれ。決められなければ `brw pr --target` の注記）を示し、「作業外の変更」の節は「該当なし」（`buildTemplate` の `noTidy`。別コミットの予定・過去の別コミットを読まない）。分岐元向けの記入指示は、**比較の前に毎回**明示した refspec の `git fetch <リモート> +refs/heads/<保護>:refs/remotes/<リモート>/<保護> +refs/heads/<分岐元>:refs/remotes/<リモート>/<分岐元>` を案内し、`git log refs/remotes/<リモート>/<保護>..refs/remotes/<リモート>/<分岐元>`・`git diff --stat …...…` で比べる（ローカルの保護ブランチは古いことがあるので比べない。未コミットの変更は PR に含まれない旨を注記）。限定した fetch 設定の実 git で、案内の fetch で両参照が最新になることを確認している。分岐元の `brw pr-template` は作業の記録を読まないので「検証」の節は未記入のまま（書き手が書く）。
 - 8.1（2026-11-27、完了。レビュー 2 回）: 統合試験は `tests/integration-base-pr.mjs`（56 件。実際の `brw.mjs`・`agent-hooks.mjs` を spawn、一時リポジトリ＋bare remote＋偽 gh、実行中の `process.env` を隔離）。各 `brw pr` の前後で `snapshotOf`（HEAD・commit 数・ローカルの全ブランチ・bare remote の全 ref・git-receive-pack の回数・`.git/brw` の有無・`git worktree list --porcelain` の登録）を完全一致で比べ、分岐元が最新・リモート先行（取り込みで進む develop・HEAD・commit 数以外は不変）・既存 PR の再利用・再実行（POST が増えない）では別コミット・push・片付けなし、ローカル先行・分岐・差なし・承認待ち・`--confirmed` の非端末拒否・保護/宣言外/detached・`main` が唯一の分岐元かつ保護では書き込み 0 で止まることを確認。直接の `gh pr create` の拒否の案内（作れる組は `brw pr`、作れない組は作成画面の URL、開発間は `brw merge`、500 文字以内）。実行前後で `brw-fx-*`・`brw-int-bpr-*` が増えない確認つき。端末での `--confirmed` の受理は単体（`stdinIsTTY` 注入）。既存の他の試験が残す `/tmp/brw-fx-*`（約 29 件）は範囲外・未調査。
 - 8.3（2026-11-27、完了。レビュー 2 回）: SKILL.md の 4 章の冒頭に、手順 1〜4 と各項目は開発ブランチ向けであり分岐元から保護ブランチへの PR は専用の項目（作業ブランチを作らず、別コミット・push・片付けを行わない）を使う、という分岐を置き、**分岐元から保護ブランチへの PR**（分岐元のチェックアウトで `brw pr-template` → 本文を記入（取り込む内容は記入指示の明示した refspec の `git fetch` 後に `git log`・`git diff --stat`）→ `brw pr --title …`。3 段＝取り込み → 作成 → 報告だけ。止まる場合と承認が必要な宣言の `--confirmed`）と、`brw pr` で作れない組の手作業（開発ブランチ間は `brw merge`・同名は取り込み不要・その他は GitHub 上で作成画面の URL、URL が出ないときは Web 画面）を書いた。`references/setup.md` に小節「分岐元から保護ブランチへの PR（分岐元のチェックアウト）」、`references/config.md` の `autoApprove` の節に、`push:false` のとき分岐元からの PR も通常の承認になる旨を追加。評価ケース `evals/opens-pr-from-base`（fixture のバリアント `base-ahead`）。既存の評価ケースと同じく origin はローカルの bare で GitHub への接続は再現しない（`case.yaml` に制約を明記。判定は実行の trace）。追従の確認は `tests/instructions.mjs`（文単位・項目内の成立・4 章全体の矛盾語句の不在・変異 17 件）。評価ケースは未実行。
+- 5.2・8.2（2026-11-27、完了。観測の道具のレビューは 2 回。5・8 群はこれで完了）: 観測の道具は `tests/real-env/base-pr-observe.mjs`（段階 `api`・`host`。単体試験 `tests/base-pr-observe.mjs`、後始末の規則 `tests/real-env/cleanup-rules.mjs`・`tests/real-env-cleanup.mjs`）。実 GitHub の使い捨てブランチだけに書き込み（main・既存ブランチ・既存 PR に触れない。PR はマージしない）、結果は `tests/real-env/README.md` の「結果（brw-pr-handoff 5.2・8.2）」。**一致**: A1（分岐元役を head、保護役を base とする PR を API で作成できる）、A2（差なしは 422「No commits between」）、B1（実機の Claude Code が登録済みの宣言で `brw pr-template` → 本文の記入 → `brw pr --title … --target …` を実行し、PreToolUse の allow で PR が 1 件作成。直接の `gh pr create`・別コミット・push・`.git/brw` なし、リモートの分岐元役の先頭は不変）、B2（再実行で「PR を再利用しました」、重複なし）、B3（承認が必要な宣言の非端末は `--confirmed` の全文を案内して終了コード 1）、B3c（非端末の `--confirmed` は拒否、通信なし）。**実機で分かったこと**: 検証用の宣言が保護ブランチを 2 つにすると `brw pr` は作成先を決められず `--target` を求めて**書き込みなしで停止**する（7.2 の `resolveTarget` の挙動）。**経緯**: 最初の API 段階で道具が `gh api -i` の CRLF の本文を読めず A1 が「未観測」・A2 が「不一致」（実際は 201・422）→ 判定を直して回帰テスト。その実行で作られた PR #19 は記録漏れ→手で閉じ、再発防止として後始末を「記録された使い捨てブランチを head とするオープンな PR を GitHub に問い合わせて閉じる」形にし、`createdPrNumber`（番号が読めない 201 は head で探し、探せなければ中止）・PR 一覧の読み取り失敗は未観測にした。host 段階の最初の実行はカウンタの累計で中止（書き込み前）、2 回目は `--target` 不足で停止（PR 0 件）→ コマンドに `--target` を付けて全一致。PR #19〜#23 はすべてクローズ、`main` は不変（`bd2c9b8`）。未確認: Codex での分岐元からの PR、TTY での `brw pr --confirmed` の受理（単体は `stdinIsTTY` 注入）。

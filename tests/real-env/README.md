@@ -256,3 +256,67 @@ Claude Code 2.1.329・codex-cli 0.172.0、実 GitHub（`nekono-dev/branch-releas
 - M1〜M3n の「refs 不変」: 読み取りに失敗した ref と存在しない ref をどちらも `null` として数えるため、前後とも読み取りに失敗すると不変と誤って判定しうる。
 - H1・H2 の複合コマンドの判定: `git add … && git commit …` が同一の Bash 呼び出しにあることは確かめるが、引用文字列の中の例（`echo 'git add x && git commit …'`）と区別しない。
 - M4b: deny と終了コードだけを確かめ、案内文（`brw pr-merge`・取り込み先別の案内）は判定に含めない（案内文の内容は単体試験と、host-events.mjs（C3・X3）が実機の応答を表示して確かめる）。
+
+## 分岐元からの PR の実環境の確認（brw-pr-handoff 5.2・8.2）
+
+分岐元（`develop` など）から保護ブランチへの PR を、GitHub の API（5.2）と実機の Claude Code（8.2）で観測する。`BRW_REAL_ENV=1` を付けたときだけ動く。スクリプトは `tests/real-env/base-pr-observe.mjs`、判定の単体試験は `tests/base-pr-observe.mjs`（selftest に登録）。
+
+### 手順
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/prepare.mjs                                              # 状態ファイルを作る（前提）
+node tests/real-env/base-pr-observe.mjs --stage api --dry-run               # 計画のみ（書き込みなし）
+node tests/real-env/base-pr-observe.mjs --stage api                         # 本番（使い捨てブランチ 3 本と PR 1 件まで）
+node tests/real-env/base-pr-observe.mjs --stage host --dry-run              # 計画のみ（claude を呼ばない）
+node tests/real-env/base-pr-observe.mjs --stage host                        # 本番（claude を 1 回呼ぶ）
+node tests/real-env/cleanup.mjs                                              # 記録されたものだけを削除
+```
+
+- `api` 段階（5.2）: main の commit から使い捨てブランチ `verify/brw-bpr-base-<epoch>`（分岐元役）・`verify/brw-bpr-prot-<epoch>`（保護役）・`verify/brw-bpr-same-<epoch>`（差なしの確認用）を作る。分岐元役に contents API で 1 commit を、`branch=` を指定して作る（main には書かない）。A1: head を分岐元役、base を保護役とする PR を作り、201・読み戻しの base・head・open を見る。A2: 同じ commit の組で PR を作り、422 と「No commits between」を見る。
+- `host` 段階（8.2）: 分岐元役に宣言 `.branch-release-workflow.json` を contents API で commit し（登録済みにして確認省略を効かせる）、実 GitHub を匿名で clone して分岐元役をチェックアウトする。宣言・本文・フックの設定は clone の中だけに置く（`.git/info/exclude` で除外）。順序は次のとおり。
+  - B3（承認が必要な宣言。編集中の宣言は未登録扱い）: 非端末で `brw pr` を直接実行し、`--confirmed` の案内で終了コード 1 になり、PR が作られないことを見る。PR が無い段階で行う必要がある（既存の PR があれば作成の判定より前に再利用されるため）。
+  - B3c: 非端末で `--confirmed` を付けた `brw pr` が、通信の前に拒否されることを見る。
+  - B1: 宣言を元に戻し、`claude -p`（Haiku・`--max-turns 10`・`--setting-sources project`・Bash のみ許可）に `brw pr-template` で本文を記入させ、`brw pr` を実行させる。PR が 1 件作られ、分岐元役のブランチ・clone の HEAD・リモートの先頭・`.git/brw` が変わらないことを見る。フックの記録（`hook-log/claude.jsonl`）で、両方の Bash が PostToolUse まで記録され、直接の `gh pr create` が無いことを確かめる。
+  - B2: 同じ `brw pr` を直接実行し、「PR を再利用しました」と同じ URL が出て、PR が 1 件のままであることを見る。
+
+### 安全制約
+
+- GitHub へ書き込むのは、使い捨てブランチ（`verify/brw-bpr-*`）3 本と、PR（`api` で 1 件、`host` で 1 件）だけ。PR はマージしない。main・既存のブランチ・既存の PR・Ruleset・リポジトリ設定には書かない。
+- 作ったブランチと PR は `prepare.mjs --record` で状態ファイルに記録し、`cleanup.mjs` が削除する（ブランチ名は `verify/` で始まり、削除対象の検査を通る）。
+- 後始末の順序: 記録された使い捨てブランチごとに、そのブランチを head とするオープンな PR を GitHub に問い合わせて閉じてから、ブランチを削除する。問い合わせや PR のクローズに失敗したブランチは削除せず、失敗として表示する。PR の番号が読めなかった作成は、head で PR を探して記録する（探せなければ中止）。`cleanup.mjs` は、この観測の一時クローンと出力の置き場（`base-pr-observe/`）も消す。
+- 生の出力は `/tmp/brw-real-env/base-pr-observe/` に残るが、`cleanup.mjs` で消える。そのため標準出力の末尾に観測の要点（コマンド・終了コード・出力の先頭 300 字・読み戻した PR の状態）を出す。
+- トークンは表示・記録しない。`brw pr` は既存の認証（GH_TOKEN・gh のログイン）をそのまま使い、観測のコードは資格情報を渡さない。
+- 利用者の `~/.claude` は読み書きしない。フックは `hook-logger.mjs` を挟み、記録先は `BRW_HOOK_LOG_DIR`（一時の場所）。
+- Claude の呼び出しは共有カウンタ（`events/calls.json`）に加算し、上限は 3 回（`host` 段階は 1 回）。
+
+### 記録の検証規則
+
+- 判定は観測ごとに、ID（`A1`・`A2`・`B1`・`B2`・`B3`・`B3c` のどれか）、日時、コマンド、終了コード（整数）、出力（文字列）、facts（必須の項目の型・値）を検査する。欠け・型の誤り・想定外の ID・重複・解析できないフックの記録の行は「記録不正」とし、一致にしない。
+- 読み取りの失敗（`null`）は「未観測」。ホスト（claude）の終了コードが 0 以外・タイムアウトも「未観測」（不一致にしない）。
+- 想定との違い（PR の状態・ref や HEAD の変化・`.git/brw` の存在・出力の書式・記録に無いコマンド・直接の `gh pr create` の使用）は「不一致」。
+- 出力の書式は `scripts/base-pr.mjs` の文言に合わせる（「PR を作成しました: <URL>」「PR を再利用しました: <URL>」「PR 作成には通常の承認が必要です」「--confirmed は、利用者が自分の端末で実行したときだけ有効です」）。
+- B1 の実行の根拠は、フックの記録の `PostToolUse` にある `brw.mjs pr-template` と `brw.mjs pr`（`pr-template` を `pr` と数えない）。`claude -p` の stream-json の tool_result で、brw pr の出力を取る。
+- 全体の判定は段階ごと。`api` は A1・A2、`host` は B1・B2・B3・B3c がすべてそろい、すべて一致のときだけ「一致」（終了コード 0）。
+
+### 結果
+
+- 実行の結果は下に記録した（実行日 2026-11-27）。
+
+#### 結果（brw-pr-handoff 5.2・8.2、実行日 2026-11-27）
+
+gh 2.45.0、Claude Code 2.1.329（Haiku）、実 GitHub（使い捨てブランチだけ。PR はマージしていない）。判定は記録の検証を通した結果で、観測ごとに生の記録と GitHub の読み戻し（`gh api`）を人が確認した。
+
+| 項目 | 結果 |
+|---|---|
+| A1（5.2）分岐元役を head、保護役を base とする PR を API で作成 | **一致**: 201 で作成、base・head・open を読み戻した |
+| A2（5.2）同じ commit の組（差なし）の PR | **一致**: 422「No commits between …」。PR は作られない |
+| B1（8.2）登録済みの宣言で、claude が `brw pr-template` → 本文を記入 → `brw pr --title … --target …` | **一致**: フックの PreToolUse が allow（確認省略）、PR が 1 件作成（head=分岐元役・base=保護役・open）、直接の `gh pr create` は使われず、`.git/brw` が無く、別コミット・push が無い（リモートの分岐元役の先頭が不変）、未コミットの変更が 1 件で「PR には含まれません」と表示 |
+| B2（8.2）同じ `brw pr` の再実行 | **一致**: 「PR を再利用しました」、同じ head・base のオープンな PR が 1 件のまま |
+| B3（8.2）承認が必要な宣言（未登録）の非端末の `brw pr` | **一致**: PR を作らず `--confirmed` の全文を案内して終了コード 1 |
+| B3c（8.2）非端末で `--confirmed` | **一致**: 「利用者が自分の端末で実行したときだけ有効」で拒否、取り込み・PR の作成を行わない |
+
+- 経緯: (1) 最初の API 段階の実行で、道具が `gh api -i` の出力（ヘッダーが CRLF）の本文を読めず A1 が「未観測」・A2 が「不一致」になった（実際は 201・422 で想定どおり）。判定を直して回帰テストを足し、再実行して一致した。この実行で作られた PR #19 は記録が漏れたため手で閉じた。(2) 最初の host 段階の実行は、呼び出し回数の共有カウンタの累計が上限に達して中止した（書き込み前）。カウンタを戻して再実行した。(3) 2 回目の host 段階の実行で、検証用の宣言が保護ブランチを 2 つ（`main` と保護役）にしたため、`brw pr` は作成先を決められず `--target` を求めて**書き込みなしで停止**した（PR 0 件）。道具のコマンドに `--target <保護役>` を付けて再実行し、全観測が一致した。保護ブランチが複数の宣言で `--target` が要る挙動（7.2 の `resolveTarget`）が実機で確認できた。
+- 最終確認: 後始末を「記録された使い捨てブランチを head とするオープンな PR を GitHub に問い合わせて閉じる」形に改めた後（記録漏れに依存しない）、API 段階と host 段階を再実行して全観測が一致し（PR #22・#23）、後始末が PR を閉じてブランチを削除した。
+- 後片付け: 使い捨てブランチ `verify/brw-bpr-*`・`verify/brw-base-*`、PR #19〜#23（いずれもマージなし・クローズ）、一時クローンを削除した。`main` の commit は不変（`bd2c9b8`）。
+- 未確認: Codex での分岐元からの PR、端末（TTY）での `brw pr --confirmed` の受理（単体試験は `stdinIsTTY` 注入）、保護ブランチが `main` だけの宣言での作成（`--target` 不要の経路は単体・統合試験で確認）。
