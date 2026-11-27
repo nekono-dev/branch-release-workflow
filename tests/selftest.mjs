@@ -50,6 +50,7 @@ import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { runInstructionChecks } from "./instructions.mjs";
 import { runPrMergeChecks, runPrMergeCliChecks, runPrMergeReviewChecks } from "./pr-merge.mjs";
+import { runBaseSyncGitChecks } from "./base-sync-git.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -687,6 +688,9 @@ runPrMergeChecks(eq);
 // ---- brw pr-merge の CLI（brw-enforcement 18.3） ----
 await runPrMergeCliChecks(eq);
 await runPrMergeReviewChecks(eq);
+
+// ---- 分岐元の取り込みと差の判定を実際の git で再現する（brw-pr-handoff 5.1） ----
+await runBaseSyncGitChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
