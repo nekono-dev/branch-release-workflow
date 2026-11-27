@@ -360,12 +360,16 @@ function writeRecord(main: string, e: ResumeEntry): { ok: true } | { ok: false, 
 function readRecords(main: string): ResumeEntry[];            // 読めない・形が不正は空配列（案内しない側）
 /** 7.4・7.6: 案内の対象を決める純粋関数＋Git の読み取りだけ */
 function resumableFor(cwd: string, sessionId: string | null, now: Date): ResumeEntry | null;
+/** 直近 2 分以内に書かれ sessionId が空の記録のうち最新の 1 件に sessionId を付ける（PostToolUse の `brw pr` の成功で呼ぶ） */
+function attachSession(main: string, sessionId: string, now: Date): { ok: boolean };
 ```
 - 記録の置き場は作業状態（`<共通ディレクトリ>/brw/work/`）とは別のファイル `resume.json`（作業状態の削除・片付けの判定に影響しない。要件 7.2）。
 - **`brw resume`（引数なし）**（7.3）: 本体で `git for-each-ref refs/remotes/<リモート>/` から宣言の `workBranches` に合うブランチを取り、`git worktree list` に作業場所があるものを除き、`resume.json` の公開記録があるものを先頭にして一覧する（ネットワークを使わない。最新でなければ `git fetch` を案内）。引数ありの従来の動作は変えない。
 - **`UserPromptSubmit`**（7.4〜7.6）: Claude Code・Codex とも `agent-hooks.mjs <host> UserPromptSubmit`。入力の `cwd`（Codex は本体のまま、Claude は本体かホーム）と `session_id` から、`cwd` のリポジトリ（無ければ `CLAUDE_PROJECT_DIR` が `<本体>/.claude/worktrees/<別名>` の形のとき本体を導出）の記録を読み、`resumableFor`（同じ `sessionId`、`at` から 24 時間以内、その作業ブランチの作業場所が無い、`refs/remotes/<リモート>/<ブランチ>` がある、宣言が読めて開発ブランチ）が見つけたとき、`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<案内>"}}` を返す（案内は 500 文字以内。ブランチ名は無害化。`brw resume <ブランチ>` と `brw create <名前>` の使い分け）。**副作用なし**（作業場所の作成・記録の書き換え・通信をしない。作成は `brw resume`）。見つからなければ応答なし。
 - 登録: `hooks/hooks.json`（Claude）に `UserPromptSubmit`、`hook-install.mjs`（Codex の `.codex/hooks.json`）に `UserPromptSubmit`、`HOST_EVENTS`・`hook-diagnose.mjs` の `ROUTE_EVENTS`・信頼の診断に `UserPromptSubmit` を追加する。
-- 限界: セッションを識別できない（`session_id` が無い）ときは何も渡さない（別セッションへの誤案内を避ける）。別のセッション・24 時間を超えた再開は `brw resume`（引数なし）の一覧と手順書で行う。
+- **セッションの関連付け**: 記録の `sessionId` は、片付けの時点では分からない（`brw pr` が暗黙に始める作業には、`PostToolUse` の関連付け（`work start`・`work resume` だけが対象）が無い）。そこで、`PostToolUse`（Bash）が、信頼済みの `node <brw.mjs> pr …` の成功（`tool_response` の形は既存の `successOutput` を使う）を見たとき、`resume-record.mjs` の `attachSession(main, sessionId, now)` を呼び、**直近 2 分以内に書かれ `sessionId` が空の記録**にそのセッションを付ける（既存の `attachSession` と同じく、`PostToolUse` の関連付けという記録の更新で、作業場所の作成や通信ではない）。複数あれば最新の 1 件だけに付ける。
+- **実機の観測（PoC `poc/user-prompt-submit*.mjs`、2026-11-27）**: ① `UserPromptSubmit` の `additionalContext` は Claude Code 2.1.329・Codex 0.172.0 のどちらでもモデルへ届き、入力に `session_id`・`cwd`・`prompt`（Codex は `turn_id`・`model` も）が含まれる。② 本体でセッションを開始した場合、worktree の削除後の 2 回目の入力でも、フックは同じ `session_id`・`cwd`=本体・`CLAUDE_PROJECT_DIR`=本体で動く。③ **作業場所の中でセッションを開始した場合は、削除後の 2 回目の入力でフックが動かない**（フックの実行場所が消えるため）。④ Codex は `.codex/hooks.json`（一時の `CODEX_HOME` の信頼とフックの信頼の省略）の登録で届く。
+- 限界: セッションを識別できない（`session_id` が無い）ときは何も渡さない（別セッションへの誤案内を避ける）。**作業場所の中でセッションを開始した場合は、削除後にフックが動かないため案内できない**（要件 7.4 の対象外。`brw resume` の一覧と手順書で再開する）。別のセッション・24 時間を超えた再開も同じ。案内は 24 時間のあいだ入力のたびに出うる（記録を書き換えて止めない）ため、案内文に「新しい作業なら無視してよい」を添えて、無関係な入力への影響を小さくする。
 
 ### 判定層（`scripts/operation-decision.mjs`）
 
@@ -433,3 +437,4 @@ function resumableFor(cwd: string, sessionId: string | null, now: Date): ResumeE
 - 2026-11-26（設計の検証）: `base-pr` が `origin` を固定で使っていた点を、`remoteNameOf` で解決するリモートに改めた。承認が必要な場合の `--confirmed`（`base-pr` 自身が端末判定を持つ）と、PR 作成時の head の OID の照合を設計に足した。
 - 2026-11-27（最終検証での修正）: ファイル構成に `base-sync.mjs` を加えた。`createOrReusePr` の実際の署名は `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`。`branch` は取り込み元のブランチ名。`beforeCreate` は PR を新規に作る直前だけ呼ばれ、承認の判定で止められる）。
 - 2026-11-27（要件 4.9 の改訂と 7 の追加）: 実機の観測（Claude Code 2.1.329）で、本体でセッションを開始した場合は作業場所の削除後にホストが作業ディレクトリを本体へ戻し、作業場所の中で開始した場合だけホームに落ちると分かったため、4.9 を「戻さない場合に `cd` を案内」に改めた。利用者の依頼により、公開後の続きの作業を削除済みの作業場所から再開するための要件 7（片付けの案内・再開の記録・`brw resume` の一覧・`UserPromptSubmit` の文脈注入）の設計を追加した。フックは判定と文脈の提供だけで、作業場所の作成は行わない（設計の原則）。
+- 2026-11-27（設計の確認）: 実機の PoC で `UserPromptSubmit` の到達・入力の項目・削除後のフックの発火を観測し、作業場所の中で開始したセッションでは削除後にフックが動かないことを限界に加えた。`brw pr` が暗黙に始める作業にはセッションの関連付けが無く、記録の `sessionId` が空になるため、`PostToolUse`（信頼済みの `brw pr` の成功）で記録に `sessionId` を付ける仕組み（`attachSession`）を加えた。

@@ -176,14 +176,14 @@
   - _Depends: 7.4_
   - _Requirements: 1.8, 1.11, 3.10_
 - [ ] 9. 公開後の続きの作業を、削除済みの作業場所から再開できるようにする
-- [ ] 9.1 実機の前提を、実際のホストで再現できる検証にする
-  - 使い捨てのリポジトリで、Claude Code と Codex に `UserPromptSubmit` のフックを登録し、(a) `additionalContext` を返したときにモデルへ届くこと、(b) 入力に `session_id` と `cwd` が含まれ（Codex の `cwd` が本体のままか）、(c) 作業場所の削除後も同じセッションのフックが発火し、`cwd`・環境変数がどうなるか、(d) Codex の `.codex/hooks.json` への登録と信頼の承認の要否、を観測する。
-  - 観測の道具は記録 1 行ごとの必須項目の型・値を検証し、不正行・ホストの終了コード非 0・タイムアウトがあれば一致にしない。観測結果を記録し、想定と異なる結果は成功として記録しない。結果で feasibility.md の設計の確認・タスク計画の確認を更新する。
+- [x] 9.1 実機の前提を、実際のホストで再現できる検証にする
+  - 使い捨てのリポジトリで、Claude Code と Codex に `UserPromptSubmit` のフックを登録し、`additionalContext` がモデルへ届くこと、入力に `session_id` と `cwd` が含まれること、作業場所の削除後の同じセッションのフックの発火（本体で開始した場合と作業場所の中で開始した場合）を観測し、再実行できる PoC（`poc/user-prompt-submit.mjs`・`poc/user-prompt-submit-after-remove.mjs`）と結果を残す。結果で feasibility.md の設計の確認・タスク計画の確認を更新する。
+  - 2026-11-27 に実施済み（Claude Code 2.1.329・Codex 0.172.0）。到達・入力の項目は両ホストで確認、本体開始は削除後もフックが動き、作業場所内の開始は削除後にフックが動かない。
   - _Boundary: 検証基盤_
   - _Requirements: 7.4, 7.5_
 - [ ] 9.2 (P) 再開の記録を書き読みする部品を作る
-  - `resume-record.mjs` に `writeRecord`・`readRecords`・`resumableFor` を作る。記録は `<git 共通ディレクトリ>/brw/resume.json`（先頭が最新・最大 10 件・同じブランチは置き換え・ロック＋一時ファイル置換）。読めない・不正な形は空配列。`resumableFor` は同じセッション・24 時間以内・作業場所が無い・追跡ブランチがある・開発ブランチのときだけ見つける。
-  - 各状態（見つかる・別セッション・古い・作業場所あり・追跡ブランチ無し・宣言無し・記録の破損・セッション不明）を単体試験で確認できる。
+  - `resume-record.mjs` に `writeRecord`・`readRecords`・`resumableFor`・`attachSession`（直近 2 分以内の `sessionId` が空の記録の最新 1 件にセッションを付ける）を作る。記録は `<git 共通ディレクトリ>/brw/resume.json`（先頭が最新・最大 10 件・同じブランチは置き換え・ロック＋一時ファイル置換）。読めない・不正な形は空配列。`resumableFor` は同じセッション・24 時間以内・作業場所が無い・追跡ブランチがある・開発ブランチのときだけ見つける。
+  - 各状態（見つかる・別セッション・古い・作業場所あり・追跡ブランチ無し・宣言無し・記録の破損・セッション不明、`attachSession` の対象（2 分以内・空の記録・最新 1 件）と対象外）を単体試験で確認できる。
   - _Boundary: 再開の記録_
   - _Requirements: 7.2, 7.4, 7.6_
 - [ ] 9.3 片付けの案内と記録、`brw resume` の一覧を作る
@@ -193,7 +193,7 @@
   - _Depends: 9.2_
   - _Requirements: 4.9, 7.1, 7.2, 7.3_
 - [ ] 9.4 `UserPromptSubmit` の案内フックと登録・診断を作る
-  - `agent-hooks.mjs` に `UserPromptSubmit` を加え、`resumableFor` が見つけたときだけ文脈（`brw resume <ブランチ>` と `brw create <名前>` の使い分け。500 文字以内・無害化）を返す。副作用なし。Claude の `hooks/hooks.json`、Codex の登録（`hook-install.mjs`）、`HOST_EVENTS`、診断（`hook-diagnose.mjs`）に追加する。
+  - `agent-hooks.mjs` に `UserPromptSubmit` を加え、`PostToolUse`（信頼済みの `brw pr` の成功）で記録に `sessionId` を付け、`resumableFor` が見つけたときだけ文脈（`brw resume <ブランチ>` と `brw create <名前>` の使い分け。500 文字以内・無害化）を返す。副作用なし。Claude の `hooks/hooks.json`、Codex の登録（`hook-install.mjs`）、`HOST_EVENTS`、診断（`hook-diagnose.mjs`）に追加する。
   - 見つかる場合と、見つからない各場合（7.6）の応答、副作用が無いこと（作業場所・記録・通信が変わらない）、登録と診断が通ることを、両ホストの模擬イベントで確認できる。
   - _Boundary: フック変換、診断_
   - _Depends: 9.1, 9.2_

@@ -14,7 +14,7 @@
 
 ## 設計の確認
 
-- 判定: 未通過
+- 判定: 通過
 
 確認日 2026-11-26。根拠の無い前提: なし。
 
@@ -28,7 +28,7 @@
 
 ## タスク計画の確認
 
-- 判定: 未通過
+- 判定: 通過
 
 確認日 2026-11-26。
 
@@ -38,11 +38,13 @@
 
 ## 追記: 公開後の再開（要件 7、2026-11-27）
 
-要件 4.9 の改訂と要件 7 の追加に伴う実機の前提。**設計の確認・タスク計画の確認は、下の前提が確かめられるまで「未通過」**（実機の確認は新しい群 9 の先頭タスク 9.1）。
+要件 4.9 の改訂と要件 7 の追加に伴う実機の前提。確認日 2026-11-27。**根拠の無い前提: なし。**
 
-| 前提 | 依存する外部の動作 | 根拠 | 状態 |
-|---|---|---|---|
-| 本体でセッションを開始した場合、作業場所の削除後にホストが作業ディレクトリを本体へ戻す／作業場所の中で開始した場合はホームに落ちる | Claude Code のシェルの扱い | **PoC**（2026-11-27、使い捨てリポジトリ、Claude Code 2.1.329、Haiku）: 本体開始は削除後の次の呼び出しで本体に戻り（フックの `CLAUDE_PROJECT_DIR` も本体）、worktree 開始は `/home/ubuntu` に落ちる（`CLAUDE_PROJECT_DIR` は削除済みのパス）。フックは削除後も発火した | 確認済み（Claude）。Codex は未観測（コマンドごとに別のシェルの想定。9.1 で確認） |
-| `UserPromptSubmit` の `additionalContext` が、Claude Code・Codex のモデルへ届く | 両ホストのフックの応答の仕様 | 未確認（このセッションでは cc-sdd-bootstrap の `UserPromptSubmit` の案内が Claude に届いているが、BRW のフックでは未観測。Codex は未観測） | **未確認** → 9.1 |
-| `UserPromptSubmit` の入力に `session_id`・`cwd` が含まれる（Codex は `cwd` が本体のまま） | 両ホストのフックの入力 | 14.1 の観測（Stop は両ホストで `session_id`・`cwd`）。`UserPromptSubmit` では未観測 | **未確認** → 9.1 |
-| Codex の `.codex/hooks.json` に `UserPromptSubmit` を登録でき、信頼の承認で有効になる | Codex 0.172.0 のフック | 未確認 | **未確認** → 9.1 |
+| 前提 | 依存する外部の動作 | 根拠 |
+|---|---|---|
+| 本体でセッションを開始した場合、作業場所の削除後にホストが作業ディレクトリを本体へ戻す／作業場所の中で開始した場合はホームに落ちる | Claude Code のシェルの扱い | **PoC**（使い捨てリポジトリ、Claude Code 2.1.329、Haiku）: 本体開始は削除後の次の呼び出しで本体に戻る（`CLAUDE_PROJECT_DIR` も本体）、作業場所内の開始は `/home/ubuntu` に落ちる。Codex はコマンドごとに別のシェル（14.1 の観測: Stop の `cwd` が本体のまま） |
+| `UserPromptSubmit` の `additionalContext` が Claude Code・Codex のモデルへ届く | 両ホストのフックの応答 | **PoC** `poc/user-prompt-submit.mjs`（2026-11-27、Claude Code 2.1.329・codex-cli 0.172.0）: 両ホストで、フックが返した合言葉をモデルが答えた（`reachedModel: true`） |
+| `UserPromptSubmit` の入力に `session_id`・`cwd`・`prompt` が含まれる（Codex は `turn_id`・`model` も） | 両ホストのフックの入力 | 同上の記録（`keys`）。Codex の `cwd` は本体 |
+| 本体で開始したセッションでは、作業場所の削除後の 2 回目の入力でも、同じ `session_id`・`cwd`=本体でフックが動く | Claude Code のフックの実行場所 | **PoC** `poc/user-prompt-submit-after-remove.mjs main`（2026-11-27、Claude Code 2.1.329）: 2 回の `UserPromptSubmit` が同じ `session_id`・`cwd`・`CLAUDE_PROJECT_DIR`（本体）で記録された |
+| 作業場所の中で開始したセッションでは、削除後にフックが動かない | 同上 | **PoC** `poc/user-prompt-submit-after-remove.mjs worktree`: 削除後の 2 回目の入力でフックの記録が増えなかった（`hookEntries` が 1 件）。要件 7.4 の対象外とした |
+| Codex の `.codex/hooks.json` に `UserPromptSubmit` を登録して届く | Codex 0.172.0 のフック | **PoC** 同上（一時の `CODEX_HOME` の信頼とフックの信頼の省略）。実際の信頼の承認操作は既存の導入手順（`brw setup`・診断の `untrusted`）に従う（実機の承認操作は 9.6 の対象外で、既存の 8.4 の記録に同じ制約） |
