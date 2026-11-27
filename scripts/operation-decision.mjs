@@ -116,7 +116,7 @@ export function evaluate(op, ctx) {
   const registered = ctx.registered === true;
   switch (op.kind) {
     case "create": return evalCreate(op, config);
-    case "commit": return evalCommit(op, config);
+    case "commit": return evalCommit(op, config, auto, registered);
     case "push": return evalPush(op, config, auto, registered, restrictions);
     case "merge": return evalMerge(op, config, registered);
     case "pr-create": return evalPrCreate(op, config, auto, registered, restrictions, ctx.origin ?? "agent");
@@ -140,10 +140,18 @@ function evalCreate(op, config) {
   return deny(op, "branch-create", `ブランチ '${branch}' の作成・名前の変更は BRW の手順を経る必要があります。`, { alternative: ALT_CREATE, targets: [branch], facts });
 }
 
-function evalCommit(op, config) {
+// 開発ブランチへの commit の確認省略（タスク 15.3・要件 2.9, 2.10）。push と同じく、宣言の登録・項目の有効・通常形の順に確かめる。
+// 通常でない commit（--amend 等）と commit 以外の経路（rebase・cherry-pick・revert・am は flags を持たない）は確認を省略しない
+function evalCommit(op, config, auto, registered) {
   const cls = classifyBranch(config, op.branch);
   const facts = { branchClass: { [op.branch]: cls } };
-  if (cls === "development") return decide(op, { compliance: "compliant", code: "commit-development", reason: `'${op.branch}' は開発ブランチです。`, targets: [op.branch], facts });
+  if (cls === "development") {
+    const base = { compliance: "compliant", code: "commit-development", targets: [op.branch], facts };
+    if (!auto.commit) return decide(op, { ...base, approval: "normal", approvalWhy: whyOff(registered), reason: registered ? "宣言の autoApprove.commit が無効のため、ホストの通常の承認に任せます。" : "宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。" });
+    if (op.via !== "commit" || !op.flags) return decide(op, { ...base, approval: "normal", approvalWhy: "not-commit-path", reason: "commit 以外の経路（rebase・cherry-pick・revert・am）のため、確認は省略せずホストの通常の承認に任せます。" });
+    if (op.flags.normal !== true) return decide(op, { ...base, approval: "normal", approvalWhy: "not-normal", reason: "通常でない commit（--amend・--no-verify・設定の上書き・環境変数の前置・展開を含むメッセージなど）のため、確認は省略せずホストの通常の承認に任せます。" });
+    return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: `'${op.branch}' は開発ブランチで、登録済みの宣言に従う通常の commit です。確認を省略できます。` });
+  }
   return deny(op, "direct-update", `${label(cls)} '${op.branch}' へ直接 commit はできません。開発ブランチ（${config.workBranches.join(", ")}）で作業してください。`, { alternative: ALT_CREATE, targets: [op.branch], facts });
 }
 

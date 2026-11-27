@@ -267,7 +267,7 @@
   - 通常形・各除外形・展開を含む形の分類結果をテストで確認できる。既存の commit の保護ブランチ判定は変わらない。
   - _Boundary: 操作判定_
   - _Requirements: 2.14_
-- [ ] 15.3 開発ブランチの通常の commit を確認省略できる判定にする
+- [x] 15.3 開発ブランチの通常の commit を確認省略できる判定にする
   - 登録済みで作業ツリーの内容が HEAD と一致する宣言、commit の項目が無効でないこと、通常形であることを満たす開発ブランチへの commit を、確認省略の対象と判定する。
   - 満たさない場合は通常の承認に委ね、保護ブランチ・恒常的な分岐元・宣言外への commit は従来どおり拒否する。
   - 各条件を欠いたときの判定結果（省略・通常の承認・拒否）を判定の契約テストで確認できる。
@@ -418,3 +418,4 @@
 - 14.2（2026-11-27、完了）: 端末判定の観測は `tests/real-env/tty-observe.mjs`（単体試験 `tests/tty-observe.mjs`）。Claude Code 2.1.329・Codex 0.172.0 とも、直接の実行は標準入出力が端末でなく（`undefined`）、`script` 経由は端末に見える（`true`）。結果は `tests/real-env/README.md` に記録。観測の道具の共通の教訓（レビューが 5 回かかった原因）: 記録の 1 行ごとに必須項目の型・値を検証し、不正な行（構文エラー・形式の不正・値の文字列化で例外が出る入力を含む）は総合を「一致」にしない（未観測）。今後の観測の道具も、解析と判定を最初からこの形にする。Codex の認証は一時の CODEX_HOME への 0600 のコピー（実行後に削除。利用者の `~/.codex/auth.json` のハッシュは実行の前後で不変）。`stop-observe.mjs` の `judgeStops` がホストの終了コード・タイムアウトを判定に含めない点は未対応（14.2 の範囲外）。
 - 15.1（2026-11-27、完了）: `autoApproveOf` の戻り値に `commit` を追加（未登録・編集中は false、明示 false だけが無効。旧パスの宣言も同じ規則）。
 - 15.2（2026-11-27、完了。レビュー 7 回・デバッグ役 1 回）: commit の通常形は `op.flags`（`amend`・`noVerify`・`configOverride`・`envAssign`・`messageNormal`・`unknownArg`・`fileStdin`・`normal`）。**15.3 は `op.flags.normal` を参照する**（push の `op.normal` とは置き場所が違う）。判定は許可リスト式（既定 false。メッセージ指定が 1 つ以上あり、全語・リダイレクト・前置・グローバルオプションが許可形と証明できたときだけ true）。除外リスト式で拒否形を足す作りは、レビューで穴が次々出て失敗した（教訓: 「通常と言い切れる形」を列挙し、残りはすべて false にする）。通常にならない主な形: メッセージ指定なし、`-C`・`-c`・`--fixup`・`--squash`・`-t`・`-e`、引用なしのチルダ展開（lex が語に印を付ける）、展開・glob・`!`・`$'…'`、`-C`/`-c` の値に展開があるグローバルオプション、`command` 以外の wrapper（env・nice・timeout・sudo・time ほか）、`-F` はクォート付き heredoc の `-` だけ。`env` の `-C`・`--chdir`・`-S`・`--split-string`（結合形・長いオプションの前方一致を含む）は対象を確定できない（unparseable）。結合形の `-cKEY=VAL` にも送り先のキー検査をかけた。lex は heredoc の本文を宣言したコマンドの項目へ結び付ける。限界: 本文に `'` を含むクォート付き heredoc を `$(…)` に入れると既存の括弧の読み取りで unparseable になる（安全側）。引用なしの `-m hello` は通常、`2>&1` などのリダイレクトは通常でない（過検出）。
+- 15.3（2026-11-27、完了）: `evalCommit(op, config, auto, registered)` が、開発ブランチの commit を「`auto.commit` が有効（未登録・編集中は無効）→ `op.via==="commit"` で flags あり → `flags.normal===true`」の順に確かめ、満たすと `eligibleForApproval`（skip）、欠くと通常の承認（`approvalWhy`: `unregistered`/`opt-out`（`whyOff`）・`not-commit-path`（rebase・cherry-pick・revert・am）・`not-normal`）。保護・分岐元・宣言外は従来どおり deny。**この時点で、単独の通常の `git commit` は既存の `plainOperation` によりフックが許可を返す**（要件 2.9 の意図どおり）。複合（`git add … && git commit …`）は 15.4 まで通常の承認のまま。`evaluateAll` では `push && commit` が eligibleForApproval になりうるが、フックは複合を `plainOperation` で通さない。

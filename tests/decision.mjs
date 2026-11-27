@@ -36,7 +36,7 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/1.2 保護対象・恒常的な分岐元への切り替えは適合（通常のホスト承認に委ねる）", ["git switch main", "git switch develop"].map((x) => sig(ev(x))), Array(2).fill(["pass", "compliant", "normal", "branch-resume-protected"]));
 
   // ---- 1.3 直接の変更 ----
-  eq("enforcement/1.3 開発ブランチへの commit は適合", sig(ev("git commit -m x")), ["pass", "compliant", "notApplicable", "commit-development"]);
+  eq("enforcement/1.3 開発ブランチへの commit は適合（登録済みの宣言なら確認を省略できる）", sig(ev("git commit -m x")), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
   eq("enforcement/1.3 保護・分岐元・宣言外への commit は拒否", ["main", "develop", "other/z"].map((b) => on(b, () => sig(ev("git commit -m x")))), ["main", "develop", "other/z"].map(() => ["deny", "violation", "notApplicable", "direct-update"]));
   eq("enforcement/1.3 保護・分岐元・宣言外への push は拒否", ["git push origin main", "git push origin develop", "git push origin other/z", "git push origin dev/foo:main", "git push origin dev/foo dev/foo:develop"].map((x) => [ev(x).verdict, ev(x).code]), Array(5).fill(["deny", "direct-update"]));
   eq("enforcement/1.3 拒否理由に対象のブランチ名と分類を含める", (() => { const x = ev("git push origin main"); return [x.targets, x.facts.branchClass, /main/.test(x.reason)]; })(), [["main"], { main: "protected" }, true]);
@@ -89,7 +89,20 @@ export const runDecisionChecks = async (eq) => {
     all("git push origin dev/foo && git push origin dev/other").verdict, all("git push origin dev/foo && git commit -m x").verdict,
     all("git push origin dev/foo && git push -f origin dev/other").verdict, all("git push origin dev/foo && git push origin main").verdict,
     all("git status").verdict,
-  ], ["eligibleForApproval", "pass", "pass", "deny", "pass"]);
+  ], ["eligibleForApproval", "eligibleForApproval", "pass", "deny", "pass"]);
+
+  // ---- 2.9・2.10 開発ブランチの通常の commit の確認省略（タスク 15.3） ----
+  const commitOf = (cmd, dir = d) => { const o = classifyCommand(cmd, dir).operations[0]; return evaluate(o, contextFor(o)); };
+  const cfgRepo = (autoApprove, opts = {}) => mkRepoWithRemote({ branch: "dev/foo", config: autoApprove === undefined ? CONFIG : { ...CONFIG, autoApprove }, ...opts });
+  eq("enforcement/2.9 登録済みで通常の commit は確認を省略できる", sig(commitOf("git commit -m x")), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
+  eq("enforcement/2.9 commit 単体の全体判定も確認を省略できる", all("git commit -m x").verdict, "eligibleForApproval");
+  eq("enforcement/2.9 autoApprove.commit が明示の true でも確認を省略できる", (() => { const r = cfgRepo({ commit: true }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return sig(x); })(), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
+  eq("enforcement/2.9 未登録の宣言の commit は適合でも確認を省略しない", (() => { const r = cfgRepo(undefined, { register: false }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "unregistered"]);
+  eq("enforcement/2.9 編集中の宣言の commit は確認を省略しない", (() => { const r = cfgRepo(undefined); writeFileSync(join(r.dir, ".branch-release-workflow.json"), JSON.stringify({ ...CONFIG, autoApprove: { commit: true } })); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "unregistered"]);
+  eq("enforcement/2.9 登録済みで autoApprove.commit=false の commit は確認を省略しない", (() => { const r = cfgRepo({ commit: false }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "opt-out"]);
+  eq("enforcement/2.10 通常でない commit は確認を省略しない（--amend・--no-verify・設定の上書き・環境変数の前置・展開を含むメッセージ）", ["git commit --amend -m x", "git commit --no-verify -m x", "git -c user.name=x commit -m x", "FOO=bar git commit -m x", "git commit -m \"$VAR\""].map((x) => { const v = commitOf(x); return [...sig(v).slice(0, 3), v.approvalWhy]; }), Array(5).fill(["pass", "compliant", "normal", "not-normal"]));
+  eq("enforcement/2.10 commit 以外の経路（rebase）は確認を省略しない", (() => { const v = commitOf("git rebase main"); return [...sig(v).slice(0, 3), v.approvalWhy]; })(), ["pass", "compliant", "normal", "not-commit-path"]);
+  eq("enforcement/2.9 保護・分岐元・宣言外への commit は登録済みでも拒否のまま", ["main", "develop", "other/z"].map((b) => on(b, () => sig(commitOf("git commit -m x")))), ["main", "develop", "other/z"].map(() => ["deny", "violation", "notApplicable", "direct-update"]));
 
   // ---- 2.6 作業で記録された禁止 ----
   eq("enforcement/2.6 作業で push を禁止した場合は適合でも拒否（禁止は既定の動作より優先）", (() => { const x = ev("git push origin dev/foo", { noPush: true }); return [...sig(x), x.approvalWhy]; })(), ["deny", "compliant", "prohibited", "push-development", "work-restriction"]);
