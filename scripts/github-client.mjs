@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 
 /** 結果の種類。ok 以外は理由の区別に使う。 */
-export const FAILURE_KINDS = ["auth", "permission", "unknown-input", "network", "server", "target-mismatch", "refused"];
+export const FAILURE_KINDS = ["auth", "permission", "unknown-input", "network", "server", "target-mismatch", "refused", "not-mergeable"];
 
 const NAME = /^[A-Za-z0-9_.-]+$/;
 const HOST = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/;
@@ -23,6 +23,8 @@ const WRITE_ROUTES = [
 ];
 /** Ruleset の追加は本文を検証する専用の関数（createRuleset）だけが送れる。公開の `request` では送れない。 */
 const RULESET_CREATE_ROUTE = { method: "POST", re: /^\/repos\/[^/?]+\/[^/?]+\/rulesets$/ };
+/** PR のマージは本文を固定する専用の関数（mergePull）だけが送れる。公開の `request` では送れない。 */
+const PULL_MERGE_ROUTE = { method: "PUT", re: /^\/repos\/[^/?]+\/[^/?]+\/pulls\/[1-9]\d{0,9}\/merge$/ };
 /** ref 名を %2F にした実効ルールの読み取り経路。この形に限り、専用の関数だけが % を含むパスを送れる。 */
 const BRANCH_RULES_PATH = /^\/repos\/[^/?]+\/[^/?]+\/rules\/branches\/[A-Za-z0-9_][A-Za-z0-9._-]*(?:%2F[A-Za-z0-9_][A-Za-z0-9._-]*)*\?per_page=100&page=[1-9]\d{0,2}$/;
 const READ_METHODS = ["GET", "HEAD"];
@@ -162,6 +164,17 @@ const pullDifferences = (pr, exp, ctx, number) => {
 };
 
 const summarize = (pr) => ({ number: pr.number, url: pr.html_url, state: pr.state, headOid: pr.head.sha, headRef: pr.head.ref, baseRef: pr.base.ref });
+
+/** 応答のリポジトリから所有者と名前を得る（full_name、または owner.login と name）。得られなければ null。 */
+const repoNameOf = (r) => {
+  if (!isObj(r)) return null;
+  if (typeof r.full_name === "string") {
+    const parts = r.full_name.split("/");
+    return parts.length === 2 && okPart(parts[0]) && okPart(parts[1]) ? { owner: parts[0], name: parts[1] } : null;
+  }
+  if (isObj(r.owner) && typeof r.owner.login === "string" && typeof r.name === "string" && okPart(r.owner.login) && okPart(r.name)) return { owner: r.owner.login, name: r.name };
+  return null;
+};
 
 /** 失敗文言から資格情報を取り除く。 */
 const redactWith = (token) => (text) => {
@@ -322,6 +335,7 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
    * 要求の共通処理。opts は専用の関数だけが指定する内部の許可。
    * opts.branchRules: ref 名を %2F にした実効ルールの読み取りパスを許す（形を厳密に検査する）。
    * opts.rulesetCreate: 検証済みの本文による Ruleset 追加を許す。
+   * opts.pullMerge: 固定の本文による PR のマージ（mergePull）を許す。
    */
   const dispatch = async (target, method, path, body, opts) => {
     const m = String(method ?? "").toUpperCase();
@@ -341,7 +355,7 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     if (!inScope) return refuse("target-mismatch", "パスが対象リポジトリの配下ではない");
     if (!READ_METHODS.includes(m) && !write) return refuse("refused", "未対応のメソッド");
     if (write) {
-      const routes = opts.rulesetCreate ? [...WRITE_ROUTES, RULESET_CREATE_ROUTE] : WRITE_ROUTES;
+      const routes = [...WRITE_ROUTES, ...(opts.rulesetCreate ? [RULESET_CREATE_ROUTE] : []), ...(opts.pullMerge ? [PULL_MERGE_ROUTE] : [])];
       if (!routes.some((r) => r.method === m && r.re.test(pathOnly))) return refuse("refused", "この書き込み経路は公開していない");
       const id = confirmed.get(keyOf(target));
       if (id === undefined) return refuse("refused", "対象のリポジトリ ID を照合する前は書き込めない");
@@ -541,6 +555,55 @@ export const createGitHubSession = ({ host, token, transport = ghTransport() } =
     const d = rulesetDifferences(rs, payload, { owner: target.owner, name: target.name });
     if (!d.length) return { ok: true, status: r.status, created: true, ruleset: rs, calledTo: r.calledTo };
     return mismatch("作成された Ruleset が要求と一致しない", d, { created: true, createdId: rs.id, reconcile: false, calledTo: r.calledTo });
+  };
+
+  /**
+   * 照合済みの対象の PR を、期待を渡さずに読む（状態・取り込み先・head の SHA・タイトル）。
+   * 取り込み先が対象と違っても事実をそのまま返す（判定は呼び出し側の責務）。応答の形が不正なら unknown-input。
+   */
+  session.readPull = async (target, number) => {
+    if (!okNumber(number)) return refuse("refused", "PR 番号が不正");
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const r = await request(target, "GET", `${repoBase(target)}/pulls/${number}`);
+    if (!r.ok) return r;
+    const p = r.body;
+    const bad = (why) => refuse("unknown-input", `PR の応答が不正: ${why}`, r.calledTo);
+    if (!isObj(p)) return bad("オブジェクトではない");
+    if (!Number.isSafeInteger(p.number)) return bad("PR 番号がない");
+    if (p.number !== number) return refuse("target-mismatch", "応答の PR 番号が要求と異なる", r.calledTo);
+    if (p.state !== "open" && p.state !== "closed") return bad("状態が open・closed のどちらでもない");
+    if (typeof p.merged !== "boolean") return bad("merged が真偽値ではない");
+    if (typeof p.title !== "string") return bad("タイトルがない");
+    if (!isObj(p.head) || typeof p.head.ref !== "string" || typeof p.head.sha !== "string" || !OID.test(p.head.sha)) return bad("head の ref または SHA が不正");
+    if (!isObj(p.base) || typeof p.base.ref !== "string") return bad("base の ref が不正");
+    const baseRepo = repoNameOf(p.base.repo);
+    if (!baseRepo) return bad("取り込み先のリポジトリを得られない");
+    return {
+      ok: true,
+      status: r.status,
+      pull: { number: p.number, state: p.state, merged: p.merged, title: p.title, headRef: p.head.ref, headSha: p.head.sha, baseRef: p.base.ref, baseRepo },
+      calledTo: r.calledTo,
+    };
+  };
+
+  /**
+   * 照合済みの対象の PR を squash でマージする。送れるのは PUT …/merge だけで、本文は {merge_method: "squash", sha} に固定する。
+   * sha は読み取りで確認した head の SHA。食い違えば GitHub が 409 を返し、確認していない内容はマージされない。
+   * 405 はマージできない（not-mergeable）として理由を保つ。結果が不明な書き込みの失敗は outcomeUnknown を付ける。
+   */
+  session.mergePull = async (target, input) => {
+    if (!isObj(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) return refuse("refused", "マージの指定は通常のオブジェクトに限る");
+    // 本文は固定するため、number と sha 以外の項目（merge_method・commit_title・継承・__proto__ を含む）は受け付けない
+    if (Reflect.ownKeys(input).some((k) => k !== "number" && k !== "sha")) return refuse("refused", "マージの指定は number と sha だけを持てる");
+    const { number, sha } = input;
+    if (!okNumber(number)) return refuse("refused", "PR 番号が不正");
+    if (typeof sha !== "string" || !OID.test(sha)) return refuse("refused", "head の SHA が 40 桁または 64 桁の 16 進ではない");
+    const { fail } = confirmedId(target);
+    if (fail) return fail;
+    const r = await dispatch(target, "PUT", `${repoBase(target)}/pulls/${number}/merge`, { merge_method: "squash", sha }, { pullMerge: true });
+    if (!r.ok) return r.status === 405 ? { ...r, kind: "not-mergeable" } : r;
+    return { ok: true, status: r.status, merged: r.body?.merged === true, sha: r.body?.sha, message: r.body?.message, calledTo: r.calledTo };
   };
   return Object.freeze(session);
 };
