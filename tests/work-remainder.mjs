@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { remainderGuidance, remaindersOf } from "../scripts/work-remainder.mjs";
+import { MAX_WORKTREES, remainderGuidance, remaindersOf } from "../scripts/work-remainder.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const CONFIG = { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" };
@@ -223,13 +223,20 @@ export const runWorkRemainderChecks = async (eq) => {
     f.cleanup();
   }
 
-  // ---- 上限 20 件: 先頭 20 件（本体を含む）だけを見る ----
+  // ---- 上限 100 件（本体を含む）: 上限を超えた worktree は走査せず、走査しなかった件数を残りの各項目に持たせる ----
+  eq("work-remainder/16.1 既定の上限は 100 件（本体を含む）", MAX_WORKTREES, 100);
+  // 上限の差し替え（limit）で確かめる。100 件の実 worktree は作らない（遅くなるため）
   const g = mkBrwRepo({ branch: "main", config: CONFIG });
   try {
-    const paths = [];
-    for (let i = 1; i <= 20; i++) paths.push(mkWorktree(g.dir, `dev/w${i}`));
-    for (const p of paths) write(p, "x.txt");
-    eq("work-remainder/16.1 worktree は先頭 20 件（本体を含む）までを対象にする", remaindersOf(g.dir).length, 19);
+    for (let i = 1; i <= 4; i++) write(mkWorktree(g.dir, `dev/w${i}`), "x.txt");
+    // 本体 + 4 件の計 5 件。上限 3 では先頭 3 件（本体を含む）だけを走査するため、残りは 2 件
+    const capped = remaindersOf(g.dir, { limit: 3 });
+    eq("work-remainder/16.1 上限を超えた worktree は走査せず、上限内の残りだけを返す", capped.length, 2);
+    eq("work-remainder/16.1 走査しなかった件数（上限外の 2 件）を各残りに持たせる", capped.map((r) => r.skippedWorktrees), [2, 2]);
+    // 上限内（計 5 件・上限 5）なら全件を走査し、走査しなかった件数は 0
+    const within = remaindersOf(g.dir, { limit: 5 });
+    eq("work-remainder/16.1 上限内では全件を走査する", within.length, 4);
+    eq("work-remainder/16.1 上限内では走査しなかった件数は 0", within.map((r) => r.skippedWorktrees), [0, 0, 0, 0]);
   } finally {
     g.cleanup();
   }
@@ -457,6 +464,14 @@ function runRemainderGuidanceChecks(eq) {
   const mo = remainderGuidance(many, {});
   eq("remainder-guidance/16.2 worktree は先頭 5 件までを案内し、超過は「ほか N 件」", [mo.includes("dev/m4"), mo.includes("dev/m5"), mo.includes("ほか 1 件")], [true, false, true]);
   eq("remainder-guidance/16.2 worktree が 5 件以内ならほか N 件を出さない", remainderGuidance(many.slice(0, 5), {}).includes("ほか"), false);
+
+  // ---- 上限超過の注記（残りの案内の末尾に添える。残りが無ければ案内しない） ----
+  const SKIP_NOTE = "worktree が多いため 2 件を確認していません。残りがあれば別途 `git worktree list` で確かめてください";
+  const withSkip = remainderGuidance([{ ...DIRTY, skippedWorktrees: 2 }], {});
+  eq("remainder-guidance/16.1 上限を超えた件数の注記を案内の末尾に添える", withSkip.endsWith(SKIP_NOTE), true);
+  eq("remainder-guidance/16.1 上限超過の注記は通常の残りの案内を消さない", [withSkip.includes("未コミットの変更 2 件"), withSkip.includes("git add <変更したパス> → git commit → git push")], [true, true]);
+  eq("remainder-guidance/16.1 走査しなかった件数が 0 なら注記を出さない", remainderGuidance([{ ...DIRTY, skippedWorktrees: 0 }], {}).includes("確認していません"), false);
+  eq("remainder-guidance/16.1 件数の無い残り（従来の形）は注記を出さない", remainderGuidance([DIRTY], {}).includes("確認していません"), false);
 
   const dirtyMany = REM({ dirty: files(12), dirtyCount: 12 });
   const dm = remainderGuidance([dirtyMany], {});

@@ -7,8 +7,8 @@ import { basename, resolve, sep } from "node:path";
 import { classifyBranch, loadConfig } from "./lib.mjs";
 import { SECRET_PATTERNS } from "./tidy.mjs";
 
-// 対象にする worktree の上限（git worktree list の先頭から数える。本体を含む）
-const MAX_WORKTREES = 20;
+// 対象にする worktree の上限（git worktree list の先頭から数える。本体を含む）。超えた分は走査せず、件数を案内の末尾に添える
+export const MAX_WORKTREES = 100;
 
 // 読み取り専用の git を実行する。失敗したら null を返す。
 // --no-optional-locks で、状態表示のためのインデックス更新やロックを取らない（副作用を最小にする）。
@@ -187,10 +187,12 @@ export function declaredNoPushOf(cwd) {
 
 /**
  * 全 worktree のうち開発ブランチの残りを返す。
- * 戻り値: {branch, path, dirty, dirtyCount, unpushed, secretLike}[]
+ * 戻り値: {branch, path, dirty, dirtyCount, unpushed, secretLike, skippedWorktrees}[]
+ * skippedWorktrees は、上限（limit。既定は MAX_WORKTREES）を超えて走査しなかった worktree の件数（全項目に同じ値）。
+ * 項目の配列を作り直す呼び出し側でも残るよう、件数は各項目の列挙可能なプロパティに持たせる。
  * 残りが無い・対象外・判定不能（宣言の読み込み失敗、git の失敗を含む）は空の配列（案内しない側に倒す）。
  */
-export function remaindersOf(cwd) {
+export function remaindersOf(cwd, opts = {}) {
   try {
     const list = worktreeList(cwd);
     const main = mainPathOf(list);
@@ -200,9 +202,12 @@ export function remaindersOf(cwd) {
     if (!config) return [];
     // 恒常的な分岐元（固定名。宣言から解決済み）。未 push の数の基準に使う
     const bases = config.permanentBases ?? [config.baseBranch];
+    // 走査の上限（テストで差し替えるための引数。通常は既定の MAX_WORKTREES）
+    const limit = Number.isInteger(opts?.limit) && opts.limit > 0 ? opts.limit : MAX_WORKTREES;
+    const skippedWorktrees = Math.max(0, list.length - limit);
 
     const out = [];
-    for (const wt of list.slice(0, MAX_WORKTREES)) {
+    for (const wt of list.slice(0, limit)) {
       // detached HEAD・prunable（ディレクトリが無い）・bare は対象外
       if (wt.bare || wt.prunable || !wt.branch || !existsSync(wt.path)) continue;
       // 保護ブランチ・恒常的な分岐元・宣言外・命名規則に合わないものは対象外
@@ -216,7 +221,7 @@ export function remaindersOf(cwd) {
       const secretLike = secretLikeOf(wt.path, dirty);
       if (secretLike === null) continue;
 
-      out.push({ branch: wt.branch, path: wt.path, dirty, dirtyCount: dirty.length, unpushed, secretLike });
+      out.push({ branch: wt.branch, path: wt.path, dirty, dirtyCount: dirty.length, unpushed, secretLike, skippedWorktrees });
     }
     return out;
   } catch {
@@ -338,5 +343,8 @@ export function remainderGuidance(remainders, policy = {}) {
   }
   if (anyPush) lines.push("push できないとき（認証・保護・ネットワークなど）は、その理由を利用者へ報告してから終了してください。");
   lines.push("失敗したときは、成功した処理・未完了の処理・失敗理由を報告して終了してください。");
+  // 上限を超えて走査しなかった worktree の注記（末尾に添える。残りが無ければ上の null で案内しない。上限超過だけでは止めない）
+  const skipped = Math.max(0, ...items.map((r) => (Number.isInteger(r?.skippedWorktrees) ? r.skippedWorktrees : 0)));
+  if (skipped > 0) lines.push(`worktree が多いため ${skipped} 件を確認していません。残りがあれば別途 \`git worktree list\` で確かめてください`);
   return lines.join("\n");
 }

@@ -97,6 +97,7 @@ scripts/
 ├── tidy.mjs           # 新規: 未コミット変更の別コミット化・秘密らしい名前の検出
 ├── cleanup.mjs        # 新規: finishBlocker・removeBranch・状態ファイル削除・片付け後の案内
 ├── base-pr.mjs        # 新規: 分岐元から保護ブランチへの PR（取り込み・差の確認・PR の作成または再利用・報告）
+├── base-sync.mjs      # 新規: 分岐元の取り込みと差の確認（syncBase・countDiff・resolveTarget。明示した refspec で取得し、先行は ff-only に任せず別に数える）
 ├── brw.mjs            # 変更: pr・pr-template を振り分け、finish が cleanup.mjs を使う
 ├── publish-cli.mjs    # 変更: 本文ファイルの読み取り先に BRW の本文置き場を許可
 ├── agent-hooks.mjs    # 変更: 信頼済みの brw pr を確認省略の対象にし、本文置き場を許可
@@ -413,3 +414,4 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 
 - 2026-11-26: 要件 1.8〜1.11、2.8、3.10、4.12（恒常的な分岐元から保護ブランチへの PR）の設計を追加した。利用者の決定により、作業の記録は作業ブランチにだけ適用し、分岐元からの PR は「取り込み → 作成 → 報告」の 3 段だけの軽い経路（`base-pr`）にした（案 P2）。判定の 5 か所の前提のうち、直接の PR 作成の判定（`evalPrCreateRules`）と `brw pr` の事前確認・雛形・案内だけを変え、作業の記録に結び付く `work start`・準備・計画・push は変えない。PoC で、ローカルの分岐元が先行していると `merge --ff-only` が成功してしまうことが分かったため、先行を別に検出する。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。
 - 2026-11-26（設計の検証）: `base-pr` が `origin` を固定で使っていた点を、`remoteNameOf` で解決するリモートに改めた。承認が必要な場合の `--confirmed`（`base-pr` 自身が端末判定を持つ）と、PR 作成時の head の OID の照合を設計に足した。
+- 2026-11-27（最終検証での修正）: ファイル構成に `base-sync.mjs` を加えた。`createOrReusePr` の実際の署名は `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`。`branch` は取り込み元のブランチ名。`beforeCreate` は PR を新規に作る直前だけ呼ばれ、承認の判定で止められる）。
