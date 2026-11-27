@@ -22,6 +22,7 @@ import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoR
 import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
+import { declaredNoPushOf, remainderGuidance, remaindersOf } from "./work-remainder.mjs";
 
 const PREFIX = "[branch-release-workflow] ";
 /** ホストごとに扱うイベント。PostToolUse（関連付け）と Stop（案内）は 6.2 で扱う。 */
@@ -599,13 +600,11 @@ function pendingOf(w, head) {
 }
 
 /**
- * Stop: 当該セッションに結び付いた、準備済みで未公開の作業だけを案内する。読み取りだけを行い、状態を書き換えない。
- * stop_hook_active が真なら案内せず終了させる（案内の繰り返しによる無限ループを防ぐ）。判定できなければ案内しない。
+ * 公開の案内（16.3 で残りの案内と分けた既存の処理）の本文。セッションに結び付いた、準備済みで未公開の作業だけを案内する。
+ * セッション ID・状態ファイル・HEAD が無い・読めないときは null。この案内の中だけで止まり、残りの案内には影響させない。読み取りだけを行い、状態を書き換えない。
  */
-function stopGuidance(input) {
+function publishGuidance(ev) {
   try {
-    const ev = eventOf(input);
-    if (!ev || ev.stop_hook_active === true) return null;
     const cwd = cwdOf(ev);
     const session = sessionOf(ev);
     if (!cwd || !session) return null;
@@ -625,7 +624,44 @@ function stopGuidance(input) {
       else lines.push(`- 作業 ${id}: 公開を続けるには、\`${BRW_RUN} work plan --work ${id}\` で計画 ID を取得し、\`${BRW_RUN} publish --work ${id} --plan <計画 ID>\` を実行してください。中断するなら \`${BRW_RUN} pause --work ${id} --reason "<理由>"\` を実行してください。`);
     }
     if (lines.length === 0) return null;
-    return { decision: "block", reason: `${PREFIX}準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}` };
+    return `準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 残りの案内（16.3）の本文。リポジトリの全 worktree の Git の状態だけで評価する（セッション・状態ファイル・HEAD に依存しない）。
+ * cwd は案内の cd の手順にだけ使う。各 worktree の push 禁止は、その worktree の作業の制限（restrictionsFor）か、
+ * 宣言の autoApprove.push が明示的に false のとき真（未登録の既定の false とは区別する）。読み取りだけを行い、判定できなければ null。
+ */
+function remainderGuidanceOf(ev) {
+  try {
+    const cwd = cwdOf(ev);
+    if (!cwd) return null;
+    const remainders = remaindersOf(cwd);
+    if (remainders.length === 0) return null;
+    // 宣言は本体（先頭の worktree）から読む（remaindersOf と同じ読み方。実パスは -z の一覧から取る）
+    const declaredNoPush = declaredNoPushOf(cwd);
+    const items = remainders.map((r) => ({ ...r, noPush: declaredNoPush || restrictionsFor(r.path).noPush === true }));
+    return remainderGuidance(items, { noPush: false, cwd });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stop: 公開の案内（準備済みで未公開の作業）と残りの案内（作業ブランチの未コミット・未 push）を、1 つの block にまとめる。
+ * 公開の案内を先に並べる。読み取りだけを行い、状態を書き換えない。
+ * stop_hook_active が真なら、どちらも案内せず終了させる（案内の繰り返しによる無限ループを防ぐ）。両方とも無ければ案内しない。
+ */
+function stopGuidance(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.stop_hook_active === true) return null;
+    const parts = [publishGuidance(ev), remainderGuidanceOf(ev)].filter((p) => typeof p === "string" && p !== "");
+    if (parts.length === 0) return null;
+    return { decision: "block", reason: `${PREFIX}${parts.join("\n\n")}` };
   } catch {
     return null;
   }

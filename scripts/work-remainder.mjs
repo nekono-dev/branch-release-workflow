@@ -158,6 +158,33 @@ const secretLikeOf = (path, dirty) => {
   return [...new Set(found)].sort();
 };
 
+// 一覧から本体（先頭の worktree）のパスを取る。本体が bare・一覧が無いときは null
+const mainPathOf = (list) => (list && list.length > 0 && !list[0].bare && list[0].path ? list[0].path : null);
+
+/**
+ * 本体（先頭の worktree）の実パス。-z の一覧から取るため、改行・引用符・空白を含むパスも正しく返す。判定できなければ null。
+ */
+export function mainWorktreeOf(cwd) {
+  try {
+    return mainPathOf(worktreeList(cwd));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 宣言の autoApprove.push が明示的に false か（16.3）。本体の宣言から読む。宣言が無い・読めないときは false（未指定とは区別しない: 既定の確認省略の扱いを変えない）。
+ */
+export function declaredNoPushOf(cwd) {
+  try {
+    const main = mainWorktreeOf(cwd);
+    if (!main) return false;
+    return loadConfig(main).config?.autoApprove?.push === false;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 全 worktree のうち開発ブランチの残りを返す。
  * 戻り値: {branch, path, dirty, dirtyCount, unpushed, secretLike}[]
@@ -166,9 +193,10 @@ const secretLikeOf = (path, dirty) => {
 export function remaindersOf(cwd) {
   try {
     const list = worktreeList(cwd);
-    if (!list || list.length === 0 || list[0].bare) return [];
+    const main = mainPathOf(list);
+    if (main === null) return [];
     // 宣言は本体（先頭の worktree）から読む。cwd が指す worktree の内容に依存しないため
-    const { config } = loadConfig(list[0].path);
+    const { config } = loadConfig(main);
     if (!config) return [];
     // 恒常的な分岐元（固定名。宣言から解決済み）。未 push の数の基準に使う
     const bases = config.permanentBases ?? [config.baseBranch];
@@ -247,19 +275,24 @@ const isRoot = (cwd, path) => resolve(cwd) === resolve(path);
 /**
  * 残りの案内文を作る（brw-enforcement 16.2）。純粋関数（Git・ファイルに触れない）。
  * remainders は remaindersOf の戻り値、policy は {noPush, cwd?}。
+ * 残りごとに真偽の noPush（16.3）があればそれを優先し、無ければ policy.noPush に従う（worktree ごとに push 禁止が違う場合のため）。
  * noPush（作業の制限・確認省略の無効による push 禁止）のときは未 push を理由にせず、未 push だけの残りは外す。
  * 名前・パスは可視化して値として示し、cd の手順はシェルで安全に引用する。残りが無ければ null、あれば案内文を返す。
  */
 export function remainderGuidance(remainders, policy = {}) {
-  const noPush = policy?.noPush === true;
+  const defaultNoPush = policy?.noPush === true;
+  // 残りごとの push 禁止。残りの noPush が真偽なら優先し、無ければ policy.noPush
+  const noPushOf = (r) => (typeof r?.noPush === "boolean" ? r.noPush : defaultNoPush);
   const cwd = typeof policy?.cwd === "string" && policy.cwd !== "" ? policy.cwd : null;
   const all = Array.isArray(remainders) ? remainders : [];
-  const items = all.filter((r) => !(noPush && r.dirtyCount === 0));
+  const items = all.filter((r) => !(noPushOf(r) && r.dirtyCount === 0));
   if (items.length === 0) return null;
 
   const hasDirty = items.some((r) => r.dirtyCount > 0);
-  // push 禁止のときは未 push を案内に出さない
-  const hasUnpushed = !noPush && items.some((r) => r.unpushed > 0);
+  // push 禁止の worktree の未 push は案内に出さない
+  const hasUnpushed = items.some((r) => !noPushOf(r) && r.unpushed > 0);
+  const anyPush = items.some((r) => !noPushOf(r));
+  const anyNoPush = items.some((r) => noPushOf(r));
   const head = hasDirty && hasUnpushed
     ? "未コミットの変更または未 push の commit が残っている開発ブランチがあります。"
     : hasDirty
@@ -267,8 +300,11 @@ export function remainderGuidance(remainders, policy = {}) {
       : "未 push の commit が残っている開発ブランチがあります。";
 
   const shown = items.slice(0, GUIDE_WORKTREE_LIMIT);
-  const lines = [head, noPush ? "次の worktree の変更を commit までにとどめてください。" : "次の worktree の残りを、この作業で生じた変更なら commit・push してください。"];
+  const lines = [head];
+  if (anyPush && anyNoPush) lines.push("次の worktree の残りを、この作業で生じた変更なら commit・push してください。ただし「push はしない」とある worktree は commit までにとどめてください。");
+  else lines.push(anyNoPush ? "次の worktree の変更を commit までにとどめてください。" : "次の worktree の残りを、この作業で生じた変更なら commit・push してください。");
   shown.forEach((r, i) => {
+    const np = noPushOf(r);
     lines.push("");
     lines.push(`${i + 1}. ブランチ ${visible(r.branch)}（${visible(r.path)}）`);
     // 作業ディレクトリと別の worktree なら、そこへ移ってから行う。制御文字を含むパスは cd にせず、手動で移る案内にする
@@ -278,13 +314,13 @@ export function remainderGuidance(remainders, policy = {}) {
       else lines.push(`   - このパスは制御文字・バッククォート・長さのため案内に直接書けず、cd の手順は出しません。${visible(r.path)} へ手動で移ってください`);
     }
     if (r.dirtyCount > 0) lines.push(`   - 未コミットの変更 ${r.dirtyCount} 件: ${listWithMore(r.dirty, r.dirtyCount, GUIDE_PATH_LIMIT)}`);
-    if (!noPush && r.unpushed > 0) lines.push(`   - 未 push の commit ${r.unpushed} 件`);
+    if (!np && r.unpushed > 0) lines.push(`   - 未 push の commit ${r.unpushed} 件`);
     if (r.secretLike.length > 0) lines.push(`   - 秘密情報らしい名前のファイル（${listWithMore(r.secretLike, r.secretLike.length, GUIDE_PATH_LIMIT)}）は commit に含めない`);
     // 次の操作。add は変更したパスだけにする
     const steps = [];
     if (r.dirtyCount > 0) steps.push("git add <変更したパス>", "git commit");
-    if (!noPush && (r.dirtyCount > 0 || r.unpushed > 0)) steps.push("git push");
-    if (steps.length > 0) lines.push(`   - 次の操作: ${steps.join(" → ")}${noPush ? "（push はしない）" : "（brw を使う場合も同じ手順）"}`);
+    if (!np && (r.dirtyCount > 0 || r.unpushed > 0)) steps.push("git push");
+    if (steps.length > 0) lines.push(`   - 次の操作: ${steps.join(" → ")}${np ? "（push はしない）" : "（brw を使う場合も同じ手順）"}`);
   });
   const more = items.length - shown.length;
   if (more > 0) lines.push("", `ほか ${more} 件の worktree にも残りがあります。`);
@@ -294,10 +330,13 @@ export function remainderGuidance(remainders, policy = {}) {
   // 秘密らしいファイルの注意は、残りの種類によらず含める（未 push だけの案内・noPush の案内も同じ）
   lines.push("秘密情報を含みうるファイル（.env・鍵・credentials など）は commit に含めないでください。");
   if (hasDirty) lines.push("commit する前に `git status`・`git diff --cached` でステージ内容を確認し、この作業と無関係な変更や秘密らしいファイルが含まれていれば `git restore --staged <パス>` で外してください。");
-  lines.push(noPush
-    ? "この作業で生じた変更なら commit までにとどめ、未 push であることを報告して終了してください。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。"
-    : "この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。");
-  if (!noPush) lines.push("push できないとき（認証・保護・ネットワークなど）は、その理由を利用者へ報告してから終了してください。");
+  if (anyPush) lines.push("この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。");
+  if (anyNoPush) {
+    lines.push(anyPush
+      ? "「push はしない」とある worktree の変更は commit までにとどめ、未 push であることを報告してください。"
+      : "この作業で生じた変更なら commit までにとどめ、未 push であることを報告して終了してください。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。");
+  }
+  if (anyPush) lines.push("push できないとき（認証・保護・ネットワークなど）は、その理由を利用者へ報告してから終了してください。");
   lines.push("失敗したときは、成功した処理・未完了の処理・失敗理由を報告して終了してください。");
   return lines.join("\n");
 }

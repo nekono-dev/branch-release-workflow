@@ -31,6 +31,8 @@ const TITLE = "件名 テスト";
 /** 一時リポジトリ。origin を GitHub の形にする（判定と計画の照合に使う。通信はしない）。 */
 const repoOf = ({ branch = "dev/foo", config = CONFIG, register = true } = {}) => {
   const r = mkRepoWithRemote({ branch, config, register });
+  // 導入済みの形に近づける: 恒常的な分岐元（develop）がリモートにある（分岐元の commit を未 push と数えないため。16.3 で追加）
+  gitOut(r.dir, "push", "-q", "origin", "main:refs/heads/develop");
   gitOut(r.dir, "remote", "set-url", "origin", GH);
   return r;
 };

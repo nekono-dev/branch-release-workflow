@@ -407,6 +407,8 @@ export const runWorkRemainderChecks = async (eq) => {
 
   // ---- 案内文（brw-enforcement 16.2） ----
   runRemainderGuidanceChecks(eq);
+  // ---- 案内文の worktree ごとの push 禁止（brw-enforcement 16.3） ----
+  runRemainderPerItemChecks(eq);
 };
 
 // 案内文の単体試験（16.2）。Git に触れない純粋関数なので、残りの値を直接作って確かめる
@@ -585,3 +587,29 @@ function runRemainderHostileChecks(eq) {
   eq("remainder-format/16.2 バックスラッシュを含むパスは cd を出さず、\\\\ に可視化した手動の案内にする", [bsOut.includes("cd '"), bsOut.includes("`/wt/a\\\\b` へ手動で移ってください")], [false, true]);
   eq("remainder-format/16.2 通常の空白（U+0020）と日本語は可視化しない", remainderGuidance([REM({ dirty: ["日本語 a.txt"], dirtyCount: 1 })], {}).includes("`日本語 a.txt`"), true);
 };
+
+// 残りの値ごとの noPush（16.3）の単体試験。残りの noPush は policy.noPush より優先する
+function runRemainderPerItemChecks(eq) {
+  const npUnpushed = REM({ branch: "dev/np", path: "/wt/np", unpushed: 3, noPush: true });
+  const okUnpushed = REM({ branch: "dev/ok", path: "/wt/ok", unpushed: 2, noPush: false });
+  const okDirty = REM({ branch: "dev/dd", path: "/wt/dd", dirty: ["d.txt"], dirtyCount: 1, noPush: false });
+  const npDirty = REM({ branch: "dev/nd", path: "/wt/nd", dirty: ["n.txt"], dirtyCount: 1, noPush: true });
+
+  // 残りの noPush が真で未 push だけなら、その worktree は案内しない（全体が null になる）
+  eq("remainder-item/16.3 残りの noPush が真で未 push だけなら null", remainderGuidance([npUnpushed], { noPush: false }), null);
+  // 残りの noPush が偽なら、policy.noPush が真でも未 push を案内する（残りの値が優先）
+  const over = remainderGuidance([okUnpushed], { noPush: true });
+  eq("remainder-item/16.3 残りの noPush が偽なら policy.noPush が真でも未 push を案内する", [over !== null, over?.includes("未 push の commit 2 件"), over?.includes("git push")], [true, true, true]);
+  // 混在: push 禁止の worktree は commit までにとどめ、push 可の worktree は push を案内する
+  const mixed = remainderGuidance([npDirty, okDirty], { noPush: false, cwd: "/elsewhere" });
+  const npPart = mixed.slice(mixed.indexOf("/wt/nd"), mixed.indexOf("/wt/dd"));
+  const okPart = mixed.slice(mixed.indexOf("/wt/dd"));
+  eq("remainder-item/16.3 混在: 禁止の worktree の手順は push を含まず、可の worktree の手順は push を含む", [npPart.includes("git push"), npPart.includes("（push はしない）"), okPart.includes("git push"), okPart.includes("（brw を使う場合も同じ手順）")], [false, true, true, true]);
+  eq("remainder-item/16.3 混在: 2 つの文面（commit までにとどめる・commit・push）を両方含む", [mixed.includes("commit までにとどめ"), mixed.includes("commit・push してください"), mixed.includes("push できないとき")], [true, true, true]);
+  // 禁止の残りだけの案内は、policy.noPush で同じ残りを禁止にした案内と同一になる
+  const itemOnly = remainderGuidance([npDirty], { noPush: false, cwd: "/elsewhere" });
+  const policyOnly = remainderGuidance([{ ...npDirty, noPush: undefined }], { noPush: true, cwd: "/elsewhere" });
+  eq("remainder-item/16.3 残りの noPush だけで禁止にした案内は、policy.noPush の案内と同一", itemOnly, policyOnly);
+  // 残りの noPush が無いときは、従来どおり policy.noPush に従う
+  eq("remainder-item/16.3 残りの noPush が無ければ従来どおり policy.noPush に従う", remainderGuidance([{ ...DIRTY, noPush: undefined }], { noPush: true }), remainderGuidance([DIRTY], { noPush: true }));
+}
