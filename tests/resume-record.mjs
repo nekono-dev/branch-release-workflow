@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 // 読み込めないときは各関数を失敗として扱い、試験の項目が RED として記録されるようにする
@@ -14,6 +15,8 @@ const writeRecord = (...a) => (mod.writeRecord ? mod.writeRecord(...a) : NOT_IMP
 const readRecords = (...a) => (mod.readRecords ? mod.readRecords(...a) : []);
 const resumableFor = (...a) => (mod.resumableFor ? mod.resumableFor(...a) : null);
 const attachSession = (...a) => (mod.attachSession ? mod.attachSession(...a) : NOT_IMPL);
+const writeHint = (...a) => (mod.writeSessionHint ? mod.writeSessionHint(...a) : NOT_IMPL);
+const readHint = (...a) => (mod.readSessionHint ? mod.readSessionHint(...a) : null);
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -655,6 +658,173 @@ export const runResumeRecordStrictChecks = async (eq) => {
     writeRecord(dir, entryOf("dev/a", { base: "main", ago: 30 * 1000 }));
     const r = attachSession(dir, "s1", NOW);
     eq("brw-pr-handoff/9.5 セッションを付けても base は変わらない（attachSession）", [r, readRecords(dir)[0]?.base, readRecords(dir)[0]?.sessionId], [{ ok: true, attached: true }, "main", "s1"]);
+  });
+
+  // ---- セッションの手がかり（9.7）: 実行前に書くメモ。10 分以内・同じ作業場所のときだけ使う ----
+  const hintPath = (dir) => join(dir, ".git", "brw", "session-hint.json");
+  const writeHintRaw = (dir, text) => {
+    mkdirSync(join(dir, ".git", "brw"), { recursive: true });
+    writeFileSync(hintPath(dir), text);
+  };
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    eq("brw-pr-handoff/9.7 メモを書けば、同じ作業場所で 10 分以内に、そのセッションの ID を読める", [writeHint(dir, { sessionId: "s1", dir: wt, now: NOW }).ok, readHint(dir, wt, NOW)], [true, "s1"]);
+    eq("brw-pr-handoff/9.7 メモは、別の作業場所（別の brw pr）には使われない", readHint(dir, join(dir, "other"), NOW), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 ちょうど 10 分後のメモは読める（境界を含む）", readHint(dir, wt, new Date(NOW.getTime() + 10 * MIN)), "s1");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 10 分と 1 ミリ秒を超えたメモは読まない", readHint(dir, wt, new Date(NOW.getTime() + 10 * MIN + 1)), null);
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 書いた時刻より前（未来）のメモは読まない", readHint(dir, wt, new Date(NOW.getTime() - 1)), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    const bad = [{ sessionId: "" }, { sessionId: "a\u0007b" }, { sessionId: "x".repeat(201) }, { sessionId: null }];
+    const res = bad.map((o) => writeHint(dir, { dir: wt, now: NOW, ...o }).ok);
+    eq("brw-pr-handoff/9.7 不正な sessionId のメモは書かず、ファイルも作らない（ok:false）", [res, existsSync(hintPath(dir))], [[false, false, false, false], false]);
+    const badDirs = ["relative/wt", "a\u0007b", "/" + "d".repeat(4090)];
+    const res2 = badDirs.map((d) => writeHint(dir, { sessionId: "s1", dir: d, now: NOW }).ok);
+    eq("brw-pr-handoff/9.7 不正な dir（相対・制御文字・上限超え）のメモは書かない（ok:false）", res2, [false, false, false]);
+    eq("brw-pr-handoff/9.7 不正な時刻（暦日の補正）の入力は、時刻として書かない（ok:false）", writeHint(dir, { sessionId: "s1", dir: wt, now: new Date("invalid") }).ok, false);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    const cases = [
+      { version: 1, sessionId: "", dir: wt, at: NOW.toISOString() },
+      { version: 1, sessionId: "s1", dir: "relative", at: NOW.toISOString() },
+      { version: 1, sessionId: "s1", dir: wt, at: "2026-02-30T00:00:00.000Z" },
+      { version: 2, sessionId: "s1", dir: wt, at: NOW.toISOString() },
+      [1, 2],
+    ];
+    eq("brw-pr-handoff/9.7 不正な内容のメモは読まない（null）", cases.map((c) => { writeHintRaw(dir, JSON.stringify(c)); return readHint(dir, wt, NOW); }), [null, null, null, null, null]);
+  });
+  inRepo((dir) => {
+    writeHintRaw(dir, "{ 壊れた");
+    eq("brw-pr-handoff/9.7 読めないメモは null（例外にしない）", readHint(dir, join(dir, "wt"), NOW), null);
+    writeHintRaw(dir, " ".repeat(5000) + "{}");
+    eq("brw-pr-handoff/9.7 上限（4 KiB）を超えるメモは読まない", readHint(dir, join(dir, "wt"), NOW), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    mkdirSync(join(dir, ".git", "brw"), { recursive: true });
+    const target = join(dir, "elsewhere.json");
+    writeFileSync(target, JSON.stringify({ version: 1, sessionId: "s1", dir: wt, at: NOW.toISOString() }));
+    symlinkSync(target, hintPath(dir));
+    eq("brw-pr-handoff/9.7 メモがシンボリックリンクなら読まない（null）", readHint(dir, wt, NOW), null);
+    eq("brw-pr-handoff/9.7 メモがシンボリックリンクなら書かず、リンク先も変えない（ok:false）", [writeHint(dir, { sessionId: "s2", dir: wt, now: NOW }).ok, readFileSync(target, "utf8").includes('"s1"')], [false, true]);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    const real = mkdtempSync(join(tmpdir(), "brw-hint-real-"));
+    rmSync(join(dir, ".git", "brw"), { recursive: true, force: true });
+    symlinkSync(real, join(dir, ".git", "brw"));
+    eq("brw-pr-handoff/9.7 brw ディレクトリがリンクなら書かない（ok:false）", writeHint(dir, { sessionId: "s1", dir: wt, now: NOW }).ok, false);
+    rmSync(real, { recursive: true, force: true });
+  });
+  inRepo((dir) => {
+    const a = join(dir, "a");
+    const b = join(dir, "b");
+    writeHint(dir, { sessionId: "s1", dir: a, now: NOW });
+    writeHint(dir, { sessionId: "s2", dir: b, now: NOW });
+    eq("brw-pr-handoff/9.7 メモは最新 1 件だけ（前の作業場所のメモは残らない）", [readHint(dir, a, NOW), readHint(dir, b, NOW)], [null, "s2"]);
+  });
+  eq("brw-pr-handoff/9.7 Git の外では書かず、読まない（例外にしない）", [writeHint(nonGitDir(), { sessionId: "s1", dir: "/x", now: NOW }).ok, readHint(nonGitDir(), "/x", NOW)], [false, null]);
+
+  // ---- 9.7 の直し: 採用したメモは消費する・拒否されたメモは残す・最新優先・配下の作業場所も一致・開いた fd で検査する ----
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 採用されたメモは読み取りで消費され、ファイルが消える", [readHint(dir, wt, NOW), existsSync(hintPath(dir))], ["s1", false]);
+    eq("brw-pr-handoff/9.7 消費されたメモは、2 回目には使われない（null）", readHint(dir, wt, NOW), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 作業場所が一致しないメモは採用されず、ファイルも消さない", [readHint(dir, join(dir, "other"), NOW), existsSync(hintPath(dir))], [null, true]);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "denied-s", dir: wt, now: NOW });
+    writeHint(dir, { sessionId: "other-s", dir: join(dir, "elsewhere"), now: NOW });
+    eq("brw-pr-handoff/9.7 拒否された呼び出しのメモの後に別の作業場所のメモが来ても、前のメモは使われない（最新 1 件）", readHint(dir, wt, NOW), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    mkdirSync(join(wt, "src"), { recursive: true });
+    writeHint(dir, { sessionId: "s1", dir: join(wt, "src"), now: NOW });
+    eq("brw-pr-handoff/9.7 作業場所の配下（src/）から呼んだメモも、作業場所と一致する", readHint(dir, wt, NOW), "s1");
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    mkdirSync(join(dir, "wt-other"), { recursive: true });
+    writeHint(dir, { sessionId: "s1", dir: join(dir, "wt-other"), now: NOW });
+    eq("brw-pr-handoff/9.7 兄弟のディレクトリ（<wt>-other）のメモは、作業場所と一致しない", readHint(dir, wt, NOW), null);
+  });
+  inRepo((dir) => {
+    writeHintRaw(dir, JSON.stringify({ version: 1, sessionId: "s1", dir: join(dir, "wt"), at: NOW.toISOString() }));
+    mkdirSync(join(dir, "wt"), { recursive: true });
+    eq("brw-pr-handoff/9.7 メモの中身の読み取りは上限内で行い、ディレクトリを置いたパスは読まない（null）", (() => { rmSync(hintPath(dir)); mkdirSync(hintPath(dir)); return readHint(dir, join(dir, "wt"), NOW); })(), null);
+  });
+
+  // ---- 9.7 の 2 回目の直し: 検証→採用→消費をロックの下で一体にする・削除失敗は null・FIFO で止まらない・限界の確認 ----
+  const RR_PATH = fileURLToPath(new URL("../scripts/resume-record.mjs", import.meta.url));
+  const lockOf = (dir) => join(dir, ".git", "brw", "session-hint.json.lock");
+  // 別のプロセスが保持しているように見せるロック（生きている pid を書く）
+  const holdLock = (dir) => writeFileSync(lockOf(dir), String(process.pid));
+  const childRead = (code) => {
+    const res = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 10000 });
+    return { status: res.status, signal: res.signal, out: res.stdout ?? "" };
+  };
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    holdLock(dir);
+    eq("brw-pr-handoff/9.7 ロックが取れないときは、セッションを返さず、メモも消さない（検証と消費を同じロックの下で行う）", [readHint(dir, wt, NOW, { lockWaitMs: 20 }), existsSync(hintPath(dir))], [null, true]);
+    rmSync(lockOf(dir), { force: true });
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 メモを消せないときは、セッションを返さない（再利用の防止）", readHint(dir, wt, NOW, { remove: () => { throw new Error("消せない（試験）"); } }), null);
+  });
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "s1", dir: wt, now: NOW });
+    const replaced = JSON.stringify({ version: 1, sessionId: "s2", dir: wt, at: NOW.toISOString() });
+    const got = readHint(dir, wt, NOW, { beforeRemove: () => writeHintRaw(dir, replaced) });
+    eq("brw-pr-handoff/9.7 検証の後で内容が変わったメモは、返さず、消さない（新しいメモを消さない）", [got, readOrNull(hintPath(dir))], [null, replaced]);
+  });
+  inRepo((dir) => {
+    mkdirSync(join(dir, ".git", "brw"), { recursive: true });
+    const r = spawnSync("mkfifo", [hintPath(dir)]);
+    const wt = join(dir, "wt");
+    const c = childRead(`import(${JSON.stringify(RR_PATH)}).then((m) => { process.stdout.write(JSON.stringify(m.readSessionHint(${JSON.stringify(dir)}, ${JSON.stringify(wt)}, new Date()))); });`);
+    eq("brw-pr-handoff/9.7 メモの置き場が FIFO でも、読み取りはブロックせず null を返す（タイムアウトしない）", [r.status, c.status, c.signal, c.out], [0, 0, null, "null"]);
+  });
+  inRepo((dir) => {
+    mkdirSync(join(dir, ".git", "brw"), { recursive: true });
+    const r = spawnSync("mkfifo", [join(dir, ".git", "brw", "resume.json")]);
+    const c = childRead(`import(${JSON.stringify(RR_PATH)}).then((m) => { process.stdout.write(JSON.stringify(m.readRecords(${JSON.stringify(dir)}))); });`);
+    eq("brw-pr-handoff/9.7 resume.json の置き場が FIFO でも、読み取りはブロックせず空を返す（タイムアウトしない）", [r.status, c.status, c.signal, c.out], [0, 0, null, "[]"]);
+  });
+  // 限界の確認: 後続の呼び出しのメモ書き込みが失敗すると、直前の拒否・失敗した呼び出しのセッションを採用しうる（10 分以内・同じ作業場所）
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "denied-s", dir: wt, now: NOW });
+    holdLock(dir);
+    const w2 = writeHint(dir, { sessionId: "later-s", dir: wt, now: NOW }, { lockWaitMs: 20 });
+    rmSync(lockOf(dir), { force: true });
+    eq("brw-pr-handoff/9.7 限界: 後続の呼び出しのメモ書き込みが失敗すると、直前の拒否した呼び出しのセッションを採用しうる（10 分以内・同じ作業場所）", [w2.ok, readHint(dir, wt, NOW)], [false, "denied-s"]);
+  });
+  // 後続の呼び出しが自分のメモを書けば置き換わり、そのセッションが採用される（失敗・拒否の後の別セッションを含む）
+  inRepo((dir) => {
+    const wt = join(dir, "wt");
+    writeHint(dir, { sessionId: "denied-s", dir: wt, now: NOW });
+    writeHint(dir, { sessionId: "later-s", dir: wt, now: NOW });
+    eq("brw-pr-handoff/9.7 後続の呼び出しが自分のメモを書けば置き換わり、そのセッションが採用される", readHint(dir, wt, NOW), "later-s");
   });
 
 };

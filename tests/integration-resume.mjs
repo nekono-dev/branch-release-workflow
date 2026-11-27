@@ -255,6 +255,35 @@ export const runIntegrationResumeChecks = async (eq) => {
     const ctxC = JSON.parse(cx.out || "{}")?.hookSpecificOutput?.additionalContext ?? "";
     eq("integration/9.6 UserPromptSubmit（Codex・cwd は本体）: 案内の文脈が返り、dev/bar の resume を指す（500 文字以内）", [ctxC.includes("resume dev/bar"), ctxC.length <= 500], [true, true]);
 
+    // 9.7: PostToolUse が届かない（Claude の Exit code 1 相当）でも、実行前の PreToolUse のメモで記録に sessionId が付き、案内が出る
+    const hint = startDev(r, "dev/hint");
+    writeBody(r, "dev/hint");
+    const SH = "claude-int-hint";
+    hookRun(r, "claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: hint.wt, command: `node ${BRW} pr --title ${TITLE}`, sessionId: SH }));
+    const pr7 = prIn(r, hint.wt, "dev/hint", hint.oid, { number: 9, existing: false });
+    eq("integration/9.7 PostToolUse を送らなくても、片付けつきの brw pr は完了する（終了コード 0・片付けの表示）", [pr7.status, pr7.stdout.includes("片付けました: `dev/hint`")], [0, true]);
+    eq("integration/9.7 実行前のメモから、片付けの記録に sessionId が付く（PostToolUse は無し）", sessionsOf(r)["dev/hint"] ?? null, SH);
+    const u7 = JSON.parse(ups(SH).out || "{}")?.hookSpecificOutput?.additionalContext ?? "";
+    eq("integration/9.7 PreToolUse → brw pr（片付け）→ UserPromptSubmit で、案内（resume dev/hint・create）が出る", [u7.includes("resume dev/hint"), u7.includes("create"), u7.length <= 500], [true, true, true]);
+    eq("integration/9.7 実行前のメモは、再開の記録の内容を増やさない（記録は、これまでの 4 ブランチ＋今回の 1 件だけ）", (recordsOf(r) ?? []).map((e) => e.branch).sort(), ["dev/bar", "dev/foo", "dev/hint", "dev/other"]);
+    // 9.7 回帰: メモと再開の記録の置き場が FIFO でも、brw pr（片付け）は止まらず完了する（タイムアウトつき）
+    const fifo = startDev(r, "dev/fifo");
+    writeBody(r, "dev/fifo");
+    mkdirSync(join(r.dir, ".git", "brw"), { recursive: true });
+    const fifoPaths = ["session-hint.json", "resume.json"].map((f) => join(r.dir, ".git", "brw", f));
+    for (const pth of fifoPaths) {
+      rmSync(pth, { force: true });
+      spawnSync("mkfifo", [pth]);
+    }
+    hookRun(r, "claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: fifo.wt, command: `node ${BRW} pr --title ${TITLE}`, sessionId: "claude-int-fifo" }));
+    const fres = spawnSync("node", [BRW, "pr", "--title", TITLE, "--completion", DONE, "--verification", VERIFY], {
+      cwd: fifo.wt,
+      encoding: "utf8",
+      env: envOf(r, ghCfg({ [LIST("dev/fifo")]: ok([]), [FILTERED("dev/fifo")]: ok([]), [POST]: created(prOf("dev/fifo", fifo.oid, 10)) })),
+      timeout: 60000,
+    });
+    eq("integration/9.7 回帰: メモと再開の記録の置き場が FIFO でも、brw pr（片付け）は止まらず完了する（終了コード 0・片付けの表示・タイムアウトしない）", [fres.status, fres.signal, fres.stdout.includes("片付けました")], [0, null, true]);
+    for (const pth of fifoPaths) rmSync(pth, { force: true });
   } finally {
     for (const x of repos) {
       try { x.cleanup(); } catch { /* 後始末の失敗は試験の結果を変えない */ }

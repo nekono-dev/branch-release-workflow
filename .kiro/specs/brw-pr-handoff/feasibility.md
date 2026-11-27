@@ -57,3 +57,14 @@
 - `cd <作業場所> && brw pr ; cd <本体>` は `PostToolUse` が届くが、字句解析が `;` を解釈せず付かない。
 - 作業場所の中で開始したセッションでも、削除後に `UserPromptSubmit` が動くことがあった（3 回中 1 回）。設計の「動かない」は揺れる。
 - Codex は認証が無く未観測。
+
+## 追記: 実行前の記録への改訂の確認（要件 7.2・7.4、2026-11-27）
+
+設計の「セッションの関連付けの改訂」（`PreToolUse` で `session-hint.json` を書き、片付けが読む）の前提。確認日 2026-11-27。**根拠の無い前提: あり（下の 2 件。`## 設計の確認` は `未通過` のまま。9.8 の実機の再観測で根拠を足す）。**
+
+| 前提 | 依存する外部の動作 | 根拠 |
+|---|---|---|
+| 信頼済みの `brw pr`（Bash）の実行前に、`PreToolUse` が Claude Code で届く | Claude Code のフック | **既存の観測** 8.4・5.2 B1（実機の Claude Code が登録済みのフックの PreToolUse の allow で `brw pr` を実行）、9.6 後半の観測（`brw pr` が実際に実行され片付けまで進んだ。許可の経路は PreToolUse） |
+| `PreToolUse` の入力に `session_id`・`cwd`・`tool_input.command` が含まれ、`session_id` が後続の `UserPromptSubmit` の `session_id` と同じ | 両ホストのフックの入力 | **未確認**（`UserPromptSubmit` の入力は 9.1 の PoC で確認済みだが、`PreToolUse` の `session_id` が同じ値かは未観測）。9.8 で観測する |
+| Codex でも `PreToolUse` が届き、同じ入力の項目を持つ | Codex 0.172.0 のフック | **未確認**（8.4 に PreToolUse の入力の観測はあるが、`session_id` の項目と `UserPromptSubmit` との一致は未観測。Codex は認証が無く、この環境では再観測できない可能性がある） |
+| `PostToolUse` は片付けつきの `brw pr` では届かない（本体で開始） | Claude Code のフック | **実機の観測** 9.6 後半（Claude Code 2.1.329、3 回とも）。このため `PostToolUse` に頼らない設計にした |

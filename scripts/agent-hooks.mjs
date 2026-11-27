@@ -22,7 +22,7 @@ import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoR
 import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
-import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, attachSession as attachResumeRecord, resumableFor } from "./resume-record.mjs";
+import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, attachSession as attachResumeRecord, resumableFor, writeSessionHint } from "./resume-record.mjs";
 import { declaredNoPushOf, mainWorktreeOf, remainderGuidance, remaindersOf } from "./work-remainder.mjs";
 
 const PREFIX = "[branch-release-workflow] ";
@@ -1004,6 +1004,28 @@ function brwPrCallOf(command, cwd) {
   return { dir };
 }
 
+/**
+ * PreToolUse: 信頼済みの brw pr の呼び出しを実行の前に見て、セッションの手がかり（メモ）を書く（brw-pr-handoff 9.7）。
+ * 実機の Claude Code は、片付けつきの brw pr を「終了コード 1」と報告し PostToolUse を送らないことがあるため、実行前に残す。
+ * 判定と応答は変えない（副作用はメモだけ）。対象外・書けないときは何もせず、例外も出さない。
+ */
+function recordSessionHint(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.tool_name !== "Bash" || typeof ev.tool_input?.command !== "string") return;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return;
+    const call = brwPrCallOf(ev.tool_input.command, cwd);
+    if (!call) return;
+    const main = mainOfStart(call.dir, { strict: true });
+    if (!main) return;
+    writeSessionHint(main, { sessionId: session, dir: realpathSync(call.dir), now: new Date() });
+  } catch {
+    // メモを書けなくても、判定と応答は変えない
+  }
+}
+
 /** brw pr の出力の本文。Claude のオブジェクトは既存の successOutput（成功のときだけ本文）、Codex の文字列はそのまま。 */
 const prOutputText = (tr) => (typeof tr === "string" ? tr : successOutput(tr));
 
@@ -1086,6 +1108,8 @@ export function handleHook(host, event, input) {
   }
   if (event === "Stop") return stopGuidance(input);
   if (event === "UserPromptSubmit") return resumeGuidanceOf(input);
+  // PreToolUse: 判定の前に、片付けの手がかり（メモ）だけを書く（判定・応答は変えない）
+  if (event === "PreToolUse") recordSessionHint(input);
   return responseOf(host, event, decideHook(host, event, input));
 }
 

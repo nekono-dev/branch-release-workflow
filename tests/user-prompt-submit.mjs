@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 import { hookInput } from "./support/hook-fixtures.mjs";
 import { readRecords, writeRecord } from "../scripts/resume-record.mjs";
+import * as rr from "../scripts/resume-record.mjs";
 
 // 読み込めないときは各関数を失敗として数え、試験の項目が RED として残るようにする
 const agent = await import("../scripts/agent-hooks.mjs").catch(() => ({}));
@@ -484,5 +485,33 @@ export const runUserPromptSubmitChecks = async (eq) => {
       eq(`brw-pr-handoff/9.4 ${host}: 実行形の行の末尾に余計な本文が付いた行が共存するときは、付けない`, sessionsOf(t), { "dev/a": null });
       t.cleanup();
     }
+  }
+  // ---- セッションの手がかり（9.7）: 実行前（PreToolUse）に、信頼済みの brw pr のメモを書く（両ホスト）。応答は従来と同じ ----
+  const hintAt = (t) => (rr.readSessionHint ? rr.readSessionHint(t.dir, t.wt, new Date()) : null);
+  for (const host of ["claude", "codex"]) {
+    const t = fixture({ worktree: true });
+    const ev = hookInput(host, "PreToolUse", { cwd: t.wt, command: `node ${BRW} pr --title 件名`, sessionId: SESSION });
+    handleHook(host, "PreToolUse", ev);
+    eq(`brw-pr-handoff/9.7 ${host}: 信頼済みの brw pr の PreToolUse は、作業場所のメモ（セッション・作業場所）を書く`, hintAt(t), SESSION);
+    t.cleanup();
+  }
+  {
+    const t = fixture({ worktree: true });
+    const ev = hookInput("claude", "PreToolUse", { cwd: t.wt, command: `cd ${t.wt} && node ${BRW} pr --title 件名`, sessionId: SESSION });
+    const before = JSON.stringify(handleHook("claude", "PreToolUse", ev));
+    const after = JSON.stringify(agent.responseOf("claude", "PreToolUse", agent.decideHook("claude", "PreToolUse", ev)));
+    eq("brw-pr-handoff/9.7 PreToolUse の応答（許可・拒否）は、メモを書いても従来の判定と同じ", [before === after, hintAt(t)], [true, SESSION]);
+    t.cleanup();
+  }
+  const noHintCases = [
+    ["別のコマンド（brw status）", (t) => ({ cwd: t.wt, command: `node ${BRW} status`, sessionId: SESSION })],
+    ["session_id が無い", (t) => ({ cwd: t.wt, command: `node ${BRW} pr --title 件名`, sessionId: "" })],
+    ["信頼できない実行ファイル", (t) => ({ cwd: t.wt, command: `node /tmp/brw-94-untrusted/brw.mjs pr --title 件名`, sessionId: SESSION })],
+  ];
+  for (const [label, make] of noHintCases) {
+    const t = fixture({ worktree: true });
+    handleHook("claude", "PreToolUse", hookInput("claude", "PreToolUse", make(t)));
+    eq(`brw-pr-handoff/9.7 PreToolUse（${label}）は、メモを書かない`, hintAt(t), null);
+    t.cleanup();
   }
 };

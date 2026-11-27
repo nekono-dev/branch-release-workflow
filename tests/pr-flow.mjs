@@ -1,5 +1,5 @@
 // `brw pr`（pr-flow）の統合試験。selftest.mjs から呼ばれる。偽の GitHub 接続と、実際の一時リポジトリ（本体・worktree・bare の遠隔）で確かめる。
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +9,7 @@ import { runPr } from "../scripts/pr-flow.mjs";
 import { bodyPathOf, UNFILLED_MARK } from "../scripts/pr-template.mjs";
 import * as publish from "../scripts/publish.mjs";
 import { RESUME_LINE_HEAD, readRecords } from "../scripts/resume-record.mjs";
+import * as resumeRecordMod from "../scripts/resume-record.mjs";
 import { createFakeGitHub } from "./support/fake-github.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
@@ -202,6 +203,23 @@ export const runPrFlowChecks = async (eq) => {
       const x = await run(t, ARGS);
       const rec = readRecords(t.dir);
       eq("brw-pr-handoff/9.5 片付けは、切り出し元（brwBase）を再開の記録の base に入れる", rec[0]?.base, "main");
+      // 9.7: 実行前のメモ（同じ作業場所・10 分以内）の sessionId を、片付けの記録に入れる
+      {
+        const t2 = setup();
+        resumeRecordMod.writeSessionHint?.(t2.dir, { sessionId: "pre-s", dir: realpathSync(t2.wt), now: new Date() });
+        await run(t2, ARGS);
+        const r2 = readRecords(t2.dir);
+        eq("brw-pr-handoff/9.7 片付けは、同じ作業場所の実行前のメモの sessionId を記録に入れる", r2[0]?.sessionId ?? null, "pre-s");
+        eq("brw-pr-handoff/9.7 採用したメモは消費される（片付けの後、メモのファイルが無い）", existsSync(join(t2.dir, ".git", "brw", "session-hint.json")), false);
+        t2.cleanup();
+      }
+      {
+        const t3 = setup();
+        resumeRecordMod.writeSessionHint?.(t3.dir, { sessionId: "other-s", dir: join(t3.dir, "elsewhere"), now: new Date() });
+        await run(t3, ARGS);
+        eq("brw-pr-handoff/9.7 片付けは、別の作業場所のメモ（別のセッションの brw pr）を使わない", readRecords(t3.dir)[0]?.sessionId ?? null, null);
+        t3.cleanup();
+      }
       eq("brw-pr-handoff/7.2 片付けの後に、公開した作業ブランチ・PR の URL・リポジトリ・時刻の再開の記録が残り、セッションは空", [rec.length, rec[0]?.branch, rec[0]?.prUrl, rec[0]?.repository, rec[0]?.sessionId, /\.\d{3}Z$/.test(rec[0]?.at ?? "")], [1, "dev/foo", "https://github.com/acme/app/pull/7", "acme/app", null, true]);
       eq("brw-pr-handoff/7.1 片付けの案内は、続きの再開（brw resume）と新しい作業（brw create）を分け、本体のパスと cd を示す", [x.out.includes(`${BRW_RUN} resume dev/foo`), x.out.includes("brw create"), x.out.includes(`cd '${t.dir}'`), x.out.includes(t.dir)], [true, true, true, true]);
       eq("brw-pr-handoff/4.9 本体でセッションを開始した場合は追加の操作が要らないことを示す", x.out.includes("ホストが本体へ戻す"), true);

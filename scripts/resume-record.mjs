@@ -6,8 +6,8 @@
 // readRecords と resumableFor は読み取りだけで、記録も作業場所も変えない。
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { classifyBranch, git, loadConfig } from "./lib.mjs";
 import { acquire, remoteNameOf } from "./publish.mjs";
 import { mainWorktreeOf, worktreeList } from "./work-remainder.mjs";
@@ -106,19 +106,46 @@ const dirState = (dir) => {
 };
 
 // 記録ファイルを読む。無い（missing）・読めない／形が違う／通常のファイルでない／大きすぎる（bad）・読めた（ok）を区別する
+/**
+ * ファイルを開いた fd で読む（検査と読み取りを同じ fd に対して行い、差し替えの隙間を作らない）。
+ * O_NOFOLLOW でシンボリックリンクを開かず、fstat で通常ファイル・上限（maxBytes）以内を確かめ、上限 + 1 バイトまでしか読まない。
+ * 戻り値: {kind:"ok", text} | {kind:"missing"}（無い）| {kind:"bad"}（読めない・リンク・通常でない・上限超え）
+ */
+const readCapped = (file, maxBytes) => {
+  let fd;
+  try {
+    // O_NONBLOCK: FIFO などの特殊ファイルでも開いたときにブロックしない（開けた後の fstat で通常ファイルだけを読む）
+    fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return e.code === "ENOENT" ? { kind: "missing" } : { kind: "bad" };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) return { kind: "bad" };
+    const buf = Buffer.alloc(maxBytes + 1);
+    let n = 0;
+    for (;;) {
+      const r = readSync(fd, buf, n, buf.length - n, null);
+      if (r <= 0) break;
+      n += r;
+      if (n > maxBytes) return { kind: "bad" };
+    }
+    return { kind: "ok", text: buf.subarray(0, n).toString("utf8") };
+  } catch {
+    return { kind: "bad" };
+  } finally {
+    closeSync(fd);
+  }
+};
+
 const readState = (dir, file) => {
   const d = dirState(dir);
   if (d === "missing") return { kind: "missing" };
   if (d !== "ok") return { kind: "bad" };
-  let st;
+  const f = readCapped(file, MAX_FILE_BYTES);
+  if (f.kind !== "ok") return f;
   try {
-    st = lstatSync(file);
-  } catch (e) {
-    return e.code === "ENOENT" ? { kind: "missing" } : { kind: "bad" };
-  }
-  if (!st.isFile() || st.size > MAX_FILE_BYTES) return { kind: "bad" };
-  try {
-    const raw = JSON.parse(readFileSync(file, "utf8"));
+    const raw = JSON.parse(f.text);
     if (raw === null || typeof raw !== "object" || Array.isArray(raw) || raw.version !== VERSION || !Array.isArray(raw.entries)) return { kind: "bad" };
     return { kind: "ok", entries: raw.entries };
   } catch {
@@ -302,5 +329,104 @@ export function attachSession(main, sessionId, now, { lockWaitMs = LOCK_WAIT_MS,
     return outcome ? { ok: true, attached: outcome.attached } : fail("再開の記録を今は付けられませんでした（ロック、またはファイルの状態を確かめてからやり直してください）。");
   } catch (err) {
     return fail(`再開の記録を保存できません: ${err.code ?? err.message}`);
+  }
+}
+
+// ---- セッションの手がかり（brw-pr-handoff 9.7）: 片付けの前に、PreToolUse（実行前）で書くメモ ----
+// Claude Code は片付けつきの brw pr を「終了コード 1」と報告し、PostToolUse が届かないことがある（実機の観測）。
+// そこで実行前に、信頼済みの brw pr の呼び出しのセッションと作業場所を一時のメモに残し、片付けの記録が読む。
+// メモは <git 共通ディレクトリ>/brw/session-hint.json（最新 1 件）。読むのは 10 分以内・同じ作業場所のときだけ。
+const HINT_FILE = "session-hint.json";
+const HINT_WINDOW_MS = 10 * 60 * 1000;
+const MAX_HINT_BYTES = 4096;
+// 作業場所の実パスは空白を含みうるため、制御・書式・行区切り・私用・未割り当て・代理だけを不正とする（空白は許す）
+const UNSAFE_PATH_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}]/u;
+const isSafeDir = (d) => typeof d === "string" && d.length > 0 && d.length <= MAX_HINT_BYTES && isAbsolute(d) && !UNSAFE_PATH_CHARS.test(d);
+// 実パス（存在しなければ正規化した文字列）
+const realOrResolved = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+// memoDir が worktreePath と同じ場所か、その配下か（パス区切りの接頭辞比較。<wt>-other のような兄弟は含めない）
+const placeWithin = (memoDir, worktreePath) => {
+  const m = realOrResolved(memoDir);
+  const w = realOrResolved(worktreePath);
+  return m === w || m.startsWith(w.endsWith(sep) ? w : w + sep);
+};
+
+/**
+ * 実行前のメモを書く（最新 1 件を置き換える）。不正な値・リンク・上限超え・ロックの失敗は ok:false を返し、例外にしない（何も変えない）。
+ * @param {string} main 本体のパス
+ * @param {{sessionId: string, dir: string, now: Date}} hint sessionId は安全な文字列、dir は作業場所の実パス、now は書いた時刻
+ * @returns {{ok: true} | {ok: false, message: string}}
+ */
+export function writeSessionHint(main, { sessionId, dir, now }, { lockWaitMs = LOCK_WAIT_MS } = {}) {
+  try {
+    if (typeof sessionId !== "string" || !isSafeSession(sessionId) || sessionId === null) return fail("セッションの識別子が不正です。");
+    if (!isSafeDir(dir)) return fail("作業場所のパスが不正です。");
+    const nowMs = now instanceof Date ? now.getTime() : NaN;
+    if (!Number.isFinite(nowMs)) return fail("現在時刻が不正です。");
+    const p = pathsOf(main);
+    if (!p) return fail("セッションの手がかりの場所を決められません（Git のリポジトリの中で実行してください）。");
+    const d = dirState(p.dir);
+    if (d === "unsafe") return fail("再開の記録の保存先（brw）が通常のディレクトリではないため、書きません。");
+    if (d === "missing") mkdirSync(p.dir, { mode: 0o700 });
+    const file = join(p.dir, HINT_FILE);
+    const text = `${JSON.stringify({ version: VERSION, sessionId, dir, at: new Date(nowMs).toISOString() }, null, 2)}\n`;
+    if (Buffer.byteLength(text, "utf8") > MAX_HINT_BYTES) return fail("セッションの手がかりが上限を超えるため、書きません。");
+    const written = locked(file, lockWaitMs, () => {
+      saveAtomic(file, text);
+      return true;
+    });
+    return written ? { ok: true } : fail("セッションの手がかりを今は書けませんでした（ロック）。");
+  } catch (err) {
+    return fail(`セッションの手がかりを保存できません: ${err.code ?? err.message}`);
+  }
+}
+
+/**
+ * 実行前のメモから、片付ける作業場所のセッションを読む。読み取りだけ。
+ * 条件: 10 分以内（未来は不可）・dir が作業場所と同じ場所・内容が検証に通る。どれかに外れる・読めない・無いときは null。
+ * @returns {string | null}
+ */
+export function readSessionHint(main, worktreePath, now, deps = {}) {
+  try {
+    const nowMs = now instanceof Date ? now.getTime() : NaN;
+    if (!Number.isFinite(nowMs) || typeof worktreePath !== "string" || worktreePath === "") return null;
+    const p = pathsOf(main);
+    if (!p || dirState(p.dir) !== "ok") return null;
+    const file = join(p.dir, HINT_FILE);
+    const remove = deps.remove ?? ((f) => rmSync(f, { force: true }));
+    // 検証→採用→消費を、書き込みと同じロックの下で一体にする（ロックが取れなければ null）
+    const got = locked(file, deps.lockWaitMs ?? LOCK_WAIT_MS, () => {
+      const f = readCapped(file, MAX_HINT_BYTES);
+      if (f.kind !== "ok") return null;
+      const raw = JSON.parse(f.text);
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw) || raw.version !== VERSION) return null;
+      const sessionId = raw.sessionId;
+      const at = timeOf(raw.at);
+      if (typeof sessionId !== "string" || !isSafeSession(sessionId) || sessionId === null || !isSafeDir(raw.dir) || !Number.isFinite(at)) return null;
+      const age = nowMs - at;
+      if (age < 0 || age > HINT_WINDOW_MS) return null;
+      // 作業場所と同じ場所、またはその配下（src/ などから呼んだ場合）。兄弟のディレクトリ（<wt>-other）は含めない
+      if (!placeWithin(raw.dir, worktreePath)) return null;
+      if (deps.beforeRemove) deps.beforeRemove();
+      // 消す直前に内容を読み直す。検証のあとで内容が変わっていたら、新しいメモを消さず、返さない
+      const again = readCapped(file, MAX_HINT_BYTES);
+      if (again.kind !== "ok" || again.text !== f.text) return null;
+      // 採用したメモは消費する（同じメモを 2 回目に使わない）。消せなければ返さない（再利用を防ぐ）
+      try {
+        remove(file);
+      } catch {
+        return null;
+      }
+      return sessionId;
+    });
+    return got ?? null;
+  } catch {
+    return null;
   }
 }
