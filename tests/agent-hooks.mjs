@@ -195,6 +195,55 @@ export const runAgentHookChecks = async (eq) => {
     r.cleanup();
   }
 
+  // ---- git add・commit・push の複合（brw-enforcement 15.4） ----
+  {
+    const r = repoOf();
+    const d = r.dir;
+    const heredocCommit = "git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"";
+    // 正例: 変更を伴う操作がすべて確認省略の対象なら、Claude の PreToolUse と Codex の PermissionRequest が許可を返す
+    const allowCases = [
+      "git add a b && git commit -m x",
+      "git add -A && git commit -m x && git push origin dev/foo",
+      `cd ${d} && git add . && git commit -m "a && b"`,
+      `git add -- a.txt && ${heredocCommit}`,
+      `git add a && ${heredocCommit} && git push origin dev/foo`,
+    ];
+    eq("brw-enforcement/15.4 git add・commit・push だけの && 連結は、Claude の PreToolUse と Codex の PermissionRequest が確認を省略する", allowCases.map((c) => ({ claude: preOf("claude", c, d), codexPerm: permOf("codex", c, d) })), Array(allowCases.length).fill({ claude: "allow", codexPerm: "allow" }));
+    eq("brw-enforcement/15.4 Codex の PreToolUse は複合の確認省略を返さない（PermissionRequest だけが許可を返す）", allowCases.map((c) => preOf("codex", c, d)), Array(allowCases.length).fill(null));
+    // 負例: 確認省略せず通常の承認に任せる（応答なし）
+    const passCases = [
+      "git add -f x && git commit -m x",
+      "git add --force x && git commit -m x",
+      "git add -i && git commit -m x",
+      "git add -p && git commit -m x",
+      "git add x | tee",
+      "git add x; git commit -m x",
+      "git add x && git commit -m x > out",
+      "git add x && echo y",
+      "git add $X && git commit -m x",
+      "git add x && git commit --amend -m x",
+      "git add x && git commit -m x || true",
+      "git add x && git commit -m x &",
+      "git add *.js && git commit -m x",
+      "git add ~/x && git commit -m x",
+      "git add :/ && git commit -m x",
+      "git add -Av && git commit -m x",
+      "git add && git commit -m x",
+      "git -C . add x && git commit -m x",
+      "git add x && (git commit -m x)",
+      `git add x && git commit -m "$(cat <<'EOF'\nfix\nEOF\n)" -m "$(date)"`,
+      "git add x && git commit -m x && git status",
+    ];
+    eq("brw-enforcement/15.4 複合の形が確認省略の条件から外れる場合は、どのホストも応答しない（通常の承認に任せる）", passCases.map((c) => ({ claude: preOf("claude", c, d), codex: preOf("codex", c, d), codexPerm: permOf("codex", c, d) })), Array(passCases.length).fill({ claude: null, codex: null, codexPerm: null }));
+    // 保護ブランチへの push を含む複合は、確認省略せず拒否のまま（evaluateAll の deny が先に効く）
+    eq("brw-enforcement/15.4 保護ブランチへの push を含む複合は拒否のまま", ["git add x && git push origin main", "git add x && git commit -m x && git push origin main"].map((c) => preOf("claude", c, d)), ["deny", "deny"]);
+    // 単体の操作は従来どおり
+    eq("brw-enforcement/15.4 単体の push・commit の結果は変わらない", [bothOf("git push origin dev/foo", d), bothOf("git commit -m x", d)].map((b) => [b.claude, b.codexPerm]), [["allow", "allow"], ["allow", "allow"]]);
+    eq("brw-enforcement/15.4 push どうし・commit どうしの複合は、すべてが対象なら許可する", ["git push origin dev/foo && git push origin dev/foo", "git commit -m x && git commit -m y"].map((c) => preOf("claude", c, d)), ["allow", "allow"]);
+    eq("brw-enforcement/15.4 一つでも通常形でない commit を含む複合は確認を省略しない", ["git commit -m x && git commit --amend -m y", "git push origin dev/foo && git commit --amend -m y"].map((c) => preOf("claude", c, d)), [null, null]);
+    r.cleanup();
+  }
+
   // ---- 拒否（保護・分岐元・宣言外への直接操作） ----
   {
     const r = repoOf();

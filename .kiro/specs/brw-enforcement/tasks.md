@@ -254,7 +254,7 @@
   - _Boundary: 実環境フック検証_
   - _Requirements: 3.5_
 
-- [ ] 15. 作業ブランチの commit を確認省略の対象にする
+- [x] 15. 作業ブランチの commit を確認省略の対象にする
 - [x] 15.1 (P) 宣言の確認省略に commit の項目を加える
   - 宣言の `autoApprove` が commit の項目を受け付け、未指定は有効、明示的な `false` だけが無効になる。未知のキーの検査は従来どおり残る。
   - 未登録・編集中の宣言では commit も確認を省略しない。旧パスの宣言でも同じ規則で読める。
@@ -274,7 +274,7 @@
   - _Boundary: 操作判定_
   - _Depends: 15.1, 15.2_
   - _Requirements: 2.14, 2.18_
-- [ ] 15.4 `git add` と commit と push の複合コマンドを確認省略できるようにする
+- [x] 15.4 `git add` と commit と push の複合コマンドを確認省略できるようにする
   - 確認省略の判定が、変更を伴う操作だけを数え、`cd`・`git add`・commit・push の区間だけから成る複合コマンドを対象にする。すべての変更操作が確認省略の対象のときだけ許可を返す。
   - `git add` はパス指定と限定したオプションだけを許し、強制・対話のオプション、パイプ、リダイレクト、他のコマンドを含む複合は通常の承認に委ねる。保護ブランチへの push を含む複合は拒否のまま。
   - Claude の実行前判定と Codex の承認要求で、同じコマンドが同じ結果になる。単体の push の既存の結果は変わらない。
@@ -419,3 +419,4 @@
 - 15.1（2026-11-27、完了）: `autoApproveOf` の戻り値に `commit` を追加（未登録・編集中は false、明示 false だけが無効。旧パスの宣言も同じ規則）。
 - 15.2（2026-11-27、完了。レビュー 7 回・デバッグ役 1 回）: commit の通常形は `op.flags`（`amend`・`noVerify`・`configOverride`・`envAssign`・`messageNormal`・`unknownArg`・`fileStdin`・`normal`）。**15.3 は `op.flags.normal` を参照する**（push の `op.normal` とは置き場所が違う）。判定は許可リスト式（既定 false。メッセージ指定が 1 つ以上あり、全語・リダイレクト・前置・グローバルオプションが許可形と証明できたときだけ true）。除外リスト式で拒否形を足す作りは、レビューで穴が次々出て失敗した（教訓: 「通常と言い切れる形」を列挙し、残りはすべて false にする）。通常にならない主な形: メッセージ指定なし、`-C`・`-c`・`--fixup`・`--squash`・`-t`・`-e`、引用なしのチルダ展開（lex が語に印を付ける）、展開・glob・`!`・`$'…'`、`-C`/`-c` の値に展開があるグローバルオプション、`command` 以外の wrapper（env・nice・timeout・sudo・time ほか）、`-F` はクォート付き heredoc の `-` だけ。`env` の `-C`・`--chdir`・`-S`・`--split-string`（結合形・長いオプションの前方一致を含む）は対象を確定できない（unparseable）。結合形の `-cKEY=VAL` にも送り先のキー検査をかけた。lex は heredoc の本文を宣言したコマンドの項目へ結び付ける。限界: 本文に `'` を含むクォート付き heredoc を `$(…)` に入れると既存の括弧の読み取りで unparseable になる（安全側）。引用なしの `-m hello` は通常、`2>&1` などのリダイレクトは通常でない（過検出）。
 - 15.3（2026-11-27、完了）: `evalCommit(op, config, auto, registered)` が、開発ブランチの commit を「`auto.commit` が有効（未登録・編集中は無効）→ `op.via==="commit"` で flags あり → `flags.normal===true`」の順に確かめ、満たすと `eligibleForApproval`（skip）、欠くと通常の承認（`approvalWhy`: `unregistered`/`opt-out`（`whyOff`）・`not-commit-path`（rebase・cherry-pick・revert・am）・`not-normal`）。保護・分岐元・宣言外は従来どおり deny。**この時点で、単独の通常の `git commit` は既存の `plainOperation` によりフックが許可を返す**（要件 2.9 の意図どおり）。複合（`git add … && git commit …`）は 15.4 まで通常の承認のまま。`evaluateAll` では `push && commit` が eligibleForApproval になりうるが、フックは複合を `plainOperation` で通さない。
+- 15.4（2026-11-27、完了。15 群はこれで完了）: 複合の確認省略は `agent-hooks.mjs` の `plainCompound`（`plainOperation` が操作 2 つ以上のとき使う）。字句解析（`lex`）の項目で構造を確かめるため、引用内の `&&` は区切りにならない。許す形は、先頭の任意の `cd <dir>`、`git add`（`-A`・`-u`・`--all`・`-N`・`-v` と、展開・glob・チルダ・`:` 始まりでないパスだけ。引数なしは不可）、commit（`flags.normal` が通常、メッセージの置換はクォート付き heredoc の `cat` だけ）、push の区間を `&&` で連ねたもの（末尾は `;` だけ可）。操作の数と種類が区間と一致しないと確認省略しない。`git -C`、`;`・`||`・`|`・`&`・リダイレクト・他のコマンドを含むものは通常の承認。保護向け push は evaluateAll の deny が先に効く。Claude の PreToolUse と Codex の PermissionRequest は同じ結果、Codex の PreToolUse は従来どおり allow を返さない。

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { BRW_RUN } from "./brw-cmd.mjs";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
 import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoRoot, sanitize } from "./lib.mjs";
-import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
+import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
 
@@ -272,11 +272,80 @@ function refMovingIn(command) {
 
 // ---- 単独の操作であることの確認 ----
 
+// git add で確認省略してよいオプション（強制・対話・パッチのオプションは含めない）
+const ADD_PLAIN_OPTS = new Set(["-A", "-u", "--all", "-N", "-v"]);
+// 確認省略してよい commit の -m に入る、クォートした heredoc の置換（15.2 の通常形と同じ形）
+const HEREDOC_SUB = /^cat <<'([A-Za-z_][A-Za-z0-9_]*)'\n[\s\S]*\n\1\n$/;
+
+/** git add の語が、限定したオプションと（`--` の後の）パスだけか。展開・glob・チルダ・リダイレクトは含まない。 */
+function plainAddArgs(words) {
+  if (words.length === 0) return false;
+  let afterDashDash = false;
+  for (const x of words) {
+    if (x.dyn || x.glob || x.tilde || x.redir || x.v === "") return false;
+    if (afterDashDash) {
+      if (x.v.startsWith(":")) return false; // pathspec の特殊記法は通常形としない
+      continue;
+    }
+    if (x.v === "--") { afterDashDash = true; continue; }
+    if (x.v.startsWith("-")) {
+      if (!ADD_PLAIN_OPTS.has(x.v)) return false;
+      continue;
+    }
+    if (x.v.startsWith(":")) return false;
+  }
+  return true;
+}
+
 /**
- * 確認省略してよい形か。単独の git・gh の操作（先頭の cd を除く）で、語に分けられ、他の操作・認識外の記号を含まない。
+ * 複合（&& で連結した git add・commit・push）が確認省略してよい形か（brw-enforcement 15.4）。
+ * 先頭の任意の `cd <dir>`、続く git add（限定した引数）・git commit（通常形）・git push の区間だけを、`&&` で連結したものに限る。
+ * 字句解析の項目で構造を確かめるので、引用の中の `&&` は区切りとして扱わない。操作の数と種類が区間と一致しなければ確認省略しない（展開の中の操作を見逃さないため）。
+ */
+function plainCompound(command, cls) {
+  const { items, broken } = lex(command);
+  if (broken || items.length === 0) return false;
+  const kinds = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.type !== "cmd" || it.heredoc) return false;
+    // 最後の区間の後ろは終わり（;）だけ。途中の区切りは && のみ
+    if (i === items.length - 1 ? it.sep !== ";" : it.sep !== "&&") return false;
+    const w = it.words;
+    if (w.length === 0 || w.some((x) => x.redir) || w[0].dyn) return false;
+    if (w[0].v === "cd") {
+      // cd は先頭の 1 つだけ。引数は展開・glob なしの 1 語
+      if (i !== 0 || w.length !== 2 || it.subs.length || w[1].dyn || w[1].glob || w[1].v === "") return false;
+      continue;
+    }
+    if (w[0].v !== "git" || w.length < 2 || w[1].dyn) return false;
+    const sub = w[1].v;
+    const args = w.slice(2);
+    if (sub === "add") {
+      if (it.subs.length || !plainAddArgs(args)) return false;
+      kinds.push("query");
+    } else if (sub === "commit") {
+      if (!it.subs.every((s) => HEREDOC_SUB.test(s)) || args.some((x) => x.glob || x.tilde)) return false;
+      kinds.push("commit");
+    } else if (sub === "push") {
+      if (it.subs.length || args.some((x) => x.dyn || x.glob || x.tilde)) return false;
+      kinds.push("push");
+    } else return false;
+  }
+  // 区間ごとの操作と一致し、変更操作（commit・push）を含み、commit は通常形と認めたものだけ
+  const ops = cls.operations;
+  if (kinds.length === 0 || ops.length !== kinds.length || !kinds.some((k) => k !== "query")) return false;
+  if (!kinds.every((k, i) => ops[i].kind === k)) return false;
+  return ops.every((o) => o.kind !== "commit" || o.flags?.normal === true);
+}
+
+/**
+ * 確認省略してよい形か。次のいずれか。
+ *  - 単独の git・gh の操作（先頭の cd を除く）で、語に分けられ、他の操作・認識外の記号を含まない
+ *  - git add・commit・push の区間だけの && 連結（plainCompound）
  */
 function plainOperation(command, cls) {
-  if (cls.operations.length !== 1) return false;
+  if (cls.operations.length !== 1) return plainCompound(command, cls);
   const cd = stripCd(command);
   if (!cd.ok) return false;
   const w = scanWords(cd.rest);
