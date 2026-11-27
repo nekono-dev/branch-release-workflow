@@ -7,6 +7,7 @@
 #   pushed-remote   宣言あり。origin にだけ dev/login-form がある（ローカルには無い）
 #   merged-work     宣言あり。dev/contact-link は push 済みで origin/develop にマージ済み、dev/wip-banner は push 済みで未マージ。どちらも worktree が残っている
 #   no-config       宣言ファイルが無い
+#   design-note-uncommitted  宣言あり。dev/design-note の worktree に docs/design-note.md（未 commit・未追跡の新規ファイル）がある
 set -eu
 variant="${1:?variant}"
 here="$(pwd)"
@@ -106,6 +107,18 @@ HTML
     git clone -q -b develop "$here/origin.git" "$tmp"
     ( cd "$tmp" && git -c user.name=dev -c user.email=dev@example.com merge -q --no-ff -m "Merge dev/contact-link" origin/dev/contact-link && git push -q origin develop )
     rm -rf "$tmp"
+    git fetch -q origin ;;
+  design-note-uncommitted)
+    git worktree add -q --no-track -b dev/design-note .claude/worktrees/dev-design-note origin/develop
+    ( cd .claude/worktrees/dev-design-note
+      mkdir -p docs
+      cat > docs/design-note.md <<'MD'
+# 設計メモ
+
+- 問い合わせフォームは `/contact` に置く。
+- 送信内容はメールで受け取る。
+MD
+    )
     git fetch -q origin ;;
   *) echo "unknown variant: $variant" >&2; exit 2 ;;
 esac

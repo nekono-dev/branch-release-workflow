@@ -46,6 +46,7 @@ import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runTtyObserveChecks } from "./tty-observe.mjs";
 import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
+import { runInstructionChecks } from "./instructions.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -667,6 +668,9 @@ await runTtyObserveChecks(eq);
 
 // ---- 作業ブランチの残りの検出（brw-enforcement 16.1） ----
 await runWorkRemainderChecks(eq);
+
+// ---- 利用者向けの指示文面の追従（brw-enforcement 17.1） ----
+runInstructionChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

@@ -79,6 +79,7 @@ claude --plugin-dir <このリポジトリの clone>
 - `brw check` が ERROR を出さないこと（宣言が登録されている）
 - 保護ブランチ上で `git commit` を試み、フックに拒否されること
 - `brw create <名前>` で作業ブランチと worktree ができること
+- フックが使えない環境（未導入・未信頼の Codex など）では、応答を終える前に `brw guard --finish` を実行する必要がある（終了前の確認は SKILL.md の「作業の区切りと終了前の確認」）。フックのある環境では Stop のフックが同じ判定で止める。
 
 ## 4. Ruleset とフックを導入する（brw setup）
 
