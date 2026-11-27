@@ -37,7 +37,7 @@ const worktreeOf = (path, branchRef, flags) => ({
 
 // git worktree list --porcelain を解析する。先頭が本体。失敗したら null
 // -z（2.36 以降）では NUL 区切りで読むため、改行を含むパスも正しく扱える。古い git は従来の改行区切りで読む
-const worktreeList = (cwd) => {
+export const worktreeList = (cwd) => {
   if (gitSupportsZ(cwd)) {
     const out = gitRaw(cwd, ["worktree", "list", "--porcelain", "-z"]);
     if (out === null) return null;

@@ -57,6 +57,7 @@ import { runCreateOrReusePrChecks } from "./create-or-reuse-pr.mjs";
 import { runBasePrChecks } from "./base-pr.mjs";
 import { runBasePrObserveChecks } from "./base-pr-observe.mjs";
 import { runRealEnvCleanupChecks } from "./real-env-cleanup.mjs";
+import { runResumeRecordChecks, runResumeRecordStrictChecks } from "./resume-record.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -711,6 +712,10 @@ await runBasePrChecks(eq);
 // ---- 分岐元からの PR の実環境の観測の道具（brw-pr-handoff 5.2・8.2）。判定・記録の検証のみ（実 GitHub・実ホストは呼ばない） ----
 await runBasePrObserveChecks(eq);
 await runRealEnvCleanupChecks(eq);
+
+// ---- 再開の記録の書き読み・再開の判定・セッションの関連付け（brw-pr-handoff 9.2） ----
+await runResumeRecordChecks(eq);
+await runResumeRecordStrictChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
