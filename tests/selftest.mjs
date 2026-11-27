@@ -51,6 +51,8 @@ import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { runInstructionChecks } from "./instructions.mjs";
 import { runPrMergeChecks, runPrMergeCliChecks, runPrMergeReviewChecks } from "./pr-merge.mjs";
 import { runBaseSyncGitChecks } from "./base-sync-git.mjs";
+import { runBaseSyncChecks } from "./base-sync.mjs";
+import { runCreateOrReusePrChecks } from "./create-or-reuse-pr.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -691,6 +693,10 @@ await runPrMergeReviewChecks(eq);
 
 // ---- 分岐元の取り込みと差の判定を実際の git で再現する（brw-pr-handoff 5.1） ----
 await runBaseSyncGitChecks(eq);
+
+// ---- 分岐元の取り込み・差の数・作成先の決定（brw-pr-handoff 7.2）と、作業の記録なしの PR 再利用・作成（7.1） ----
+await runBaseSyncChecks(eq);
+await runCreateOrReusePrChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);

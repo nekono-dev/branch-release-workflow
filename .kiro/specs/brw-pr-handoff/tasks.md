@@ -130,12 +130,12 @@
   - _Requirements: 1.11_
 
 - [ ] 7. 分岐元から保護ブランチへの PR を作る
-- [ ] 7.1 (P) PR の再利用・作成を、作業の記録に依存しない関数として切り出す
+- [x] 7.1 (P) PR の再利用・作成を、作業の記録に依存しない関数として切り出す
   - 公開の PR 処理から、同じ取り込み元・取り込み先のオープンな PR の探索、再利用、作成、作成後の照合を、リポジトリ・head・base・タイトル・本文・head の OID を受け取る関数として切り出して公開する。既存の公開の処理もこれを使い、挙動を変えない。
   - 既存の公開の試験が変わらず通り、切り出した関数を作業の記録なしで呼んで、再利用・作成・食い違いの停止を確認できる。
   - _Boundary: 公開（PR）_
   - _Requirements: 1.8_
-- [ ] 7.2 (P) 分岐元の取り込みと差の確認を作る
+- [x] 7.2 (P) 分岐元の取り込みと差の確認を作る
   - 分岐元の push 先のリモート名（`pushRemote` などを考慮し、`origin` 固定にしない）で、取得、先行の確認、`ff-only` による取り込み、保護ブランチとの差の数を求める部品を作る。先行は `ff-only` に任せず別に数える。先行・分岐・取得失敗・取り込み失敗・差なしは更新せず理由つきで止まる。
   - 作成先の決定（`--target` か、保護ブランチが 1 つのときそれ）も含め、5.1 の各状態と、`pushRemote` が `origin` 以外の場合を、一時リポジトリの単体テストで確認できる。
   - _Boundary: 分岐元からの PR_
@@ -177,3 +177,5 @@
   - _Requirements: 1.8, 1.11, 3.10_
 - 5.1（2026-11-27、完了）: 実 git の検証は `tests/base-sync-git.mjs`（19 件。一時リポジトリ＋bare remote、HOME・Git 設定を隔離）。観測を固定した: 最新・リモート先行（`merge --ff-only` で取り込める）・**ローカル先行でも `ff-only` が成功する**（先行は `rev-list --count <remote>/<base>..<base>` で別に数える必要がある根拠）・分岐（`ff-only` が失敗、先行・遅れとも 1 以上）・保護ブランチと差なし（差 0）・未追跡ファイルだけなら取り込めて内容が残る・同じ追跡ファイルを変更していると衝突で失敗して内容が残る・`pushRemote`/`remote.pushDefault` が `origin` 以外のとき origin 固定だと遅れを見逃す（解決したリモート名で比べる）。7.2 の部品はこの観測を前提にする。
 - 6.1・6.2（2026-11-27、完了。レビュー 5 回。6 群はこれで完了）: 判定は `evalPrCreateRules`（scripts/operation-decision.mjs）。**取り込み元が恒常的な分岐元（`base`）、取り込み先が保護ブランチ**の組が新しく適合（`pr-create-base-protected`）。ほかの組（開発間・宣言外・保護が取り込み元・分岐元→分岐元/開発/宣言外・別リポジトリ head）の拒否は不変、エージェント起点の直接の作成は適合でも `pr-create-use-brw` で拒否、`origin: "brw-publish"` だけが通る。案内は組ごとに選ぶ `prAlternative`・`prFlowAlternative`: `brw pr` で作れる組（開発→保護・分岐元、分岐元→保護）だけに `brw pr-template`→`brw pr` を示し、作れない組には「作れない理由→GitHub 上での作成手順→作成画面の URL（`/compare/<base>...<head>?expand=1`。ref は Git の規則で検証し Unicode は許し、各区間を `encodeURIComponent`。不正・長すぎる ref は URL を出さず Web 画面の手順だけ）」、開発ブランチ間は URL を出さず `brw merge`、同名（head と base が同じ）は「取り込みは不要」。長さは**最終的な reason と alternative の連結が 500 文字**に収まるよう管理し（結論を先頭、ref の表示は 60 文字（エスケープ後）で省略、URL は残りの文字数に全体が収まるときだけ、パスを含む実行の形は末尾）、`brw work start` の分岐元の拒否文に「分岐元から保護ブランチへの PR は `brw pr` で作れる」を追加（publish-cli.mjs）。副産物: 過去のタスクで commit 済みのテストにあった生の制御文字（U+202E・U+200B・U+FEFF・U+2028。tests/decision.mjs・work-remainder.mjs・pr-merge.mjs）を `\uXXXX` 表記に改めた（ソースで表示順が偽装されるのを防ぐ）。**7.x の注意**: 案内は `brw pr` を分岐元でも示すが、実体（調整役）は 7.3・7.4 で作る。
+- 7.1（2026-11-27、完了）: `scripts/publish-pr.mjs` に `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`）を切り出し、`runPublishPr` はこれを使う（挙動不変）。作業の記録・状態・計画に依存しない。成功は `{ok:true, reused, created, reconciled, pull}`、止まる場合は `{ok:false, kind:"failed"|"invalidInput"|"prohibited"|"needsApproval", code, message, ...}`（`base-conflict`・`pr-draft`・`pr-ambiguous`・`pr-mismatch`（`createdUrl`・`differences` つき）・`pr-unconfirmed`・`pr-title-required` など）。`beforeCreate` は作成の直前（既存 PR が無いときだけ）に呼ばれ、止める結果（承認待ち・禁止）を返せる（7.3 が承認の判定に使う）。
+- 7.2（2026-11-27、完了。レビュー 2 回）: `scripts/base-sync.mjs` の `syncBase(cwd, base, target?)`・`countDiff(cwd, target, base)`・`resolveTarget(config, explicit)`。リモートは `remoteNameOf`（`pushRemote` → `remote.pushDefault` → `branch.<>.remote` → `origin`）。fetch は **明示した refspec** `+refs/heads/<名前>:refs/remotes/<リモート>/<名前>`（`remote.<>.fetch` の設定に依存しない）、比較・merge は完全参照 `refs/remotes/…`・`refs/heads/…`（同名ブランチの曖昧さを避ける）。先行は `rev-list --count` で別に数え（`ff-only` は先行でも成功するため）、先行のみ `ahead`・先行と遅れの両方 `diverged`・取得失敗 `fetch-failed`・取り込み失敗 `ff-failed`（現在のブランチが分岐元でないときも merge せず `ff-failed`）。`countDiff` は取得失敗・不正な名前で `-1`（0 と区別する。**7.3 は `-1` を止める判定にする**）。`resolveTarget` は宣言の `protectedBranches` の要素が 1 つで固定名のときだけ自動選択（パターンを含む複数・0 件は `--target` を要求）。git は引数配列で呼び（シェルを介さない）、`-` で始まる名前は拒否する。

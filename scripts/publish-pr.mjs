@@ -148,6 +148,74 @@ export async function existingPr(session, target, { branch, base, head }) {
   return { state: "reuse", pull: found.pull };
 }
 
+/** 失敗の結果（kind・判別の code・利用者への文言）を作る。 */
+const failure = (kind, code, extra = {}) => ({ ok: false, kind, code, message: msgOf(code), ...extra });
+/** 入力の誤りの結果。 */
+const invalid = (code, message) => ({ ok: false, kind: "invalidInput", code, message });
+
+/**
+ * 同じ取り込み元・取り込み先のオープンな PR を、作業の記録（作業 ID・状態・計画・ロック）に依存せず、探索・再利用・作成・照合する（brw-pr-handoff 7.1）。
+ * 順序: 対象の照合 → 既存 PR の探索（同じ head・base が 1 件なら再利用）→ beforeCreate（作成の直前の確認）→ 作成 → 作成後の照合。
+ * 応答喪失（reconcile）では既存 PR を取り直して照合し、一致すれば二重に作らず reconciled として返す。
+ * GitHub への書き込みは session.createPull だけ。
+ * @param {object} session createGitHubSession の結果
+ * @param {{id: number, owner: string, name: string}} target 対象リポジトリ
+ * @param {{branch: string, base: string, headOid: string, title?: string, body?: string, beforeCreate?: () => (null | object)}} input
+ *   branch: 取り込み元のブランチ名（head）。base: 取り込み先のブランチ名。headOid: 取り込み元の commit（OID）。
+ *   title: 新規作成のときに必須（再利用では不要）。
+ *   beforeCreate: 既存 PR が無く作成が必要なときだけ、作成の直前に呼ぶ。null を返せば続行し、結果オブジェクトを返せば作成せずにそれを返す。
+ * @returns 成功 {ok:true, reused, created, reconciled, pull}。
+ *   失敗 {ok:false, kind, code, message, ...}。kind は "failed"（GitHub の失敗・食い違い・複数候補。code を持つ）・"invalidInput"（入力の誤り）、
+ *   または beforeCreate が返した "prohibited"・"needsApproval" など。作成後の食い違いは createdUrl と differences を添える。
+ */
+export async function createOrReusePr(session, target, input = {}) {
+  const { branch, base, headOid, title, body, beforeCreate } = input;
+  if (!session || typeof session.confirmTarget !== "function" || typeof session.request !== "function" || typeof session.findOpenPull !== "function" || typeof session.createPull !== "function")
+    return invalid("session-invalid", "GitHub のクライアントを指定してください。");
+  if (body !== undefined && (typeof body !== "string" || body.length > BODY_MAX)) return invalid("body-invalid", "PR の本文は文字列（64 KiB 以内）で指定してください。");
+  if (title !== undefined && !validTitle(title)) return invalid("title-invalid", "PR のタイトルは 1 行の空でない文字列（256 文字以内）で指定してください。");
+
+  // (a) 対象の照合（読み取りのみ）
+  const t = { host: session.host, owner: target.owner, name: target.name, repositoryId: target.id };
+  const confirmedTarget = await session.confirmTarget(t);
+  if (!confirmedTarget.ok) return failure("failed", codeOfFailure(confirmedTarget));
+
+  // (b) 既存 PR の探索: 同じ head・base が 1 件なら再利用して完了（書き込みは無い）
+  const ex = await existingPr(session, t, { branch, base, head: headOid });
+  if (ex.state === "blocked") return failure("failed", ex.code);
+  if (ex.state === "reuse") return { ok: true, reused: true, created: false, reconciled: false, pull: ex.pull };
+
+  // (c) 作成の直前の確認（呼び出し側の判定・記録）。止めるなら作成せず、その結果を返す
+  if (beforeCreate) {
+    const stop = await beforeCreate();
+    if (stop) return stop;
+  }
+  if (title === undefined) return invalid("pr-title-required", PR_MESSAGES["pr-title-required"]);
+
+  // (d) 作成（書き込みは createPull だけ）。本文は指定があるときだけ送る
+  const made = await session.createPull(t, {
+    title: title.trim(),
+    ...(body !== undefined ? { body } : {}),
+    headRef: branch,
+    baseRef: base,
+    headOid,
+  });
+
+  // (e) 応答の照合
+  if (made.ok) return { ok: true, reused: false, created: true, reconciled: false, pull: made.pull };
+  if (made.created) {
+    // 作成後に食い違い: 作成済みの URL と差異を報告するが、成功とは扱わない
+    return { ...failure("failed", "pr-mismatch"), createdUrl: made.createdUrl ?? null, differences: made.differences ?? [] };
+  }
+  if (made.reconcile) {
+    // 応答喪失・競合: 既存 PR を取り直して照合する（二重に作らない）
+    const re = await existingPr(session, t, { branch, base, head: headOid });
+    if (re.state === "reuse") return { ok: true, reused: false, created: false, reconciled: true, pull: re.pull };
+    return failure("failed", re.state === "blocked" ? re.code : "pr-unconfirmed");
+  }
+  return failure("failed", codeOfFailure(made));
+}
+
 /**
  * 保護対象への公開で PR を作成するか、既存の PR を再利用して完了する。
  * @param {{planId: string, repository: {id: number, owner: string, name: string}, session?: object, confirmed?: boolean, title?: string, body?: string, lockWaitMs?: number}} opts
@@ -222,74 +290,57 @@ async function prLocked(cwd, file, workId, o) {
   if (baseRemote.error) return finishPr(cwd, workId, { outcome: "failed", code: "remote-unreadable", lockWaitMs });
   if (baseRemote.oid === null) return failC("conflict", "integration-missing", PR_MESSAGES["integration-missing"]);
 
-  if (!session || typeof session.confirmTarget !== "function" || typeof session.request !== "function" || typeof session.findOpenPull !== "function" || typeof session.createPull !== "function")
-    return failC("invalidInput", "session-invalid", "GitHub のクライアントを指定してください。");
-
-  // (2) GitHub の読み取り: 対象の照合と既存 PR の確認（書き込みはまだしない）
-  const target = { host: session.host, owner: repository.owner, name: repository.name, repositoryId: repository.id };
-  const confirmedTarget = await session.confirmTarget(target);
-  if (!confirmedTarget.ok) return finishPr(cwd, workId, { outcome: "failed", code: codeOfFailure(confirmedTarget), lockWaitMs });
-
-  const ex = await existingPr(session, target, { branch, base, head });
-  if (ex.state === "blocked") return finishPr(cwd, workId, { outcome: "failed", code: ex.code, lockWaitMs });
-  if (ex.state === "reuse") return completePr(cwd, workId, { pull: ex.pull, created: false, reconciled: false, code: "reused", base, repository, lockWaitMs });
-
-  // 作成が必要: 禁止・タイトル・判定の順に確かめる（タイトルは実際の作成引数として判定に使う）
-  if (restrictionsOf(v.w).noPr) return finishPr(cwd, workId, { outcome: "prohibited", code: "work-restriction", lockWaitMs });
-  if (title === undefined) return failC("invalidInput", "pr-title-required", PR_MESSAGES["pr-title-required"]);
-  const titleText = title.trim();
-  const d = decidePr(cwd, v.w, { base, branch, title: titleText, repository }, confirmed);
-  if (d.kind !== "proceed") {
-    const [outcome, code] = stopOf(d);
-    return finishPr(cwd, workId, { outcome, code, lockWaitMs });
-  }
-
-  // (3) 状態ロック内で計画・制限・判定を取り直し、操作の開始を記録する（開始後は取り消せない）
-  const started = update(cwd, (state) => {
-    const v2 = verifyPlan(cwd, state, workId, planId);
-    if (!v2.ok) return v2;
-    const pre2 = pushPreflight(cwd, v2.g, v2.w, repository);
-    if (!pre2.ok) return pre2;
-    const d2 = decidePr(cwd, v2.w, { base, branch, title: titleText, repository }, confirmed);
-    if (d2.kind !== "proceed") {
-      const [outcome, code] = stopOf(d2);
-      setPrResult(v2.w, outcome, code, null);
-      v2.w.updatedAt = now();
-      return { ok: true, stop: { outcome, code } };
+  // (2)〜(5) GitHub の照合・既存 PR の再利用・作成・照合は createOrReusePr が行う。
+  // 作成の直前に、禁止・タイトル・判定・操作の開始の記録を確かめる（既存 PR の再利用では呼ばない）
+  const titleText = title === undefined ? undefined : title.trim();
+  const gate = () => {
+    if (restrictionsOf(v.w).noPr) return { ok: false, kind: "prohibited", code: "work-restriction" };
+    if (title === undefined) return invalid("pr-title-required", PR_MESSAGES["pr-title-required"]);
+    const d = decidePr(cwd, v.w, { base, branch, title: titleText, repository }, confirmed);
+    if (d.kind !== "proceed") {
+      const [outcome, code] = stopOf(d);
+      return { ok: false, kind: outcome, code };
     }
-    if (d2.execution === "auto" && !plannedPr(v2.plan, base, branch, repository.id))
-      return failC("conflict", "plan-pr-missing", PR_MESSAGES["plan-pr-missing"]);
-    const prior = v2.w.started && typeof v2.w.started === "object" ? v2.w.started : {};
-    v2.w.started = { ...prior, pr: { at: now(), headOid: head, base, execution: d2.execution } };
-    v2.w.updatedAt = now();
-    return { ok: true, proceed: d2 };
-  }, { lockWaitMs });
-  if (!started.ok) return started;
-  if (started.stop) return outcomeReturn(cwd, workId, started.stop.outcome, started.stop.code);
+    // (3) 状態ロック内で計画・制限・判定を取り直し、操作の開始を記録する（開始後は取り消せない）
+    const started = update(cwd, (state) => {
+      const v2 = verifyPlan(cwd, state, workId, planId);
+      if (!v2.ok) return v2;
+      const pre2 = pushPreflight(cwd, v2.g, v2.w, repository);
+      if (!pre2.ok) return pre2;
+      const d2 = decidePr(cwd, v2.w, { base, branch, title: titleText, repository }, confirmed);
+      if (d2.kind !== "proceed") {
+        const [outcome, code] = stopOf(d2);
+        setPrResult(v2.w, outcome, code, null);
+        v2.w.updatedAt = now();
+        return { ok: true, stop: { outcome, code } };
+      }
+      if (d2.execution === "auto" && !plannedPr(v2.plan, base, branch, repository.id))
+        return failC("conflict", "plan-pr-missing", PR_MESSAGES["plan-pr-missing"]);
+      const prior = v2.w.started && typeof v2.w.started === "object" ? v2.w.started : {};
+      v2.w.started = { ...prior, pr: { at: now(), headOid: head, base, execution: d2.execution } };
+      v2.w.updatedAt = now();
+      return { ok: true, proceed: d2 };
+    }, { lockWaitMs });
+    if (!started.ok) return { ok: false, kind: "raw", error: started.error };
+    // 状態ロック内で止めた結果は、そこで記録済み
+    if (started.stop) return { ok: false, kind: "recorded", outcome: started.stop.outcome, code: started.stop.code };
+    return null;
+  };
 
-  // (4) PR の作成（書き込みは createPull だけ）。本文は指定があるときだけ送る
-  const made = await session.createPull(target, {
-    title: titleText,
-    ...(body !== undefined ? { body } : {}),
-    headRef: branch,
-    baseRef: base,
-    headOid: head,
-  });
-
-  // (5) 応答の照合
-  if (made.ok) return completePr(cwd, workId, { pull: made.pull, created: true, reconciled: false, code: null, base, repository, lockWaitMs });
-  if (made.created) {
-    // 作成後に食い違い: 作成済みの URL と差異を報告するが、完了とは記録しない
-    return finishPr(cwd, workId, { outcome: "failed", code: "pr-mismatch", lockWaitMs, extra: { createdUrl: made.createdUrl ?? null, differences: made.differences ?? [] } });
+  const made = await createOrReusePr(session, repository, { branch, base, headOid: head, title: titleText, body, beforeCreate: gate });
+  if (!made.ok) {
+    if (made.kind === "raw") return { ok: false, error: made.error };
+    if (made.kind === "recorded") return outcomeReturn(cwd, workId, made.outcome, made.code);
+    if (made.kind === "invalidInput") return failC(made.kind, made.code, made.message);
+    return finishPr(cwd, workId, {
+      outcome: made.kind,
+      code: made.code,
+      lockWaitMs,
+      extra: "differences" in made ? { createdUrl: made.createdUrl, differences: made.differences } : undefined,
+    });
   }
-  if (made.reconcile) {
-    // 応答喪失・競合: 既存 PR を取り直して照合する（二重に作らない）
-    const re = await existingPr(session, target, { branch, base, head });
-    if (re.state === "reuse") return completePr(cwd, workId, { pull: re.pull, created: false, reconciled: true, code: "reconciled", base, repository, lockWaitMs });
-    const code = re.state === "blocked" ? re.code : "pr-unconfirmed";
-    return finishPr(cwd, workId, { outcome: "failed", code, lockWaitMs });
-  }
-  return finishPr(cwd, workId, { outcome: "failed", code: codeOfFailure(made), lockWaitMs });
+  const code = made.reused ? "reused" : made.reconciled ? "reconciled" : null;
+  return completePr(cwd, workId, { pull: made.pull, created: made.created, reconciled: made.reconciled, code, base, repository, lockWaitMs });
 }
 
 /** PR が成立した（作成・再利用・照合）ことを記録し、作業を公開済みにする。 */
