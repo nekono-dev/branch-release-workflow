@@ -14,6 +14,10 @@ import { hookInput } from "./support/hook-fixtures.mjs";
 const agentModule = await import("../scripts/agent-hooks.mjs").catch(() => null);
 const handleHook = agentModule?.handleHook ?? (() => ({ missing: "未実装" }));
 const denyOfCommand = agentModule?.denyOfCommand ?? (() => null);
+// 判定の結果（verdict・reason・code）。ホストの応答の形になる前の値で、理由の連結長を確かめるときに使う
+const decideHookOf = agentModule?.decideHook ?? (() => ({ verdict: "missing", reason: "未実装", code: "" }));
+const prMergeReasonOf = agentModule?.prMergeReason ?? (() => "");
+const { mergeAlternative } = await import("../scripts/operation-decision.mjs");
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BRW = join(root, "scripts/brw.mjs");
@@ -254,6 +258,98 @@ export const runAgentHookChecks = async (eq) => {
     eq("enforcement/6.1 GitHub 上のマージと自動マージ予約は拒否する", ["gh pr merge 5", "gh pr merge 5 --auto --squash"].map((c) => preOf("claude", c, r.dir)), ["deny", "deny"]);
     eq("brw-pr-handoff/1.1 MCP の PR 作成は、保護対象への作成も開発間の作成も拒否する", [mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, r.dir), mcpOf({ owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "dev/other" }, r.dir)], ["deny", "deny"]);
     eq("enforcement/6.1 MCP の必須入力が欠ける PR 作成は拒否する", mcpOf({ owner: "acme", title: "t", head: "dev/foo", base: "main" }, r.dir), "deny");
+    r.cleanup();
+  }
+
+  // ---- 18.4 エージェントの直接のマージを拒否し、brw pr-merge を案内する ----
+  {
+    const r = repoOf();
+    const mergeCmds = ["gh pr merge 5", "gh pr merge 5 --squash --auto", "gh api -X PUT repos/acme/app/pulls/5/merge", "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input:{pullRequestId:\"X\"}) { clientMutationId } }'"];
+    const mcpMerge = hookInput("claude", "PreToolUse", { cwd: r.dir, tool: "mcp__github__merge_pull_request", toolInput: { owner: "acme", repo: "app", pullNumber: 5 } });
+    const decs = [...mergeCmds.map((c) => decideHookOf("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: r.dir, command: c }))), decideHookOf("claude", "PreToolUse", mcpMerge)];
+    eq("brw-enforcement/18.4 GitHub 側のマージ（gh・API・自動マージ予約・MCP）は取り込み先によらず拒否し、案内に brw pr-merge <番号> を含む", decs.map((x) => [x.verdict, x.reason.includes("brw pr-merge <番号>"), x.reason.includes("別の端末"), x.reason.includes("GitHub 上でマージ")]), Array(5).fill(["deny", true, true, true]));
+    eq("brw-enforcement/18.4 拒否の理由と案内の連結は 500 文字以内", decs.map((x) => x.reason.length <= 500), Array(5).fill(true));
+    eq("brw-enforcement/18.4 Codex の PreToolUse・PermissionRequest も GitHub のマージを拒否する", ["gh pr merge 5", "gh api -X PUT repos/acme/app/pulls/5/merge"].map((c) => [preOf("codex", c, r.dir), permOf("codex", c, r.dir)]), [["deny", "deny"], ["deny", "deny"]]);
+    r.cleanup();
+  }
+
+  // ---- 18.4 長いインストール先のパスでも、案内の重要な部分が 500 字の切り詰めで欠けない（パスは末尾） ----
+  {
+    const LONG_RUN = `node '/${"x".repeat(290)}/scripts/brw.mjs'`;
+    const keyOf = (text) => { const t = text.slice(0, 500); return [t.includes("brw pr-merge <番号>"), t.includes("別の端末"), t.includes("GitHub 上でマージ")]; };
+    eq("brw-enforcement/18.4 300 字のパスでも、GitHub マージの案内は 500 字で切っても brw pr-merge・別の端末・GitHub 上が残る", keyOf(`エージェントによる GitHub 上のマージは行えません。 ${mergeAlternative(LONG_RUN)}`), [true, true, true]);
+    eq("brw-enforcement/18.4 300 字のパスでも、pr-merge-by-agent の理由は 500 字で切っても brw pr-merge・別の端末・GitHub 上が残る", keyOf(prMergeReasonOf(LONG_RUN)), [true, true, true]);
+    eq("brw-enforcement/18.4 実行する形（パス）は案内の末尾に置く", [mergeAlternative(LONG_RUN).endsWith(`（実行する形: ${LONG_RUN} pr-merge <番号>）`), prMergeReasonOf(LONG_RUN).endsWith(`（実行する形: ${LONG_RUN} pr-merge <番号>）`)], [true, true]);
+  }
+
+  // ---- 18.4 信頼済みの brw pr-merge の呼び出しを、実行前に拒否する（利用者の端末でだけ実行するため） ----
+  {
+    const r = repoOf();
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const link = join(r.dir, "brw-link.mjs");
+    symlinkSync(BRW, link);
+    // 拒否される形（連結・cd・相対パス・代入・ラッパー・node のオプション・シェルの中身・シンボリックリンク）
+    const denied = [
+      `node ${BRW} pr-merge 5`,
+      `node ${BRW} pr-merge`,
+      `node ${BRW} pr-merge 5 && echo x`,
+      `node ${BRW} pr-merge 5; echo x`,
+      `node ${BRW} pr-merge 5 | cat`,
+      `echo start; node ${BRW} pr-merge 5`,
+      `cd ${r.dir} && node ${BRW} pr-merge 5`,
+      `(cd ${root} && node scripts/brw.mjs pr-merge 5)`,
+      `cd ${root} && node scripts/brw.mjs pr-merge 5`,
+      `FOO=1 node ${BRW} pr-merge 5`,
+      `FOO=$X node ${BRW} pr-merge 5`,
+      `env node ${BRW} pr-merge 5`,
+      `env -i FOO=1 node ${BRW} pr-merge 5`,
+      `env -C ${root} node scripts/brw.mjs pr-merge 5`,
+      `timeout 10 node ${BRW} pr-merge 5`,
+      `node --no-warnings ${BRW} pr-merge 5`,
+      `node --no-warnings --enable-source-maps ${BRW} pr-merge`,
+      `bash -c "node ${BRW} pr-merge 5"`,
+      `sh -c 'node ${BRW} pr-merge 5'`,
+      `eval "node ${BRW} pr-merge 5"`,
+      `echo "$(node ${BRW} pr-merge 5)"`,
+      `echo \`node ${BRW} pr-merge 5\``,
+      `bash <<'EOF'\nnode ${BRW} pr-merge 5\nEOF`,
+      `sh -s <<EOF\nnode ${BRW} pr-merge 5\nEOF`,
+      `cat <<'EOF' | bash\nnode ${BRW} pr-merge 5\nEOF`,
+      `cat <<EOF\n$(node ${BRW} pr-merge 5)\nEOF`,
+      `cat <<EOF\n\`node ${BRW} pr-merge 5\`\nEOF`,
+      `cat <<EOF\n$(echo "$(node ${BRW} pr-merge 5)")\nEOF`,
+      `bash -lc 'node ${BRW} pr-merge 5'`,
+      `bash -e -c 'node ${BRW} pr-merge 5'`,
+      `bash --norc -c 'node ${BRW} pr-merge 5'`,
+      `node ${link} pr-merge 5`,
+    ];
+    eq("brw-enforcement/18.4 信頼済みの brw pr-merge は、連結・cd・相対パス・代入・ラッパー・node のオプション・シェルの中身・シンボリックリンク経由でも Claude の PreToolUse で拒否する", denied.map((c) => preOf("claude", c, r.dir)), Array(denied.length).fill("deny"));
+    eq("brw-enforcement/18.4 同じ形を Codex の PreToolUse と PermissionRequest でも拒否する（Claude と同じ結果）", denied.map((c) => [preOf("codex", c, r.dir), permOf("codex", c, r.dir)]), denied.map(() => ["deny", "deny"]));
+    eq("brw-enforcement/18.4 拒否の code は pr-merge-by-agent で、理由は利用者の端末での実行と brw pr-merge を示す", (() => {
+      const x = decideHookOf("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: r.dir, command: `node ${BRW} pr-merge 5 && echo x` }));
+      return [x.code, x.reason.includes("利用者"), x.reason.includes("brw pr-merge"), x.reason.length <= 500];
+    })(), ["pr-merge-by-agent", true, true, true]);
+    // 拒否されない形（文字列の中・別の語・別のスクリプト・別のサブコマンド）
+    const through = [
+      `echo "hello; node ${BRW} pr-merge 5; bye"`,
+      `git commit -m 'message; node ${BRW} pr-merge 5; done'`,
+      `grep pr-merge ${BRW}`,
+      `echo node ${BRW} pr-merge 5`,
+      `node ${BRW} pr-merged`,
+      `node ${BRW} pr 5`,
+      `node ${BRW} pr-template`,
+      `node ./other.mjs pr-merge 5`,
+      `cat <<'EOF'\nnode ${BRW} pr-merge 5\nEOF`,
+      `git commit -F - <<'EOF'\nnode ${BRW} pr-merge 5\nEOF`,
+      `cat > notes.md <<'EOF'\nnode ${BRW} pr-merge 5\nEOF`,
+      `tee notes.txt <<EOF\nnode ${BRW} pr-merge 5\nEOF`,
+      `cat <<'EOF'\n$(node ${BRW} pr-merge 5)\nEOF`,
+      `cat <<EOF\nnode ${BRW} pr-merge 5\nEOF`,
+      `bash script.sh -c 'node ${BRW} pr-merge 5'`,
+      `node /tmp/nonexistent-brw/scripts/brw.mjs pr-merge 5`,
+    ];
+    eq("brw-enforcement/18.4 文字列の中・別の語・別のサブコマンド・信頼できないスクリプトは pr-merge-by-agent にしない（Claude）", through.map((c) => decideHookOf("claude", "PreToolUse", hookInput("claude", "PreToolUse", { cwd: r.dir, command: c })).code !== "pr-merge-by-agent"), through.map(() => true));
+    eq("brw-enforcement/18.4 同じ形は Codex の PreToolUse でも拒否の応答にならない", through.map((c) => preOf("codex", c, r.dir) !== "deny"), through.map(() => true));
     r.cleanup();
   }
 

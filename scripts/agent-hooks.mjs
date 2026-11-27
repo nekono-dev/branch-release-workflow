@@ -14,7 +14,7 @@
 //
 // 実行ファイルとしても使える: `node scripts/agent-hooks.mjs <claude|codex> <イベント名>` が標準入力の JSON を読み、応答を標準出力へ書く。
 import { realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BRW_RUN } from "./brw-cmd.mjs";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
@@ -33,6 +33,34 @@ const BRW_CLI_REAL = (() => { try { return realpathSync(BRW_CLI); } catch { retu
 const TOOLS_RE = /\b(git|gh)\b/;
 const PASS = { verdict: "pass", reason: "", code: "" };
 const PUBLISH_OPTS = ["--work", "--plan", "--title", "--body-file"];
+// ---- 信頼済み BRW の pr-merge の検出（エージェントの実行を実行前に拒否する） ----
+// 字句解析（lex）の語・連結・コマンド置換・heredoc を追い、ラッパー（env・timeout・sudo など）と node のオプションを読み飛ばして、
+// 実行ファイルが信頼済みの BRW で次の語が pr-merge のものを探す。入れ子（bash -c・eval・$(…)・heredoc）は深さ上限まで再帰する。
+const PM_MAX_DEPTH = 4;
+const PM_KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
+const PM_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const PM_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish"]);
+const PM_WRAPPERS = new Set(["env", "command", "exec", "nice", "time", "nohup", "timeout", "sudo", "stdbuf", "ionice", "setsid", "xargs"]);
+// 次の語を値として取るオプション（値の語を読み飛ばす）。env の -C と -S は個別に扱う
+const PM_VALUE_OPTS = {
+  env: ["-u", "--unset"],
+  exec: ["-a"],
+  nice: ["-n", "--adjustment"],
+  timeout: ["-s", "--signal", "-k", "--kill-after"],
+  sudo: ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"],
+  stdbuf: ["-i", "-o", "-e"],
+  ionice: ["-c", "-n", "-p", "-P", "-u"],
+  xargs: ["-I", "-n", "-P", "-L", "-d", "-s", "-a", "-E"],
+  time: ["-f", "-o"],
+};
+// node の値を取るオプション（次の語を読み飛ばす）。-e・-p（コードを直接実行）は実行ファイルではないため対象外
+const NODE_VALUE_OPTS = ["-r", "--require", "--import", "--loader", "--experimental-loader", "--conditions", "-C", "--input-type", "--env-file"];
+const NODE_CODE_OPTS = ["-e", "--eval", "-p", "--print"];
+// エージェントが brw pr-merge を実行しようとしたときの拒否（利用者の端末で実行するコマンドのため）。実行する形は末尾に置く
+export function prMergeReason(run = BRW_RUN) {
+  return `brw pr-merge は利用者が自分の端末で実行するコマンドです。エージェントは実行できません。分岐元向けの PR のマージは、利用者に別の端末で brw pr-merge <番号> の実行を依頼してください（保護ブランチ向けは GitHub 上でマージ）。（実行する形: ${run} pr-merge <番号>）`;
+}
+const PR_MERGE_REASON = prMergeReason();
 const REF_LIST_FLAGS = ["-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"];
 const SHELL_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`", "$", "\\", "\n", "\r", "*", "?", "[", "]", "{", "}", "~", "#"]);
 
@@ -199,6 +227,218 @@ function prCall(command, cwd) {
     i++;
   }
   return { bad: false, dir, bodyFile: opts["--body-file"] };
+}
+
+/**
+ * コマンドが信頼済み BRW の pr-merge を実行する形を含むか（引数の有無・内容を問わない）。
+ * 引用符の内側の区切り（; や &&）は区切りにしない。コマンド置換・バッククォート・heredoc の中身は、同じ作業ディレクトリで再帰して見る。
+ */
+function prMergeCall(command, cwd) {
+  return prMergeIn(command, cwd ?? null, 0);
+}
+
+/** 1 つのスクリプトを、コマンドごとに見る。cd は後続のコマンドの作業ディレクトリに反映する（括弧の中は括弧の後で戻す）。 */
+function prMergeIn(script, dir, depth) {
+  // 深すぎる入れ子は解釈しない。pr-merge の語を含むなら、実行されうるとみなして止める
+  if (depth > PM_MAX_DEPTH) return /pr-merge/.test(script);
+  const { items, broken } = lex(script);
+  // 構文として閉じていない形はシェルが実行しない
+  if (broken) return false;
+  let cur = dir;
+  const stack = [];
+  for (let n = 0; n < items.length; n++) {
+    const it = items[n];
+    if (it.type === "open") { stack.push(cur); continue; }
+    if (it.type === "close") { if (stack.length) cur = stack.pop(); continue; }
+    for (const sub of it.subs) if (prMergeIn(sub, cur, depth + 1)) return true;
+    const ws = it.words.filter((w) => !w.redir);
+    // heredoc の本文は、シェルへ渡る場合（そのコマンドがシェル、またはパイプの先がシェル）だけコマンドとして見る
+    if (it.heredoc && pmFeedsShell(items, n, ws)) {
+      if (prMergeIn(it.heredoc, cur, depth + 1)) return true;
+    } else if (it.heredoc && it.heredocQuoted.includes(false)) {
+      // 引用符なしの本文は、受け取るコマンドが何であっても $(…) とバッククォートが実行される
+      for (const s of pmHeredocSubs(it.heredoc)) if (prMergeIn(s, cur, depth + 1)) return true;
+    }
+    const j = pmCommandStart(ws);
+    if (j >= 0 && !ws[j].dyn && ws[j].v === "cd") { cur = pmCdTarget(ws.slice(j + 1), cur); continue; }
+    if (pmRun(ws, cur, depth)) return true;
+  }
+  return false;
+}
+
+/**
+ * 引用符なし heredoc の本文から、コマンド置換（$(…) とバッククォート）の中身を取り出す。本文全体は解析しない（文字列として読むだけ）。
+ * $(…) は括弧の入れ子を数えて閉じを探し、中身の入れ子は中身を再帰して見るときに取り出される。\ で始まる字は読み飛ばす。
+ */
+function pmHeredocSubs(body) {
+  const out = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "$" && body[i + 1] === "(") {
+      let d = 1;
+      let j = i + 2;
+      for (; j < body.length && d > 0; j++) {
+        if (body[j] === "\\") { j++; continue; }
+        if (body[j] === "(") d++;
+        else if (body[j] === ")") d--;
+      }
+      // 閉じが無ければ、残りを中身とみなす（解釈できない形は通さないように、中身を再帰して見る）
+      out.push(d === 0 ? body.slice(i + 2, j - 1) : body.slice(i + 2));
+      i = j - 1;
+      continue;
+    }
+    if (c === "`") {
+      const j = body.indexOf("`", i + 1);
+      if (j < 0) break;
+      out.push(body.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return out;
+}
+
+/**
+ * heredoc を持つコマンド（items[n]・語 ws）の入力がシェルに渡るか。
+ * 自身がシェル（bash <<EOF・sh -s <<EOF）、または後続のパイプの先がシェル（cat <<EOF | bash）なら真。
+ * operation-policy.mjs の classifyScript と同じ条件（シェル・eval・xargs・source・.）。
+ */
+function pmFeedsShell(items, n, ws) {
+  const consumer = (w) => w !== undefined && !w.dyn && ["eval", "xargs", "source", "."].concat([...PM_SHELLS]).includes(basename(w.v));
+  const j = pmCommandStart(ws);
+  if (j >= 0 && consumer(ws[j])) return true;
+  for (let k = n; items[k]?.type === "cmd" && items[k].sep === "|" && items[k + 1]?.type === "cmd"; k++) {
+    const ws2 = items[k + 1].words.filter((w) => !w.redir);
+    const s = pmCommandStart(ws2);
+    if (s >= 0 && consumer(ws2[s])) return true;
+  }
+  return false;
+}
+
+/** 予約語と代入（FOO=値）を読み飛ばした、コマンド名の位置。無ければ -1。代入は値が展開でも代入として読む。 */
+function pmCommandStart(ws) {
+  let j = 0;
+  while (j < ws.length && ((!ws[j].dyn && PM_KEYWORDS.has(ws[j].v)) || PM_ASSIGN.test(ws[j].v))) j++;
+  return j < ws.length ? j : -1;
+}
+
+/** cd の引数から、移動先の作業ディレクトリを得る。解釈できなければ null（以降の相対パスは信頼できない扱い）。 */
+function pmCdTarget(args, dir) {
+  if (args.length === 0) return process.env.HOME ?? null;
+  if (args.length !== 1 || args[0].dyn || args[0].glob || args[0].v.startsWith("-")) return null;
+  return pmJoinDir(dir, args[0].v);
+}
+
+/** 作業ディレクトリに相対パスを足す。基準が不明（null）なら絶対パス以外は解決できない。 */
+function pmJoinDir(dir, p) {
+  if (isAbsolute(p)) return resolve(p);
+  return dir === null ? null : resolve(dir, p);
+}
+
+/** 1 つのコマンド（予約語・代入を除いた語）を見る。信頼済みの pr-merge なら true。 */
+function pmRun(ws, dir, depth) {
+  let i = pmCommandStart(ws);
+  if (i < 0) return false;
+  while (i < ws.length) {
+    const w = ws[i];
+    if (w.dyn) return false; // コマンド名が展開で決まる形は確かめられない
+    const name = basename(w.v);
+    if (PM_WRAPPERS.has(name)) {
+      const r = pmWrapper(name, ws, i + 1, dir, depth);
+      if (r.hit) return true;
+      if (r.at < 0) return false;
+      i = r.at;
+      dir = r.dir;
+      continue;
+    }
+    if (PM_SHELLS.has(name)) return pmShellScript(ws, i, dir, depth);
+    if (name === "eval") {
+      const args = ws.slice(i + 1);
+      if (args.some((x) => x.dyn)) return false;
+      return prMergeIn(args.map((x) => x.v).join(" "), dir, depth + 1);
+    }
+    if (name === "node") return pmNode(ws, i, dir);
+    return false;
+  }
+  return false;
+}
+
+/**
+ * シェルの -c のスクリプトを再帰して見る。-c は最初のスクリプト名（- で始まらない位置引数）より前のオプションに限る。
+ * それより後の -c は、そのスクリプトの引数（bash script.sh -c … は -c を読まない）。ファイルや標準入力の内容は読まない。
+ */
+function pmShellScript(ws, i, dir, depth) {
+  let k = i + 1;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return false;
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.v)) {
+      const s = ws[k + 1];
+      return s !== undefined && !s.dyn && prMergeIn(s.v, dir, depth + 1);
+    }
+    // 値を取るシェルのオプション（-o pipefail・+o・--rcfile ファイル など）は値を読み飛ばす
+    if (["-o", "+o", "--rcfile", "--init-file"].includes(x.v)) { k += 2; continue; }
+    if (x.v.startsWith("-") || x.v.startsWith("+")) { k++; continue; }
+    return false;
+  }
+  return false;
+}
+
+/** node の実行。オプションを読み飛ばして最初の語を実行ファイルとし、その次の語が pr-merge で、実行ファイルが信頼済みの BRW なら true。 */
+function pmNode(ws, i, dir) {
+  let k = i + 1;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return false;
+    if (NODE_CODE_OPTS.includes(x.v) || /^--(eval|print)=/.test(x.v)) return false;
+    if (NODE_VALUE_OPTS.includes(x.v)) { k += 2; continue; }
+    if (x.v.startsWith("-") && x.v !== "-") { k++; continue; }
+    break;
+  }
+  const s = ws[k];
+  if (!s || s.dyn || ws[k + 1] === undefined || ws[k + 1].dyn || ws[k + 1].v !== "pr-merge") return false;
+  const abs = pmJoinDir(dir, s.v);
+  return abs !== null && isTrustedCli(abs);
+}
+
+/**
+ * ラッパー（env・timeout・sudo など）の後ろを読み飛ばし、実際に実行されるコマンドの位置を得る。
+ * 戻り値: { hit: 真なら信頼済みの pr-merge を見つけた, at: 次のコマンドの位置（-1 は無し）, dir: 作業ディレクトリ（env -C で変わる） }
+ */
+function pmWrapper(name, ws, i, dir, depth) {
+  const vals = PM_VALUE_OPTS[name] ?? [];
+  let duration = name === "timeout"; // timeout の最初の位置の語は時間
+  let k = i;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return { hit: false, at: -1, dir };
+    const v = x.v;
+    if (name === "env") {
+      // env -S（文字列を分割して実行）は、その文字列をスクリプトとして見る
+      const sm = /^-S(.+)$/.exec(v) ?? /^--split-string=(.*)$/.exec(v);
+      if (sm) return { hit: prMergeIn(sm[1], dir, depth + 1), at: -1, dir };
+      if (v === "-S" || v === "--split-string") {
+        const t = ws[k + 1];
+        if (t === undefined || t.dyn) return { hit: false, at: -1, dir };
+        return { hit: prMergeIn(t.v, dir, depth + 1), at: -1, dir };
+      }
+      // env -C（作業ディレクトリを変える）は、後続の実行の作業ディレクトリになる
+      const cm = /^-C(.+)$/.exec(v) ?? /^--chdir=(.*)$/.exec(v);
+      if (cm || v === "-C" || v === "--chdir") {
+        const t = cm ? undefined : ws[k + 1];
+        if (!cm && (t === undefined || t.dyn)) return { hit: false, at: -1, dir: null };
+        dir = pmJoinDir(dir, cm ? cm[1] : t.v);
+        k += cm ? 1 : 2;
+        continue;
+      }
+    }
+    if (PM_ASSIGN.test(v)) { k++; continue; }
+    if (vals.includes(v)) { k += 2; continue; }
+    if (v.startsWith("-") && v !== "-") { k++; continue; }
+    if (duration) { duration = false; k++; continue; }
+    return { hit: false, at: k, dir };
+  }
+  return { hit: false, at: -1, dir };
 }
 
 /**
@@ -410,6 +650,8 @@ function judgeBash(command, cwd, host = "claude", toolInput = {}) {
   if (pub) return decidePublish(pub);
   const prc = prCall(command, cwd);
   if (prc) return decidePrCall(prc);
+  // 信頼済み BRW の pr-merge は利用者の端末でだけ実行する。エージェントの実行は分類の前に拒否する
+  if (prMergeCall(command, cwd)) return { verdict: "deny", reason: PR_MERGE_REASON, code: "pr-merge-by-agent" };
   const cls = classifyCommand(command, cwd);
   const d = evaluateAll(cls, restrictionsFor(cwd));
   if (d.verdict === "deny") return gateJudge(cls, d, command, cwd, host, toolInput) ?? decisionOf(d);

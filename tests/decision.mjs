@@ -145,6 +145,11 @@ export const runDecisionChecks = async (eq) => {
     return out.map((x) => [x.verdict, x.code]);
   })(), [["deny", "github-merge"]]);
   eq("enforcement/3.2 GitHub マージの拒否は対象が確定できなくても同じ理由にする", [ev("gh pr merge").verdict, ev("gh pr merge $N").verdict], ["deny", "deny"]);
+  eq("brw-enforcement/18.4 GitHub マージの拒否の案内は brw pr-merge を別の端末で実行する旨と、保護ブランチは GitHub 上でマージする旨を含む", (() => {
+    const g = ev("gh pr merge 5").alternative ?? "";
+    return [g.includes("pr-merge <番号>"), g.includes("別の端末"), g.includes("保護ブランチ向けは GitHub 上でマージしてください。")];
+  })(), [true, true, true]);
+  eq("brw-enforcement/18.4 ローカルマージの拒否の案内は従来の文面のまま（brw pr-merge を含まない）", on("main", () => (ev("git merge dev/other").alternative ?? "").includes("pr-merge")), false);
 
   // ---- sync-base-branch 1.1 取り込みの fast-forward 指定・リベースの実効値と由来 ----
   {

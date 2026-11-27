@@ -46,6 +46,12 @@ const basisNote = (op) => {
   return `（設定 ${keys.map((k) => `${k}=${b.configValues?.[k] ?? "?"}`).join("、")} による: ff=${op.ff}、rebase=${op.rebase}）`;
 };
 const ALT_PR = "保護対象への反映は、開発ブランチから分岐元へ PR を作成し、GitHub 上でリポジトリの条件を満たす利用者が squash マージしてください。";
+// GitHub 側のマージ・自動マージ予約の拒否の案内。フック経路は reason と案内の連結を 500 字で切るため、
+// 重要な部分を先に置き、実行する形（インストール先のパスで長くなりうる）は末尾に置く。ALT_PR はローカルマージ等の拒否が使うので別に持つ。
+export function mergeAlternative(run = BRW_RUN) {
+  return `分岐元向けの PR は、利用者が別の端末で brw pr-merge <番号> を実行してマージしてください。保護ブランチ向けは GitHub 上でマージしてください。（実行する形: ${run} pr-merge <番号>）`;
+}
+const ALT_MERGE_PR = mergeAlternative();
 
 function decide(op, fields) {
   return {
@@ -107,7 +113,7 @@ export function evaluate(op, ctx) {
 
   // GitHub 側のマージと自動マージ予約は、対象が確定できなくても拒否する（マージは利用者が GitHub 上で行う）
   if (op.kind === "github-merge" || op.kind === "auto-merge")
-    return deny(op, "github-merge", `エージェントによる GitHub 上のマージ${op.kind === "auto-merge" ? "と自動マージの予約" : ""}は行えません。`, { alternative: ALT_PR, reasons: op.unresolved });
+    return deny(op, "github-merge", `エージェントによる GitHub 上のマージ${op.kind === "auto-merge" ? "と自動マージの予約" : ""}は行えません。`, { alternative: ALT_MERGE_PR, reasons: op.unresolved });
 
   if (op.unresolved.length > 0 || op.kind === "unparseable")
     return deny(op, "unresolved", `対象を確定できず、規則に適合すると確認できないため変更を止めます: ${op.unresolved.join(" ") || "操作を解釈できません。"}`, { compliance: "unresolved", reasons: op.unresolved });
