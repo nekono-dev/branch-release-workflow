@@ -557,6 +557,67 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/1.4 ブランチの先を動かさない対応外の書き込みは強制範囲外として通常のホスト承認に委ねる", ["gh pr comment 5 -b x", "gh pr ready 5", "gh api repos/acme/app/issues -f title=x"].map((x) => sig(ev(x))), Array(3).fill(["pass", "outOfScope", "normal", "unsupported-write"]));
   eq("enforcement/1.4 対応外の書き込みも未導入のリポジトリでは通す", (() => { const o = classifyCommand("gh pr comment 5 -b x", tmpdir()).operations[0]; return sig(evaluate(o, contextFor(o))); })(), ["pass", "notApplicable", "notApplicable", "not-managed"]);
 
+  // ---- brw-enforcement 18.5 開発ブランチから分岐元・保護ブランチへの直接の取り込み・push の拒否（確認の状態によらず） ----
+  {
+    // 宣言の状態ごとに、登録済み（全 true・全 false）と未登録の 3 通りを用意する
+    const STATES = [
+      { auto: { push: true, pullRequest: true, commit: true }, register: true },
+      { auto: { push: false, pullRequest: false, commit: false }, register: true },
+      { auto: { push: true, pullRequest: true, commit: true }, register: false },
+    ];
+    // 開発ブランチ dev/foo（作業ツリー）と、分岐元 develop の worktree を作る
+    const stateRepo = ({ auto, register }) => {
+      const s = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: auto }, register });
+      gitOut(s.dir, "branch", "dev/other");
+      const wt = mkWorktree(s.dir, "develop");
+      gitOut(s.dir, "update-ref", "refs/remotes/origin/develop", "dev/foo");
+      // 未登録の宣言は commit されていないため、分岐元の worktree には無い。同じ内容を編集中の宣言として置く
+      if (!register) writeFileSync(join(wt, ".branch-release-workflow.json"), JSON.stringify({ ...CONFIG, autoApprove: auto }));
+      return { ...s, wt };
+    };
+    const judge = (cmd, cwd) => { const op = classifyCommand(cmd, cwd).operations[0]; return evaluate(op, { ...contextFor(op), origin: "agent" }); };
+    const pick = (x) => [x.verdict, x.code];
+    const PUSH_DENY = ["git push origin dev/foo:develop", "git push origin dev/foo:main", "git push origin HEAD:main", "git push origin main", "git push origin +dev/foo:main", "git push --force origin dev/foo:develop", "git push origin dev/foo:refs/heads/main"];
+    // 形を変えた取り込み・push（既存のテストにないもの）
+    const MERGE_FORMS = ["git merge --squash dev/foo", "git merge --no-ff dev/foo", "git pull origin dev/foo"];
+    const PUSH_FORMS = ["git push origin dev/foo:refs/heads/develop", "git push origin HEAD:develop", "git push --delete origin main", "git push --mirror"];
+    const rows = STATES.map((st) => {
+      const s = stateRepo(st);
+      try {
+        // 分岐元 develop の worktree からの取り込み（cwd は develop の worktree）
+        const mergeDevelop = pick(judge("git merge dev/foo", s.wt));
+        // 形を変えた取り込み（--squash・--no-ff・pull）も分岐元の上では拒否する
+        const mergeFormsDevelop = MERGE_FORMS.map((c) => pick(judge(c, s.wt)));
+        // 保護 main の上での取り込み（main の作業ツリーに切り替えて判定し、dev/foo に戻す）
+        gitOut(s.dir, "checkout", "-q", "main");
+        const mergeMain = pick(judge("git merge dev/foo", s.dir));
+        const mergeFormsMain = MERGE_FORMS.map((c) => pick(judge(c, s.dir)));
+        gitOut(s.dir, "checkout", "-q", "dev/foo");
+        const push = PUSH_DENY.map((c) => pick(judge(c, s.dir)));
+        const pushForms = PUSH_FORMS.map((c) => pick(judge(c, s.dir)));
+        // 対比: 開発ブランチへの取り込み・開発ブランチ同士・開発ブランチへの push は拒否されない（verdict・承認の順）
+        const allowed = ["git merge origin/develop", "git merge dev/other", "git push origin dev/foo", "git push origin dev/foo:dev/other"]
+          .map((c) => { const x = judge(c, s.dir); return [x.verdict, x.approval]; });
+        return { mergeDevelop, mergeMain, push, allowed, mergeFormsDevelop, mergeFormsMain, pushForms };
+      } finally {
+        s.cleanup();
+      }
+    });
+    eq("brw-enforcement/18.5 分岐元 develop の上での dev/foo のローカルマージは、確認の状態によらず拒否する", rows.map((r) => r.mergeDevelop), STATES.map(() => ["deny", "merge-non-development"]));
+    eq("brw-enforcement/18.5 保護 main の上での dev/foo のローカルマージは、確認の状態によらず拒否する", rows.map((r) => r.mergeMain), STATES.map(() => ["deny", "merge-non-development"]));
+    eq("brw-enforcement/18.5 分岐元・保護への dev/foo の push（<元>:<先>・HEAD・強制・refs/heads の形を含む）は、確認の状態によらず拒否する", rows.map((r) => r.push), STATES.map(() => PUSH_DENY.map(() => ["deny", "direct-update"])));
+    // 形を変えた取り込み（--squash・--no-ff・pull）は、分岐元・保護の上ではどちらも merge-non-development で拒否する
+    eq("brw-enforcement/18.5 分岐元 develop・保護 main の上での --squash・--no-ff・pull による dev/foo の取り込みは、確認の状態によらず拒否する", rows.map((r) => [r.mergeFormsDevelop, r.mergeFormsMain]), STATES.map(() => [MERGE_FORMS.map(() => ["deny", "merge-non-development"]), MERGE_FORMS.map(() => ["deny", "merge-non-development"])]));
+    // 形を変えた push（<元>:refs/heads/先・HEAD・--delete・--mirror）。--mirror は取り込み先を確定できないため unresolved で拒否する
+    eq("brw-enforcement/18.5 形を変えた push（refs/heads の形・HEAD・--delete・--mirror）は、確認の状態によらず拒否する", rows.map((r) => r.pushForms), STATES.map(() => [["deny", "direct-update"], ["deny", "direct-update"], ["deny", "direct-update"], ["deny", "unresolved"]]));
+    // 対比の期待: 登録済み全 true は確認省略、登録済み全 false は push の確認省略が無効（merge は確認省略の対象）、未登録は通常の承認
+    eq("brw-enforcement/18.5 対比: 開発ブランチへの取り込み・開発ブランチ同士のマージ・開発ブランチへの push は拒否されない", rows.map((r) => r.allowed), [
+      [["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"]],
+      [["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["pass", "normal"], ["pass", "normal"]],
+      [["pass", "normal"], ["pass", "normal"], ["pass", "normal"], ["pass", "normal"]],
+    ]);
+  }
+
   // ---- ホスト間の比較 ----
   eq("enforcement/1.1 同じ操作の判定は呼び出し元のホストに依らず同じ判定理由になる", (() => {
     const cmds = ["git push origin dev/foo", "git push origin main", "git switch -c dev/n", "git merge dev/other", "gh pr merge 5", "git push --all"];
