@@ -1,9 +1,18 @@
 {
-  "workBranches": ["dev/*"],
-  "protectedBranches": ["main"],
-  "baseBranch": "main",
+  "workBranches": [
+    "dev/*"
+  ],
+  "protectedBranches": [
+    "main",
+    "verify/brw-bpr-prot-1795792256"
+  ],
+  "baseBranch": "verify/brw-bpr-base-1795792256",
+  "baseBranches": [
+    "verify/brw-bpr-base-1795792256"
+  ],
   "namePattern": "^dev/[a-z0-9]+(-[a-z0-9]+)*$",
   "maxNameLength": 54,
-  "autoApprove": { "push": true, "pullRequest": true },
-  "preview": { "provider": "none" }
+  "preview": {
+    "provider": "none"
+  }
 }
