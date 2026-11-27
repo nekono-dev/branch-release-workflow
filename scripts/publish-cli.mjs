@@ -274,7 +274,7 @@ async function cmdPlan(args, d) {
  *   - 作業ディレクトリ配下の相対パス
  *   - 本体の worktree 置き場（<本体>/.claude/worktrees/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）
  */
-function readBody(cwd, file) {
+export function readBody(cwd, file) {
   const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.claude/worktrees/.brw/）の配下の絶対パスで指定してください。" };
   if (file === "" || file.includes("\0") || file.split(/[\\/]/).includes("..")) return bad;
   try {
