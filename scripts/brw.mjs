@@ -16,6 +16,7 @@
 //   work plan --work <id>      公開の計画を作り、計画 ID を出力する（読み取りと記録だけ。遠隔は書き換えない）
 //   publish --work <id> --plan <計画 ID> [--title <t> --body-file <path>]   計画どおりに push し、保護対象は PR を作成・再利用する（--confirmed は利用者が自分の端末で実行するときだけ有効）
 //   pause --work <id> --reason <理由>   作業の次の公開を保留する（再開は work resume）
+//   pr-merge <PR 番号>         取り込み先が恒常的な分岐元の PR を、利用者の端末で確認してから squash でマージする（エージェントからは実行できない）。終了コード: 0 マージ済み、1 実行せず・失敗、2 使い方
 //   url [ブランチ]             プレビューURLを表示
 //   check [--branches-only] [--ruleset]  宣言・workflow・provider 設定の整合検査。続けてフックの稼働を経路ごとに表示し、--ruleset で Ruleset の状態を読み取りで検査する
 //                              終了コード: 0 問題なし、1 宣言・整合の誤りや Ruleset のずれ、3 Ruleset の確認不能・過去の選択が読めない保留（見送り・未選択は 0）（フックの状態は終了コードに含めない）
@@ -44,6 +45,7 @@ import { finishBlocker, recordedState, removeBranch } from "./cleanup.mjs";
 import { removeWorkRecordAt } from "./publish.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
+import { runPrMerge } from "./pr-merge.mjs";
 import { runPr } from "./pr-flow.mjs";
 import { bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
 import { previewTidy } from "./tidy.mjs";
@@ -798,6 +800,8 @@ if (isMain) {
     work: async (a) => { process.exitCode = await runWork(a); },
     publish: async (a) => { process.exitCode = await runPublish(a); },
     pause: async (a) => { process.exitCode = await runPause(a); },
+    // PR のマージ（18.3）。利用者の端末でだけ実行できる（端末判定は pr-merge.mjs が行う）
+    "pr-merge": async (a) => { process.exitCode = await runPrMerge(a); },
   };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);

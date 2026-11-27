@@ -47,7 +47,7 @@ import { runTtyObserveChecks } from "./tty-observe.mjs";
 import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { runInstructionChecks } from "./instructions.mjs";
-import { runPrMergeChecks } from "./pr-merge.mjs";
+import { runPrMergeChecks, runPrMergeCliChecks, runPrMergeReviewChecks } from "./pr-merge.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -675,6 +675,10 @@ runInstructionChecks(eq);
 
 // ---- PR の取り込み先からマージの可否の判定（brw-enforcement 18.2） ----
 runPrMergeChecks(eq);
+
+// ---- brw pr-merge の CLI（brw-enforcement 18.3） ----
+await runPrMergeCliChecks(eq);
+await runPrMergeReviewChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
