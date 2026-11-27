@@ -14,7 +14,7 @@
 
 ## 設計の確認
 
-- 判定: 通過
+- 判定: 未通過
 
 確認日 2026-11-26。根拠の無い前提: なし。
 
@@ -48,3 +48,12 @@
 | 本体で開始したセッションでは、作業場所の削除後の 2 回目の入力でも、同じ `session_id`・`cwd`=本体でフックが動く | Claude Code のフックの実行場所 | **PoC** `poc/user-prompt-submit-after-remove.mjs main`（2026-11-27、Claude Code 2.1.329）: 2 回の `UserPromptSubmit` が同じ `session_id`・`cwd`・`CLAUDE_PROJECT_DIR`（本体）で記録された |
 | 作業場所の中で開始したセッションでは、削除後にフックが動かない | 同上 | **PoC** `poc/user-prompt-submit-after-remove.mjs worktree`: 削除後の 2 回目の入力でフックの記録が増えなかった（`hookEntries` が 1 件）。要件 7.4 の対象外とした |
 | Codex の `.codex/hooks.json` に `UserPromptSubmit` を登録して届く | Codex 0.172.0 のフック | **PoC** 同上（一時の `CODEX_HOME` の信頼とフックの信頼の省略）。実際の信頼の承認操作は既存の導入手順（`brw setup`・診断の `untrusted`）に従う（実機の承認操作は 9.6 の対象外で、既存の 8.4 の記録に同じ制約） |
+
+## 追記: 実機の観測による差し戻し（要件 7.4、2026-11-27）
+
+9.6 後半の実機の観測（Claude Code 2.1.329、`tests/real-env/README.md` の「結果（brw-pr-handoff 9.6 の後半）」）で、設計の前提が成り立たないと分かった。`## 設計の確認` の判定を `未通過` に戻した。
+
+- 片付けつきの `brw pr` を作業場所の中で実行すると、Bash の結果が「Exit code 1」と報告され、`PostToolUse` が届かない。このため `attachSession`（成功した `brw pr` で記録に `sessionId` を付ける）が働かず、同じセッションの `UserPromptSubmit` の案内（要件 7.4）は一度も届かなかった（本体で開始・3 回とも）。
+- `cd <作業場所> && brw pr ; cd <本体>` は `PostToolUse` が届くが、字句解析が `;` を解釈せず付かない。
+- 作業場所の中で開始したセッションでも、削除後に `UserPromptSubmit` が動くことがあった（3 回中 1 回）。設計の「動かない」は揺れる。
+- Codex は認証が無く未観測。
