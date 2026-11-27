@@ -312,6 +312,113 @@ export const basePrRefGaps = (setupText, configText) => {
   return gaps;
 };
 
+// 9.5: 公開後の続きの作業の再開（SKILL.md の 3 章・4 章、references/setup.md の小節）が文として成立しているか。
+// 必須の文ごとに、マーカーを含む 1 文が必要な語句をすべて含み、否定の語（ない・なく・ず）が「その文で許可した語句」以外に残らないことを確かめる。
+// 許可リスト（allowed）は最小限にし、各語句が正規の文で否定として必要な理由を下にコメントで示す。
+const RESUME_REVERSALS = ["残らない", "別のセッションでも", "すべての PR", "見ないが", "閉じた PR も再利用", "必ず書かれ", "無条件に"];
+const NEG_TOKENS = ["ない", "なく", "ず"];
+// 許可した語句を取り除いた後に、否定の語が残るか
+const negsLeft = (x, allowed) => {
+  let t = x;
+  for (const a of allowed) t = t.split(a).join("");
+  return NEG_TOKENS.filter((n) => t.includes(n));
+};
+export const resumeGaps = (skill, setup) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const s3 = sectionOf(skill, "## 3. 片付けと再開");
+  const s4 = sectionOf(skill, "## 4. 変更作業の完了と公開（push・PR）");
+  const sub = subsectionOf(setup, "### 公開後の続きの作業（再開）");
+  need("続き 3章: 節がある", s3 !== "");
+  need("続き 資料: 小節がある", sub !== "");
+  // 必須の文 1 件（マーカーで文を選ぶ。語句の欠落と、否定の混入を検出する）
+  // 許可した否定は、その文に必ず含まれること（肯定へ反転したら失敗する）。許可外の否定は含まないこと
+  const sent = (where, text, label, marker, required, allowed = []) => {
+    const x = sentenceOf(text, marker);
+    const ok = x !== "" && required.every((w) => x.includes(w)) && allowed.every((w) => x.includes(w)) && negsLeft(x, allowed).length === 0;
+    need(`続き ${where}: ${label}（同じ文内。否定は許可したものだけ）`, ok);
+  };
+
+  // 3 章: 続きの作業は同じブランチで再開する（「作らず」は、新しいブランチを作らないという正規の否定）
+  sent("3章", s3, "新しい作業ブランチを作らず brw resume <ブランチ> で同じブランチを再開する", "同じブランチを再開する", ["新しい作業ブランチを作らず", "`brw resume <ブランチ>`"], ["作らず"]);
+  sent("3章", s3, "新しい機能のときだけ brw create", "新しい機能のときだけ", ["`brw create`"]);
+  sent("3章", s3, "片付け後の出力に再開のコマンドと新しい作業のコマンドが出る", "続きの再開のコマンド", ["`brw resume <ブランチ>`", "`brw create <名前>`"]);
+
+  // 再開の記録と失敗時: 記録は書けたときに残る。失敗時は警告だけで、記録が無い（または古い）と、案内や先頭に並ばないことがある（断定しない）
+  sent("3章", s3, "再開の記録は本体に書けたときに残る", "書けたときに残る", ["本体に書けたときに残る"]);
+  sent("3章", s3, "書き込みに失敗したときは警告だけを出し、片付けは完了する", "書き込みに失敗したとき", ["警告だけを出し", "片付けは完了する"]);
+  // 許可: 「ならない」「並ばない」は、「ことがある」の前提で可能性を言う正規の否定（断定の「ない」ではない）
+  sent("3章", s3, "この記録が無い（または古い）と、フックの案内の対象にならないことがあり、一覧でも公開の記録つきの先頭に並ばないことがある", "この記録が無い", ["この記録が無い", "または古い", "フックの案内の対象にならないことがあり", "一覧でも公開の記録つきの先頭に並ばないことがある"], ["ならない", "並ばない"]);
+  sent("3章", s3, "そのときも brw resume <ブランチ> で再開できる", "そのときも", ["`brw resume <ブランチ>`", "再開できる"]);
+
+  // 一覧: 取得済みの origin の追跡ブランチから最大 20 件を出す（最新でなければ先に git fetch）
+  sent("3章", s3, "一覧は取得済みの origin の追跡ブランチから作業場所が無い開発ブランチを最大 20 件出す（最新でなければ先に git fetch）", "最大 20 件", ["取得済みの `origin` の追跡ブランチから", "作業場所が無い", "最大 20 件", "最新でなければ先に `git fetch`"]);
+  sent("3章", s3, "公開の記録があるものを先頭に新しい順に置き、記録の無いものは後ろに名前順で並べる", "公開の記録があるものを先頭", ["公開の記録があるものを先頭に新しい順に置き", "後ろに名前順で並べる"]);
+  sent("3章", s3, "20 件を超えるときは brw resume <ブランチ> で直接指定する", "20 件を超える", ["`brw resume <ブランチ>`", "直接指定する"]);
+
+  // フックの案内: 同じセッションで公開して片付けた記録・24 時間以内・作業場所が無くリモートにある・新しい作業なら無視
+  sent("3章", s3, "フックの案内は同じセッションの次の入力で、同じセッション・24 時間以内・作業場所が無くリモートにあるものに限る", "文脈として渡す", ["同じセッションの次の入力", "`brw resume <ブランチ>`", "同じセッションで公開して片付けた記録", "24 時間以内", "作業場所が無くリモートにある"]);
+  sent("3章", s3, "新しい作業なら案内は無視してよい", "無視してよい", ["新しい作業なら"]);
+  // 許可: 「動かない」は、削除後にフックが動かないという事実の否定
+  sent("3章", s3, "作業場所の中で開始した場合は一覧と手順書で再開する", "フックが動かない", ["一覧", "手順書", "再開する"], ["動かない"]);
+
+  // 続きの公開（3 章）: 「でない」は draft でないという条件、「できない」は照合できないという条件の正規の否定
+  sent("3章", s3, "同じ head のオープンな PR が 1 件あり、取り込み先が同じで、draft でないとき、既存の PR が再利用される", "既存の PR が再利用される", ["`brw pr`", "同じ head のオープンな PR が 1 件あり", "取り込み先が同じで", "draft でないとき", "既存の PR が再利用される"], ["でない"]);
+  sent("3章", s3, "取り込み先が違う・複数ある・draft・照合できないときは止まり、理由が表示される", "取り込み先が違う", ["止まり", "理由が表示される"], ["できない"]);
+  // 許可: 「再利用されず」は、閉じた PR を再利用しないという正規の否定
+  sent("3章", s3, "閉じた PR は再利用されず、新しく作られうる", "閉じた PR", ["再利用されず", "新しく作られうる"], ["再利用されず"]);
+  sent("3章", s3, "作業ディレクトリが戻ったら cd <本体> で本体へ移ってから続ける", "`cd <本体>`", ["本体へ移ってから続ける"]);
+
+  // 4 章（片付け後の続き）: 3 章と同じ必須語句の組（1 件・取り込み先が同じ・draft でない）と、止まり、閉じた PR
+  sent("4章", s4, "片付け後の続きは新しい作業ブランチを作らず brw resume で再開し、続きを brw pr で公開すると、そのブランチを head とするオープンな PR が 1 件あり、取り込み先が同じで、draft でないとき既存の PR が再利用される", "**片付け後の続き**", ["新しい作業ブランチを作らず", "`brw resume <ブランチ>`", "`brw pr`", "head とするオープンな PR が 1 件あり", "取り込み先が同じで", "draft でないとき", "既存の PR が再利用される"], ["作らず", "でない"]);
+  sent("4章", s4, "取り込み先が違う・複数ある・draft・照合できないときは止まり、理由を表示する", "取り込み先が違う・複数ある", ["止まり", "理由を表示する"], ["できない"]);
+  sent("4章", s4, "閉じた PR は再利用されず、新しく作られうる", "閉じた PR", ["再利用されず", "新しく作られうる"], ["再利用されず"]);
+
+  // 資料（setup.md の小節）
+  sent("資料", sub, "新しい作業ブランチを作らず brw resume <ブランチ> で再開する", "新しい作業ブランチを作らず", ["`brw resume <ブランチ>`"], ["作らず"]);
+  sent("資料", sub, "brw resume（引数なし）で再開できる作業ブランチを一覧する", "一覧を出す", ["（引数なし）"]);
+  sent("資料", sub, "書き込みに失敗したときは警告だけが出て片付けは完了する", "書けなかったとき", ["警告だけが出て", "片付けは完了する"]);
+  sent("資料", sub, "再開の記録は本体に書けたときに残る", "書けたときに残る", ["本体に書けたときに残る"]);
+  sent("資料", sub, "この記録が無い（または古い）と、フックの案内の対象にならないことがあり、一覧でも公開の記録つきの先頭に並ばないことがある", "この記録が無い", ["または古い", "フックの案内の対象にならないことがあり", "一覧でも公開の記録つきの先頭に並ばないことがある"], ["ならない", "並ばない"]);
+  sent("資料", sub, "そのときも brw resume <ブランチ> で再開できる", "そのときも", ["`brw resume <ブランチ>`", "再開できる"]);
+  sent("資料", sub, "フックの案内は同じセッションで公開して片付けた記録のうち、24 時間以内で、作業場所が無くリモートにあるものに限る", "文脈として渡す", ["同じセッションで公開して片付けた記録", "24 時間以内", "作業場所が無くリモートにある"]);
+  // 許可: 「動かない」は、上と同じ事実の否定
+  sent("資料", sub, "作業場所の中で開始した場合は、brw resume（引数なし）の一覧と手順書で再開する", "フックが動かない", ["（引数なし）", "一覧", "手順書", "再開する"], ["動かない"]);
+  sent("資料", sub, "新しい作業なら無視してよい", "無視してよい", ["新しい作業なら"]);
+  sent("資料", sub, "同じ head のオープンな PR が 1 件あり、取り込み先が同じで、draft でないとき既存の PR が再利用される（brw pr）", "既存の PR が再利用される", ["`brw pr`", "同じ head のオープンな PR が 1 件あり", "取り込み先が同じで", "draft でないとき", "既存の PR が再利用される"], ["でない"]);
+  sent("資料", sub, "取り込み先が違う・複数ある・draft・照合できないときは止まり、理由が表示される", "取り込み先が違う", ["止まり", "理由が表示される"], ["できない"]);
+  sent("資料", sub, "閉じた PR は再利用されず、新しく作られうる", "閉じた PR", ["再利用されず", "新しく作られうる"], ["再利用されず"]);
+
+  // 条件の反転を示す語を、節の中に含まない
+  for (const [where, text] of [["3 章", s3], ["4 章", s4], ["資料の小節", sub]]) {
+    const hits = RESUME_REVERSALS.filter((w) => text.includes(w));
+    need(`続き ${where}: 条件を反転・否定する語（${hits.join("・") || "なし"}）を含まない`, hits.length === 0);
+  }
+  return gaps;
+};
+
+// 9.5: 評価ケース continues-after-pr-cleanup の構成と、制約・判定の文
+export const continueCaseGaps = (dir, readFile, fixtureText) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const files = ["case.yaml", "prompt.md", "place-files.sh"];
+  need("評価 続き: 構成ファイルがそろう", files.every((f) => existsSync(join(dir, f))));
+  need("評価 続き: graders が 1 つ以上ある", existsSync(join(dir, "graders")) && readdirSync(join(dir, "graders")).length >= 1);
+  if (!existsSync(join(dir, "case.yaml"))) return gaps;
+  const yaml = readFile(join(dir, "case.yaml"));
+  need("評価 続き: name が名前と一致する", yaml.includes("name: continues-after-pr-cleanup"));
+  need("評価 続き: 評価環境の制約（ローカルの bare・GitHub に接続しない）を明記する", yaml.includes("評価環境") && yaml.includes("ローカルの bare") && yaml.includes("GitHub に接続しない"));
+  need("評価 続き: 実際の評価は未実行である旨を明記する", yaml.includes("未実行"));
+  if (existsSync(join(dir, "place-files.sh"))) {
+    const ps = readFile(join(dir, "place-files.sh"));
+    need("評価 続き: 共通の fixture の published-cleaned バリアントを使う", ps.includes("published-cleaned") && fixtureText.includes("published-cleaned)"));
+  }
+  if (existsSync(join(dir, "prompt.md"))) {
+    need("評価 続き: 依頼は公開後の検証の失敗の続き", readFile(join(dir, "prompt.md")).includes("検証が通らなかった"));
+  }
+  return gaps;
+};
+
 // 変異版: 対象の語句を置き換えた合成の文書を作る（語句が無ければ null）
 const mutate = (text, from, to) => (text.includes(from) ? text.replace(from, to) : null);
 
@@ -490,5 +597,61 @@ export const runInstructionChecks = (eq) => {
   if (existsSync(grader01)) {
     const g = readFileSync(grader01, "utf8");
     eq("instructions/8.3 評価ケース graders/01 は brw pr-template が出力したパスの本文を使うことを判定する", g.includes("brw pr-template が出力したパス") && !g.includes("作業ツリーの中に置いていない"), true);
+  }
+
+  // ---- 9.5: 公開後の続きの作業の再開（手順書・資料・評価ケース） ----
+  const setupText = read("references/setup.md");
+  eq("instructions/9.5 SKILL.md の 3 章・4 章と setup.md の小節に、公開後の続きの再開の文が成立している", resumeGaps(skill, setupText), []);
+  const resumeMutants = [
+    ["3 章: 新しい作業ブランチを作らず → 作るへ反転（同じブランチを新しく作る）", skill, "同じブランチを再開する", "同じブランチを新しく作る"],
+    ["3 章: 記録が残る → 残らずへ反転", skill, "本体に書けたときに残る。", "本体に書けたときに残らず。"],
+    ["3 章: 記録の条件（書けたとき）を無条件へ（必ず残る）", skill, "本体に書けたときに残る。", "本体に必ず残る。"],
+    ["3 章: 警告だけを出し → 出さずへ反転", skill, "警告だけを出し、片付けは完了する。", "警告だけを出さず、片付けは完了する。"],
+    ["3 章: 一覧の取得済みの追跡ブランチから → 取得していない追跡ブランチへ反転", skill, "取得済みの `origin` の追跡ブランチから", "取得していない `origin` の追跡ブランチから"],
+    ["3 章: 一覧の最大 20 件 → 全件へ反転", skill, "作業場所が無い開発ブランチを最大 20 件出す", "作業場所が無い開発ブランチを全件出す"],
+    ["3 章: 20 件を超えるときの直接指定を削除", skill, "20 件を超えるときは `brw resume <ブランチ>` で直接指定する。", "20 件を超えても全件出す。"],
+    ["3 章: 案内の条件「同じセッション」→「別のセッションでも」へ反転", skill, "同じセッションの次の入力では", "別のセッションでも次の入力では"],
+    ["3 章: 案内の 24 時間以内の限定を削除", skill, "記録から 24 時間以内で、作業場所が無くリモートにあるものに限る", ""],
+    ["3 章: 新しい作業なら案内は無視してよい、を削除", skill, "新しい作業なら無視してよい。", ""],
+    ["3 章: 失敗時の「ことがある」→ 断定「対象にならず」へ反転", skill, "フックの案内の対象にならないことがあり", "フックの案内の対象にならず"],
+    ["3 章: 失敗時の「並ばないことがある」→ 断定「並ぶ」へ反転", skill, "一覧でも公開の記録つきの先頭に並ばないことがある", "一覧でも公開の記録つきの先頭に並ぶ"],
+    ["3 章: 失敗時の「（または古い）」の条件を削除", skill, "この記録が無い（または古い）と", "この記録が無いと"],
+    ["3 章: 失敗時もの再開の文を断定「再開できない」へ反転", skill, "そのときも `brw resume <ブランチ>` で再開できる", "そのときは再開できない"],
+    ["3 章: オープンな PR → すべての PR へ反転", skill, "同じ head のオープンな PR が 1 件あり、", "すべての PR があり、"],
+    ["3 章: 既存の PR が再利用される → 再利用されずへ反転", skill, "既存の PR が再利用される。", "既存の PR が再利用されず。"],
+    ["3 章: 取り込み先が同じで → 違っても、へ反転", skill, "取り込み先が同じで、draft でないとき", "取り込み先が違っても、draft でないとき"],
+    ["3 章: 照合できないときは止まり → 照合できたときへ反転", skill, "照合できないときは止まり", "照合できたときは止まり"],
+    ["3 章: 閉じた PR は再利用されず → も再利用されるへ反転", skill, "閉じた PR は再利用されず、新しく作られうる。", "閉じた PR も再利用される。"],
+    ["3 章: cd <本体> で本体へ移る指示を反転", skill, "`cd <本体>` で本体へ移ってから続ける", "そのまま続ける"],
+    ["4 章: 1 件 → 複数ありへ反転", skill, "head とするオープンな PR が 1 件あり", "head とするオープンな PR が複数あり"],
+    ["4 章: 取り込み先が同じで → 違っても、へ反転", skill, "head とするオープンな PR が 1 件あり、取り込み先が同じで、", "head とするオープンな PR が 1 件あり、取り込み先が違っても、"],
+    ["4 章: draft でないとき → draft でも、へ反転", skill, "head とするオープンな PR が 1 件あり、取り込み先が同じで、draft でないとき", "head とするオープンな PR が 1 件あり、取り込み先が同じで、draft でも"],
+    ["4 章: 照合できないときは止まり → 照合できたときへ反転", skill, "照合できないときは止まり、理由を表示する。", "照合できたときは止まり、理由を表示する。"],
+    ["4 章: 閉じた PR は再利用されず → も再利用されるへ反転", skill, "理由を表示する。閉じた PR は再利用されず", "理由を表示する。閉じた PR も再利用され"],
+    ["資料: 記録が残る → 残らずへ反転", setupText, "本体に書けたときに残る。", "本体に書けたときに残らず。"],
+    ["資料: 案内の同じセッションを別のセッションへ反転", setupText, "同じセッションで公開して片付けた記録", "別のセッションで公開して片付けた記録"],
+    ["資料: 閉じた PR は再利用されず → も再利用されるへ反転", setupText, "閉じた PR は再利用されず、", "閉じた PR も再利用され、"],
+    ["資料: brw resume の一覧（引数なし）を削除", setupText, "（引数なし）で、", "で、"],
+    ["資料: 取り込み先が同じで → 違っても、へ反転", setupText, "取り込み先が同じで、draft でないとき", "取り込み先が違っても、draft でないとき"],
+    ["資料: 失敗時の「ことがある」→ 断定「対象にならず」へ反転", setupText, "フックの案内の対象にならないことがあり", "フックの案内の対象にならず"],
+    ["資料: 失敗時の「並ばないことがある」→ 断定「並ぶ」へ反転", setupText, "一覧でも公開の記録つきの先頭に並ばないことがある", "一覧でも公開の記録つきの先頭に並ぶ"],
+  ];
+  for (const [name, doc, from, to] of resumeMutants) {
+    const m = mutate(doc, from, to);
+    const gapsOf = doc === setupText ? (t) => resumeGaps(skill, t) : (t) => resumeGaps(t, setupText);
+    eq(`instructions/9.5 変異版「${name}」を検出する`, m !== null && gapsOf(m).length > 0, true);
+  }
+  const fixtureText = read("evals/_fixture/setup-repo.sh");
+  eq("instructions/9.5 評価ケース continues-after-pr-cleanup の構成・制約・判定の文が成立している", continueCaseGaps(join(root, "evals/continues-after-pr-cleanup"), (p) => readFileSync(p, "utf8"), fixtureText), []);
+  eq("instructions/9.5 評価ケース continues-after-pr-cleanup の graders は、新しいブランチを作らず brw resume を使う判定を含む", (() => {
+    const dir = join(root, "evals/continues-after-pr-cleanup/graders");
+    if (!existsSync(dir)) return false;
+    return readdirSync(dir).some((f) => readFileSync(join(dir, f), "utf8").includes("brw.mjs resume"))
+      && readdirSync(dir).some((f) => readFileSync(join(dir, f), "utf8").includes("新しい作業ブランチを作らず"));
+  })(), true);
+  {
+    const dir = join(root, "evals/continues-after-pr-cleanup");
+    const forbidden = existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((f) => statSync(join(dir, f)).isFile()).map((f) => [f, FORBIDDEN.find((re) => re.test(readFileSync(join(dir, f), "utf8")))]) : [];
+    eq("instructions/9.5 評価ケース continues-after-pr-cleanup のファイルに呼び出し側の置き場を示す語がない", forbidden.filter(([, hit]) => hit).map(([f]) => f), []);
   }
 };
