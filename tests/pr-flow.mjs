@@ -56,6 +56,37 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 function require_mkdir(p) { mkdirSync(dirname(p), { recursive: true }); }
 
+// 分岐元 develop の試験（brw-pr-handoff 7.4）。main の先に develop（d1）を作り、origin へ push 済みにする。本体は develop のチェックアウト。
+const BASE_BODY = "分岐元からの本文\n";
+const BASE_PR = (head) => ({
+  number: 7, html_url: "https://github.com/acme/app/pull/7", state: "open", draft: false,
+  base: { ref: "main", repo: { id: 4242, full_name: "acme/app" } },
+  head: { ref: "develop", sha: head, repo: { id: 4242, full_name: "acme/app" } },
+});
+function setupBase() {
+  const r = mkRepoWithRemote({ branch: "main", config: CONFIG });
+  gitOut(r.dir, "remote", "set-url", "origin", GH_SSH);
+  process.env.BRW_TEST_BARE = r.remote;
+  gitOut(r.dir, "checkout", "-q", "-b", "develop");
+  writeFileSync(join(r.dir, "d1.txt"), "d1\n");
+  gitOut(r.dir, "add", "d1.txt");
+  gitOut(r.dir, "commit", "-q", "-m", "d1");
+  gitOut(r.dir, "push", "-q", "origin", "develop");
+  const bodyPath = bodyPathOf(r.dir, "develop");
+  require_mkdir(bodyPath);
+  writeFileSync(bodyPath, BASE_BODY);
+  const routes = {
+    "GET /repos/acme/app": { status: 200, body: { id: 4242, full_name: "acme/app" } },
+    "GET /repos/acme/app/pulls?state=open&head=acme:develop&per_page=100": { status: 200, body: [] },
+    "GET /repos/acme/app/pulls?state=open&head=acme:develop&base=main&per_page=100": { status: 200, body: [] },
+    "POST /repos/acme/app/pulls": { status: 201, get body() { return BASE_PR(gitOut(r.dir, "rev-parse", "HEAD")); } },
+  };
+  const fake = createFakeGitHub({ routes });
+  const transport = async ({ method, path, body: b, host }) => fake.request(method, path, b, { host });
+  const session = createGitHubSession({ host: "github.com", token: "test-token-flow-base", transport });
+  return { ...r, bodyPath, fake, session };
+}
+
 const run = async (t, args, extra = {}) => {
   const out = [];
   const err = [];
@@ -169,6 +200,40 @@ export const runPrFlowChecks = async (eq) => {
       const y = await run(t, ["--bogus"]);
       eq("brw-pr-handoff/1.2 不明なオプションは使い方の誤り（終了コード 2）", y.code, 2);
       t.cleanup();
+    }
+
+    // ---- 分岐元のチェックアウトからの brw pr は、分岐元からの PR（7.3 の調整役）へ渡す（7.4） ----
+    {
+      const b = setupBase();
+      const x = await run(b, ["--title", "分岐元からの PR"], { cwd: b.dir });
+      const sent = b.fake.applied[0]?.body;
+      eq("brw-pr-handoff/7.4 分岐元のチェックアウトの brw pr は分岐元からの PR へ渡り、PR を作って終了コード 0 にする", [x.code, x.out.includes("PR を作成しました"), b.fake.writeCount], [0, true, 1]);
+      eq("brw-pr-handoff/7.4 分岐元からの PR の引数は head（分岐元）・base（保護ブランチ）・本文の実際の値", [sent?.head, sent?.base, sent?.body], ["develop", "main", BASE_BODY]);
+      eq("brw-pr-handoff/7.4 分岐元からの PR は作業の記録を作らず、分岐元のブランチが残る", [existsSync(publish.stateFileOf(b.dir)), gitOut(b.dir, "branch", "--show-current")], [false, "develop"]);
+      b.cleanup();
+    }
+
+    // ---- 分岐元でも開発ブランチでもない場所は、理由と手順を示して止まる（書き込み 0） ----
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "main");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 保護ブランチの上では、保護ブランチの理由と分岐元での実行の手順を示して止まり、書き込みは 0", [x.code, x.err.includes("保護ブランチ"), x.err.includes("分岐元"), x.err.includes("開発ブランチではないため"), p.fake.writeCount], [1, true, true, true, 0]);
+      p.cleanup();
+    }
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "-b", "feature/x");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 宣言の範囲外のブランチでは、宣言の確認と brw create を示して止まり、書き込みは 0", [x.code, x.err.includes("宣言"), x.err.includes("brw create"), p.fake.writeCount], [1, true, true, 0]);
+      p.cleanup();
+    }
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "--detach");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 detached HEAD では、ブランチを確定できない理由と手順を示して止まり、書き込みは 0", [x.code, x.err.includes("detached HEAD"), x.err.includes("ブランチ"), p.fake.writeCount], [1, true, true, 0]);
+      p.cleanup();
     }
   } finally {
     for (const [k, v] of [["GIT_SSH_COMMAND", saved.cmd], ["GIT_SSH_VARIANT", saved.variant], ["BRW_TEST_BARE", saved.bare]]) {

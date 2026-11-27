@@ -129,7 +129,7 @@
   - _Depends: 6.1_
   - _Requirements: 1.11_
 
-- [ ] 7. 分岐元から保護ブランチへの PR を作る
+- [x] 7. 分岐元から保護ブランチへの PR を作る
 - [x] 7.1 (P) PR の再利用・作成を、作業の記録に依存しない関数として切り出す
   - 公開の PR 処理から、同じ取り込み元・取り込み先のオープンな PR の探索、再利用、作成、作成後の照合を、リポジトリ・head・base・タイトル・本文・head の OID を受け取る関数として切り出して公開する。既存の公開の処理もこれを使い、挙動を変えない。
   - 既存の公開の試験が変わらず通り、切り出した関数を作業の記録なしで呼んで、再利用・作成・食い違いの停止を確認できる。
@@ -148,7 +148,7 @@
   - _Boundary: 分岐元からの PR_
   - _Depends: 6.1, 7.1, 7.2_
   - _Requirements: 1.8, 1.9, 1.10, 2.8, 4.12_
-- [ ] 7.4 `brw pr` の振り分けと `brw pr-template` を分岐元に対応させる
+- [x] 7.4 `brw pr` の振り分けと `brw pr-template` を分岐元に対応させる
   - `brw pr` の事前確認で、現在のブランチが開発ブランチなら従来の流れ、恒常的な分岐元なら分岐元からの PR へ渡し、どちらでもなければ理由と取るべき手順を表示して止まる。
   - `brw pr-template` が分岐元でも雛形と記入指示を出し、作成元と作成先を示し、「作業外の変更」の節を該当なしとして扱う。
   - 開発ブランチでの `brw pr`・`brw pr-template` の既存の試験が変わらず通り、分岐元での振り分けと雛形の出力を試験で確認できる。
@@ -180,3 +180,4 @@
 - 7.1（2026-11-27、完了）: `scripts/publish-pr.mjs` に `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`）を切り出し、`runPublishPr` はこれを使う（挙動不変）。作業の記録・状態・計画に依存しない。成功は `{ok:true, reused, created, reconciled, pull}`、止まる場合は `{ok:false, kind:"failed"|"invalidInput"|"prohibited"|"needsApproval", code, message, ...}`（`base-conflict`・`pr-draft`・`pr-ambiguous`・`pr-mismatch`（`createdUrl`・`differences` つき）・`pr-unconfirmed`・`pr-title-required` など）。`beforeCreate` は作成の直前（既存 PR が無いときだけ）に呼ばれ、止める結果（承認待ち・禁止）を返せる（7.3 が承認の判定に使う）。
 - 7.2（2026-11-27、完了。レビュー 2 回）: `scripts/base-sync.mjs` の `syncBase(cwd, base, target?)`・`countDiff(cwd, target, base)`・`resolveTarget(config, explicit)`。リモートは `remoteNameOf`（`pushRemote` → `remote.pushDefault` → `branch.<>.remote` → `origin`）。fetch は **明示した refspec** `+refs/heads/<名前>:refs/remotes/<リモート>/<名前>`（`remote.<>.fetch` の設定に依存しない）、比較・merge は完全参照 `refs/remotes/…`・`refs/heads/…`（同名ブランチの曖昧さを避ける）。先行は `rev-list --count` で別に数え（`ff-only` は先行でも成功するため）、先行のみ `ahead`・先行と遅れの両方 `diverged`・取得失敗 `fetch-failed`・取り込み失敗 `ff-failed`（現在のブランチが分岐元でないときも merge せず `ff-failed`）。`countDiff` は取得失敗・不正な名前で `-1`（0 と区別する。**7.3 は `-1` を止める判定にする**）。`resolveTarget` は宣言の `protectedBranches` の要素が 1 つで固定名のときだけ自動選択（パターンを含む複数・0 件は `--target` を要求）。git は引数配列で呼び（シェルを介さない）、`-` で始まる名前は拒否する。
 - 7.3（2026-11-27、完了。レビュー 2 回）: 調整役は `scripts/base-pr.mjs` の `runBasePr(args, deps, ctx)`（`brw pr` への配線は 7.4）。順序: 引数の検査（`--work` は使い方の誤り 2、`--completion`・`--verification`・`--failed` は無視して標準エラーに出す）→ `--confirmed` は標準入力が端末でなければ通信・fetch の前に拒否 → 作成先 `resolveTarget` → 本文の確認（`readBody`＝publish-cli.mjs の既存の検査を export して再利用。作業ディレクトリ配下・本体の worktree 置き場だけ、`..`・外部を指すシンボリックリンク・ディレクトリを拒否。副作用の前に止まる）→ `syncBase`（`ahead`・`diverged`・`fetch-failed`・`ff-failed` で理由を表示して止まる）→ `countDiff`（`-1`・`0` で止まる）→ head の OID（`refs/remotes/<リモート>/<分岐元>`）→ `createOrReusePr`。承認は `createOrReusePr` の `beforeCreate`（既存 PR の再利用時は呼ばれない）で `publish-pr.mjs` の `decidePr` と同じ作り（`gh pr create` を `classifyCommand` → `evaluateAll(…, {origin:"brw-publish"})`）。承認が必要なら PR を作らず `brw pr … --confirmed` の全文を案内して 1。作成後に head の OID が食い違えば作成済みの URL を案内しつつ成功扱いにしない。作業の記録・別コミット・push・片付けは行わず、未コミットの変更は件数を表示して含めない。**既知の性質**: `gh pr create` は head を push しうるため（`mayPush`）、宣言の `autoApprove.push:false` では `autoApprove.pullRequest` が有効でも通常の承認になる（既存の `brw pr` と同じ）。作業の制限 `noPr` は作業の記録が前提のため、この経路では適用されない（宣言の不備による deny は有効）。`confirmTarget` は 2 回走る（読み取りのみ）。
+- 7.4（2026-11-27、完了。レビュー 3 回。7 群はこれで完了）: `brw pr`（`pr-flow.mjs` の `runPr`）の事前確認が、開発ブランチは従来の流れ、恒常的な分岐元は `runBasePr`（循環 import は無い: pr-flow → base-pr → pr-template・base-sync）、それ以外（保護・宣言外・detached）は分類に応じた理由と手順で止まる。停止時の案内は `basePrGuidance(config)`（`pr-template.mjs`）: 「保護でない恒常的な分岐元」が宣言に 1 つ以上あるときだけ「分岐元（<一覧>）のチェックアウトで `brw pr`」を案内し、無い（`main` が唯一の分岐元かつ保護）ときは「`brw pr` では作れない。GitHub 上で作成するか宣言（baseBranch・baseBranches・protectedBranches）を見直す」。`brw pr-template`（`brw.mjs` の `prTemplateFromBase`）は分岐元でも雛形と記入指示を出し、作成元・作成先（保護ブランチが 1 つのときそれ。決められなければ `brw pr --target` の注記）を示し、「作業外の変更」の節は「該当なし」（`buildTemplate` の `noTidy`。別コミットの予定・過去の別コミットを読まない）。分岐元向けの記入指示は、**比較の前に毎回**明示した refspec の `git fetch <リモート> +refs/heads/<保護>:refs/remotes/<リモート>/<保護> +refs/heads/<分岐元>:refs/remotes/<リモート>/<分岐元>` を案内し、`git log refs/remotes/<リモート>/<保護>..refs/remotes/<リモート>/<分岐元>`・`git diff --stat …...…` で比べる（ローカルの保護ブランチは古いことがあるので比べない。未コミットの変更は PR に含まれない旨を注記）。限定した fetch 設定の実 git で、案内の fetch で両参照が最新になることを確認している。分岐元の `brw pr-template` は作業の記録を読まないので「検証」の節は未記入のまま（書き手が書く）。

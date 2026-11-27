@@ -6,9 +6,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { branchBase, classifyBranch, currentBranch, git, loadConfig, repoRoot, worktrees } from "./lib.mjs";
 import { cleanupAfterPr } from "./cleanup.mjs";
+import { runBasePr } from "./base-pr.mjs";
 import * as publish from "./publish.mjs";
 import { runPublish, runWork } from "./publish-cli.mjs";
-import { bodyPathOf, UNFILLED_MARK } from "./pr-template.mjs";
+import { basePrGuidance, bodyPathOf, UNFILLED_MARK } from "./pr-template.mjs";
 import { tidyChanges } from "./tidy.mjs";
 
 const consoleIo = { out: (s) => console.log(s), err: (s) => console.error(s) };
@@ -39,6 +40,16 @@ async function capture(fn, args, d) {
   const err = [];
   const code = await fn(args, { cwd: d.cwd, session: d.session, stdinIsTTY: d.stdinIsTTY, io: { out: (s) => out.push(String(s)), err: (s) => err.push(String(s)) } });
   return { code, out, err, text: [...out, ...err].join("\n") };
+}
+
+/**
+ * 開発ブランチ・恒常的な分岐元以外で `brw pr` を止めるときの理由と取るべき手順（分類ごと）。
+ * 保護ブランチ・宣言外・detached HEAD のどれかで、利用者が次に何をすればよいかを示す。
+ */
+function notDevelopmentMessage(cls, branch, config) {
+  if (!branch) return `detached HEAD のため、作業ブランチを確定できず、PR を作りません。開発ブランチは brw create で作った作業ブランチの worktree で行います。${basePrGuidance(config)}`;
+  if (cls === "protected") return `'${branch}' は保護ブランチのため、ここでは PR を作りません（開発ブランチではないため）。作業は brw create で作った開発ブランチで行います。${basePrGuidance(config)}`;
+  return `'${branch}' は宣言（workBranches・baseBranch など）に無いブランチのため、開発ブランチではなく、PR を作りません。開発ブランチは brw create で作ったブランチで行います。${basePrGuidance(config)}`;
 }
 
 /** 再実行のためのコマンド（利用者の端末での --confirmed を含められる）。 */
@@ -75,7 +86,9 @@ export async function runPr(args, deps = {}) {
   const config = loaded.config;
   const branch = currentBranch(d.cwd);
   const cls = branch ? classifyBranch(config, branch) : "undeclared";
-  if (cls !== "development") return stop("precheck", `'${branch ?? "（ブランチなし）"}' は開発ブランチではないため、PR を作りません。開発ブランチの worktree で実行してください。`);
+  // 恒常的な分岐元は、分岐元からの PR（base-pr）へ渡す。引数の検査もそちらで行う
+  if (cls === "base") return runBasePr(args, { cwd: d.cwd, session: deps.session, io: d.io, stdinIsTTY: d.stdinIsTTY }, { config, branch });
+  if (cls !== "development") return stop("precheck", notDevelopmentMessage(cls, branch, config));
   const [main, ...others] = worktrees(d.cwd);
 
   // 2. 作業の特定: 指定 → 現在の作業 → 公開済みで片付けが残る作業 → 開始

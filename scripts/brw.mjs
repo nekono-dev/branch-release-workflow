@@ -47,7 +47,8 @@ import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
 import { runPrMerge } from "./pr-merge.mjs";
 import { runPr } from "./pr-flow.mjs";
-import { bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { basePrGuidance, bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { resolveTarget } from "./base-sync.mjs";
 import { previewTidy } from "./tidy.mjs";
 import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
@@ -630,14 +631,44 @@ function resume(args) {
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
 }
 
+// 分岐元の worktree での pr-template（brw-pr-handoff 7.4）。作成元（分岐元）と作成先（保護ブランチ）を示し、作業外の変更の節は該当なしとする。
+// 別コミットの予定や過去の一覧は読まない。記入指示の取り込み先は作成先にする。作成先が 1 つに決まらないときは、--target の指定を注記する。
+function prTemplateFromBase(cwd, config, branch) {
+  const main = worktrees(cwd)[0]?.path ?? repoRoot(cwd);
+  const language = config.pullRequest.language;
+  const resolved = resolveTarget(config, undefined);
+  const target = resolved.ok ? resolved.target : undefined;
+  console.log(`作成元（分岐元）: ${branch}`);
+  console.log(target !== undefined
+    ? `作成先（保護ブランチ）: ${target}`
+    : "作成先を決められない（宣言の保護ブランチが 1 つに決まらない）。brw pr --target <保護ブランチ> で指定してください。");
+  const fromBase = { remote: publishState.remoteNameOf(cwd, branch), base: branch, target };
+  emitBody(bodyPathOf(main, branch), { worktree: cwd, language, base: target, noTidy: true }, language, fromBase);
+}
+
+// 本文ファイルを用意して、状態と記入指示を出力する（書き終えた本文・記入途中の本文は上書きしない）
+function emitBody(path, ctx, language, fromBase) {
+  const r = prepareBody(path, ctx);
+  if (r.filled) {
+    console.log(`本文は記入済みです（上書きしません）: ${path}`);
+    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
+    return;
+  }
+  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
+  console.log(instruction({ bodyPath: path, base: ctx.base, language, fromBase }));
+}
+
 // PR 本文の雛形を本文置き場に書き出し、記入指示を出力する（記入そのものは書き手が行う。書き終えた本文は上書きしない）
 function prTemplate(args) {
   if (args.length > 0) fail("使い方: brw pr-template（引数はありません）", 2);
   const cwd = process.cwd();
   const root = repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
-  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチの worktree で実行してください。");
-  if (classifyBranch(config, branch) !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。`);
+  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチ、または恒常的な分岐元の worktree で実行してください。");
+  const cls = classifyBranch(config, branch);
+  if (cls === "base") return prTemplateFromBase(cwd, config, branch);
+  if (cls === "protected") fail(`'${branch}' は保護ブランチで、開発ブランチではないため、本文を用意しません。${basePrGuidance(config)}`);
+  if (cls !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。開発ブランチは brw create で作ったブランチの worktree で実行してください。`);
   const main = worktrees(cwd)[0]?.path ?? root;
   const base = branchBase(cwd, config, branch);
   const language = config.pullRequest.language;
@@ -646,15 +677,7 @@ function prTemplate(args) {
   const ver = cur.ok ? cur.work?.ready?.verification : null;
   const planned = previewTidy(cwd);
   if (planned?.secretLike.length) fail(`秘密情報らしい名前のファイルが未コミットの変更に含まれます: ${planned.secretLike.join(", ")}。コミットしないなら .gitignore に追加するか削除してください（含まれたままでは brw pr が止まります）。`);
-  const path = bodyPathOf(main, branch);
-  const r = prepareBody(path, { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false });
-  if (r.filled) {
-    console.log(`本文は記入済みです（上書きしません）: ${path}`);
-    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
-    return;
-  }
-  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
-  console.log(instruction({ bodyPath: path, base, language }));
+  emitBody(bodyPathOf(main, branch), { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false }, language);
 }
 
 function url(args) {

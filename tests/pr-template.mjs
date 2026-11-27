@@ -1,10 +1,12 @@
 // PR 本文の雛形・記入指示・本文ファイル（pr-template）の試験。selftest.mjs から呼ばれる。
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bodyPathOf, buildTemplate, instruction, prepareBody, resolveTemplate, UNFILLED_MARK } from "../scripts/pr-template.mjs";
 import { TIDY_SUBJECT } from "../scripts/tidy.mjs";
+import { fileURLToPath } from "node:url";
+import { mkRepoWithRemote, gitOut } from "./support/git-fixture.mjs";
 
 const git = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", cwd, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const repo = () => {
@@ -78,6 +80,141 @@ export const runPrTemplateChecks = async (eq) => {
   eq("brw-pr-handoff/3.7 記入指示は本文のパス・各節の書き方・事実だけ・参照する情報・書き終えた後のコマンドを含む", [
     ins.includes(path), ins.includes("事実だけ"), ins.includes("git log develop..HEAD"), ins.includes("git diff --stat develop"), ins.includes(`brw pr --body-file ${path}`),
   ], [true, true, true, true, true]);
+  // ---- 分岐元での brw pr-template（brw-pr-handoff 7.4）: 実際の scripts/brw.mjs を spawn する ----
+  const BRW = fileURLToPath(new URL("../scripts/brw.mjs", import.meta.url));
+  const TPL_CONFIG = { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" };
+  const tpl = (cwd) => {
+    const r = spawnSync(process.execPath, [BRW, "pr-template"], { cwd, encoding: "utf8", env: { ...process.env, BRW_NO_GH: "1" } });
+    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  };
+  // 分岐元（develop）のチェックアウト。未コミットの作業外の変更を 1 件置く（分岐元の本文には載せないことを確かめる）
+  {
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      gitOut(r.dir, "checkout", "-q", "-b", "develop");
+      writeFileSync(join(r.dir, "d1.txt"), "d1\n");
+      gitOut(r.dir, "add", "d1.txt");
+      gitOut(r.dir, "commit", "-q", "-m", "d1");
+      writeFileSync(join(r.dir, "extra.txt"), "作業外\n");
+      const x = tpl(r.dir);
+      const body = existsSync(bodyPathOf(r.dir, "develop")) ? readFileSync(bodyPathOf(r.dir, "develop"), "utf8") : "";
+      eq("brw-pr-handoff/7.4 分岐元の pr-template は雛形と記入指示を出し、本文を bodyPathOf の場所に書く（終了コード 0）", [x.code, existsSync(bodyPathOf(r.dir, "develop")), body.startsWith(UNFILLED_MARK)], [0, true, true]);
+      eq("brw-pr-handoff/7.4 分岐元の pr-template は作成元（develop）と作成先（main）を示す", [x.out.includes("作成元"), x.out.includes("develop"), x.out.includes("作成先"), x.out.includes("main")], [true, true, true, true]);
+      eq("brw-pr-handoff/7.4 分岐元の作業外の変更の節は該当なしとし、別コミットの予定を出さない（本文にも出力にも未コミットのファイル名を載せない）", [body.includes("該当なし"), body.includes("extra.txt"), x.out.includes("extra.txt"), body.includes("別コミットに含めたファイル")], [true, false, false, false]);
+      eq("brw-pr-handoff/7.4 分岐元の記入指示の取り込み先は作成先（main）で、リモートの比較（refs/remotes/origin/main..refs/remotes/origin/develop）を案内する", [x.out.includes("refs/remotes/origin/main..refs/remotes/origin/develop"), x.out.includes("git log develop..HEAD")], [true, false]);
+      eq("brw-pr-handoff/7.4 分岐元の pr-template は、作業の記録（.git/brw）を作らない", existsSync(join(r.dir, ".git", "brw")), false);
+    } finally { r.cleanup(); }
+  }
+  {
+    const r = mkRepoWithRemote({ branch: "main", config: { ...TPL_CONFIG, protectedBranches: ["main", "release"] } });
+    try {
+      gitOut(r.dir, "checkout", "-q", "-b", "develop");
+      const x = tpl(r.dir);
+      eq("brw-pr-handoff/7.4 保護ブランチが複数で作成先を決められないときは、--target の指定を注記して雛形を出す", [x.code, x.out.includes("--target"), existsSync(bodyPathOf(r.dir, "develop"))], [0, true, true]);
+    } finally { r.cleanup(); }
+  }
+  {
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      gitOut(r.dir, "checkout", "-q", "-b", "dev/foo");
+      const x = tpl(r.dir);
+      eq("brw-pr-handoff/7.4 開発ブランチの pr-template は従来どおり（作成先の表示なし・作業外の変更の節あり）", [x.code, x.out.includes("作成先"), readFileSync(bodyPathOf(r.dir, "dev/foo"), "utf8").includes("## 作業外の変更")], [0, false, true]);
+    } finally { r.cleanup(); }
+  }
+  for (const [label, checkout] of [["保護ブランチ（main）", null], ["宣言外（feature/x）", "feature/x"]]) {
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      if (checkout) gitOut(r.dir, "checkout", "-q", "-b", checkout);
+      const x = tpl(r.dir);
+      eq(`brw-pr-handoff/7.4 ${label}では従来どおり拒否し、本文を書かない`, [x.code, x.out.includes("開発ブランチではない"), existsSync(bodyPathOf(r.dir, checkout ?? "main"))], [1, true, false]);
+    } finally { r.cleanup(); }
+  }
+  // ---- レビュー指摘の対応（7.4）: 分岐元の記入指示はリモートの参照で比べる。保護ブランチの案内は、分岐元の一覧に応じて変える ----
+  const brwRun = (cwd, args) => {
+    const r = spawnSync(process.execPath, [BRW, ...args], { cwd, encoding: "utf8", env: { ...process.env, BRW_NO_GH: "1" } });
+    return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  };
+  {
+    // 古いローカルの保護ブランチ（origin/main はその先へ進んでいる）と、未コミットの変更を置いた分岐元
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      gitOut(r.dir, "checkout", "-q", "-b", "develop");
+      writeFileSync(join(r.dir, "d1.txt"), "d1\n");
+      gitOut(r.dir, "add", "d1.txt");
+      gitOut(r.dir, "commit", "-q", "-m", "d1");
+      gitOut(r.dir, "push", "-q", "origin", "develop");
+      const other = join(mkdtempSync(join(tmpdir(), "brw-oth-")), "o");
+      gitOut(r.dir, "clone", "-q", "-b", "main", r.remote, other);
+      writeFileSync(join(other, "m2.txt"), "m2\n");
+      gitOut(other, "add", "m2.txt");
+      gitOut(other, "commit", "-q", "-m", "m2");
+      gitOut(other, "push", "-q", "origin", "main");
+      gitOut(r.dir, "fetch", "-q", "origin");
+      writeFileSync(join(r.dir, "extra.txt"), "未コミット\n");
+      const x = brwRun(r.dir, ["pr-template"]);
+      eq("brw-pr-handoff/7.4 分岐元の記入指示は、明示した refspec で両方の参照を更新してから、完全参照名のリモートの比較を案内する", [x.out.includes("git fetch origin +refs/heads/main:refs/remotes/origin/main +refs/heads/develop:refs/remotes/origin/develop"), x.out.includes("refs/remotes/origin/main..refs/remotes/origin/develop"), x.out.includes("refs/remotes/origin/main...refs/remotes/origin/develop")], [true, true, true]);
+      eq("brw-pr-handoff/7.4 分岐元の記入指示は、取得の有無に依らず比較の前に必ず更新する（「まだ取得していなければ」の条件を含めない）", [x.out.includes("まだ取得していなければ"), x.out.includes("比較の前に必ず")], [false, true]);
+      eq("brw-pr-handoff/7.4 分岐元の記入指示は、古いローカルの保護ブランチ基準（main..HEAD・git diff --stat main）を案内しない", [x.out.includes("main..HEAD"), x.out.includes("git diff --stat main")], [false, false]);
+      eq("brw-pr-handoff/7.4 分岐元の記入指示は、未コミットの変更が PR に含まれないことを 1 行で注記する", x.out.includes("未コミットの変更は PR に含まれません"), true);
+    } finally { r.cleanup(); }
+  }
+  {
+    // 保護ブランチが唯一の恒常的な分岐元（baseBranch と protectedBranches がともに main）
+    const r = mkRepoWithRemote({ branch: "main", config: { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "main" } });
+    try {
+      const x = brwRun(r.dir, ["pr-template"]);
+      const y = brwRun(r.dir, ["pr", "--title", "t"]);
+      eq("brw-pr-handoff/7.4 恒常的な分岐元がすべて保護ブランチのとき、brw pr-template・brw pr は分岐元のチェックアウトを案内せず、宣言の見直しを案内する", [
+        x.code, y.code, x.out.includes("分岐元のチェックアウトで brw pr"), y.out.includes("分岐元のチェックアウトで brw pr"), x.out.includes("見直"), y.out.includes("見直"),
+      ], [1, 1, false, false, true, true]);
+    } finally { r.cleanup(); }
+  }
+  {
+    // 別の分岐元 develop がある宣言（protectedBranches は main）では、従来どおり develop のチェックアウトを案内する
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      const x = brwRun(r.dir, ["pr-template"]);
+      const y = brwRun(r.dir, ["pr", "--title", "t"]);
+      eq("brw-pr-handoff/7.4 別の分岐元（develop）がある宣言では、保護ブランチの案内が develop のチェックアウトを示す", [
+        x.out.includes("分岐元（develop）のチェックアウトで brw pr"), y.out.includes("分岐元（develop）のチェックアウトで brw pr"), y.out.includes("見直"),
+      ], [true, true, false]);
+    } finally { r.cleanup(); }
+  }
+  // 限定された fetch 設定（origin/main・origin/develop を追跡しない）で、リモートだけが進んだ後、案内どおりの fetch で両参照が最新になる（実 git）
+  {
+    const r = mkRepoWithRemote({ branch: "main", config: TPL_CONFIG });
+    try {
+      gitOut(r.dir, "checkout", "-q", "-b", "develop");
+      writeFileSync(join(r.dir, "d1.txt"), "d1\n");
+      gitOut(r.dir, "add", "d1.txt");
+      gitOut(r.dir, "commit", "-q", "-m", "d1");
+      gitOut(r.dir, "push", "-q", "origin", "develop");
+      gitOut(r.dir, "fetch", "-q", "origin");
+      gitOut(r.dir, "config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other");
+      const other = join(mkdtempSync(join(tmpdir(), "brw-fx2-")), "o");
+      gitOut(r.dir, "clone", "-q", "-b", "main", r.remote, other);
+      writeFileSync(join(other, "m2.txt"), "m2\n");
+      gitOut(other, "add", "m2.txt");
+      gitOut(other, "commit", "-q", "-m", "m2");
+      gitOut(other, "push", "-q", "origin", "main");
+      gitOut(other, "fetch", "-q", "origin", "develop");
+      gitOut(other, "checkout", "-q", "-B", "develop", "origin/develop");
+      writeFileSync(join(other, "d2.txt"), "d2\n");
+      gitOut(other, "add", "d2.txt");
+      gitOut(other, "commit", "-q", "-m", "d2");
+      gitOut(other, "push", "-q", "origin", "develop");
+      const remoteMain = gitOut(r.remote, "rev-parse", "refs/heads/main");
+      const remoteDevelop = gitOut(r.remote, "rev-parse", "refs/heads/develop");
+      const before = [gitOut(r.dir, "rev-parse", "refs/remotes/origin/main") === remoteMain, gitOut(r.dir, "rev-parse", "refs/remotes/origin/develop") === remoteDevelop];
+      const x = brwRun(r.dir, ["pr-template"]);
+      // 案内の fetch コマンドを取り出し、シェルを介さず実行する
+      const cmd = /`(git fetch [^`]+)`/.exec(x.out)?.[1] ?? "";
+      let ran = true;
+      try { gitOut(r.dir, ...cmd.split(" ").slice(1)); } catch { ran = false; }
+      const after = [gitOut(r.dir, "rev-parse", "refs/remotes/origin/main") === remoteMain, gitOut(r.dir, "rev-parse", "refs/remotes/origin/develop") === remoteDevelop];
+      eq("brw-pr-handoff/7.4 限定された fetch 設定でも、案内どおりの fetch の後に refs/remotes/origin/main・develop が最新になる（実 git）", [before, ran, after], [[false, false], true, [true, true]]);
+    } finally { r.cleanup(); }
+  }
   eq("brw-pr-handoff/6.2 記入指示にも雛形にも、特定の呼び出し側の語を含めない", [CALLER.test(ins), CALLER.test(instruction({ bodyPath: path, base: "develop", language: "en" })), CALLER.test(resolveTemplate(d, "ja").text), CALLER.test(resolveTemplate(d, "en").text)], [false, false, false, false]);
   eq("brw-pr-handoff/3.7 英語の記入指示も同じ要素を含む", (() => { const e = instruction({ bodyPath: path, base: "develop", language: "en" }); return [e.includes(path), e.includes("git log develop..HEAD"), e.includes(`brw pr --body-file ${path}`)]; })(), [true, true, true]);
 };
