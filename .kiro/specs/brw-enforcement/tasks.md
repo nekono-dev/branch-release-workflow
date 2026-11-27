@@ -325,7 +325,7 @@
   - _Boundary: 利用者向け手順_
   - _Requirements: 2.14_
 
-- [ ] 18. 分岐元向けの PR を、利用者の端末でマージできるようにする
+- [x] 18. 分岐元向けの PR を、利用者の端末でマージできるようにする
 - [x] 18.1 (P) GitHub クライアントに PR の読み取りと限定したマージを足す
   - 期待を渡さずに PR の状態・取り込み先・取り込み先のリポジトリ・head の SHA・タイトルを読む `readPull` と、`PUT …/pulls/{n}/merge` だけを送れる専用の内部経路の `mergePull` を足す。マージの本文は `{merge_method: "squash", sha}` に固定し、`sha` が無い・40 桁の 16 進でない、PR 番号が不正、対象が照合済みでない呼び出しは送る前に拒否する。405・409 は理由を保って返す。公開の `request` は従来どおりマージ・自動マージ・PR の更新を拒否する。
   - 既存の `client/3.2` を、公開の `request` が拒否することと、マージを送れるのは `mergePull` だけで他の形は書き込みの回数を増やさずに拒否されることの検査に改め、`readPull` が期待なしで読めることも確かめる。
@@ -355,7 +355,7 @@
   - 該当する操作の判定結果をテストで確認できる。
   - _Boundary: 操作判定_
   - _Requirements: 3.8_
-- [ ] 18.6 (P) 利用者向けの手順書に分岐元向け PR のマージを加える
+- [x] 18.6 (P) 利用者向けの手順書に分岐元向け PR のマージを加える
   - SKILL.md と導入の資料に、分岐元向けの PR のマージは利用者が自分の端末で `brw pr-merge` を実行すること（Claude Code の `!` での実行は端末判定を満たさない可能性があるため別の端末で実行すること）、保護ブランチ向けは GitHub 上でマージすること、`brw pr-merge` を実行できるトークンは利用者のものに限ることを書く。
   - 資料から、各取り込み先ごとの手順が読み取れる。
   - _Boundary: 利用者向け手順_
@@ -431,3 +431,4 @@
 - 18.3（2026-11-27、完了。レビュー 2 回）: `brw pr-merge <PR 番号>` は `scripts/pr-merge.mjs` の `runPrMerge(args, deps)`（`brw.mjs` に配線。`deps` は試験用の注入だけで、環境変数・引数で端末判定は迂回できない）。順序: 引数の検査（不正は 2）→ 標準入力・標準出力の両方が端末でなければ通信前に案内して 1 → 宣言と origin の GitHub リポジトリ → `confirmTarget` → `readPull` → `judgeMerge` → タイトル・ブランチ名を可視化して表示 → `マージしますか [y/N]`（`y`・`yes` 以外は中止。EOF・例外も中止）→ **確認直後に PR を再読み取りして再判定し、`headSha`・`baseRef`・`baseRepo`・`state`・`merged`・`number` が表示時と同じでなければ中止** → `mergePull(target, {number, sha})`。成功は `ok && merged === true`。405 は GitHub の理由、409 は「確認した内容と違うものをマージしていない・再実行して確認し直す」、結果不明は GitHub 上での確認を案内。タイトル・ブランチ名・GitHub の理由は `visible` で 1 行の可視化（制御・書式文字・`\` ・バッククォートを escape）して表示する。残る限界（設計書に明記）: 再読み取りから送信までの短い間の取り込み先の変更は GitHub の `sha` では検出できない。`FAILURE_TEXT` は publish-cli.mjs と文言を重複して持つ。実 GitHub でのマージは 19.2 で使い捨てリポジトリで確認する。
 - 18.4（2026-11-27、完了。レビュー 5 回。最後の指摘は限界として受け入れた）: マージ経路（`gh pr merge`・`gh api …/merge`・GraphQL の auto-merge・MCP）は取り込み先にかかわらず従来どおり拒否し、案内 `mergeAlternative(run)`（`operation-decision.mjs`）を「分岐元向けは利用者が別の端末で `brw pr-merge <番号>`、保護ブランチ向けは GitHub 上」に改めた（重要な部分を先頭、実行する形（パス）を末尾に置き、長いインストール先パスで 500 文字に切られても重要な部分が残る。ローカルマージの `ALT_PR` は別のまま）。信頼済み `brw pr-merge` の Bash 呼び出しは、`agent-hooks.mjs` の `prMergeCall`（`lex` の字句解析ベース。代入・env/timeout/nice/sudo などのラッパー・node のオプションを読み飛ばし、`bash -c`・`sh -c`・`eval`・`$(…)`・バッククォート・シェルへ渡る heredoc・引用符なし heredoc の置換の中身を深さ 4 まで再帰。引用符内の区切りや文字列だけの `pr-merge` は拒否しない）で実行前に `pr-merge-by-agent` として拒否する（Claude の PreToolUse、Codex の PreToolUse・PermissionRequest で同じ結果）。限界（設計の「協調的な誤用の防止」の範囲）: コマンド名・パスが展開で決まる形、ファイルから読むスクリプトの中身、`find -exec`、ラッパー経由の `env bash <<EOF` は確かめない。`bash -c "… pr-merge 5; echo $HOME"` のように変数展開を含む形は、既存の分類が「対象を確定できない」として拒否するが、案内は `brw pr-merge` を示さない（拒否はされる）。真の強制は端末判定と GitHub 側の権限。
 - 18.5（2026-11-27、完了。レビュー 2 回）: 本体は変えず、`tests/decision.mjs` に、開発ブランチから恒常的な分岐元・保護ブランチへの直接の取り込み（分岐元・保護の上での `git merge`・`--squash`・`--no-ff`・`git pull origin dev/foo`、`git push` の `dev/foo:develop`・`dev/foo:main`・`HEAD:main`・`HEAD:develop`・`main`・`+…:main`・`--force`・`refs/heads/…`・`--delete origin main`）が、宣言の 3 状態（登録済み・全 true／登録済み・全 false／未登録）すべてで deny になること（code は `merge-non-development`・`direct-update`）と、対比として開発ブランチへの取り込み・同士のマージ・push が許可の側（確認省略・通常の承認）であることを固定した。`git push --mirror` は deny だが code は `unresolved`（対象を確定できない）。
+- 18.6（2026-11-27、完了。レビュー 3 回。18 群はこれで完了）: SKILL.md の 4 章に「PR のマージ（取り込み先ごと）」（分岐元向けは利用者が自分の端末で `brw pr-merge <PR 番号>`・対話端末が必要・`!` での実行は端末判定を満たさない可能性があるため別の端末で、保護ブランチ向けは `brw pr-merge` が拒否し GitHub 上でマージ、開発ブランチ向け・宣言外・フォーク・開いていない PR は拒否、エージェントは `gh pr merge`・API・MCP・自動マージ予約・`brw pr-merge` を実行しない、トークンは利用者のものに限る）を追加。「守ること」の「切り出し元・保護ブランチへのマージは利用者の許可を得る」は「エージェントが行わない。利用者の許可があってもエージェントは実行できない」に改め、`references/setup.md` に小節「PR のマージ（利用者の端末）」、`references/config.md` の `autoApprove` の節に「マージは常に拒否（確認ではなく拒否）、`brw pr-merge` も対象外」を置いた。追従の確認は `tests/instructions.mjs`（項目・小節ごとの成立、矛盾語句の不在、矛盾文の追加・小節外への移動・反転・削除の変異を検出する）。`!` の実機の挙動は未確認（「可能性がある」と書いた）。

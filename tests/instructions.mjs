@@ -107,6 +107,123 @@ export const configGaps = (text) => {
   return gaps;
 };
 
+// 18.6: 取り込み先ごとの PR のマージ手順（SKILL.md の「4. 変更作業の完了と公開」・守ること）が文として成立しているか。
+// 必要な指示は 1 つの項目の中で成立していること、反対の指示（許可があればエージェントがマージしてよい、など）を含まないことを確かめる。
+const MERGE_CONTRADICTIONS = [
+  "エージェントが `brw pr-merge` を実行してよい",
+  "エージェントが `brw pr-merge` を実行できる",
+  "エージェントがマージしてよい",
+  "許可を得ればエージェントがマージ",
+  "利用者の許可を得てマージ",
+  "利用者の許可を得れば `gh pr merge`",
+  "`!` で実行してよい",
+  "保護ブランチ向けも `brw pr-merge` でマージする",
+  "切り出し元・保護ブランチへのマージは利用者の許可を得る",
+  "マージ（`gh pr merge` など）は対象外で、常に確認を求める",
+];
+const contradictionsIn = (text) => MERGE_CONTRADICTIONS.filter((p) => text.includes(p));
+
+// 見出し（完全一致）から、次の「## 」または「### 」見出しまでの本文（小節だけを切り出す）
+const subsectionOf = (text, heading) => {
+  const lines = text.split("\n");
+  const i = lines.findIndex((l) => l === heading);
+  if (i < 0) return "";
+  const out = [];
+  for (let k = i + 1; k < lines.length && !/^#{2,3} /.test(lines[k]); k++) out.push(lines[k]);
+  return out.join("\n");
+};
+
+export const prMergeGaps = (text) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const rules = sectionOf(text, RULES);
+  need("守ること: 切り出し元・保護ブランチへのマージはエージェントが行わないと同じ文で言う", rules.includes("切り出し元・保護ブランチへのマージはエージェントが行わない。"));
+  need("守ること: 利用者の許可があってもエージェントは実行できないと言う", rules.includes("利用者の許可があってもエージェントは実行できない。"));
+  need("守ること: 旧い「マージは利用者の許可を得る」を残さない", !text.includes("切り出し元・保護ブランチへのマージは利用者の許可を得る"));
+  need("守ること: マージの文に反対の指示を含まない", contradictionsIn(rules).length === 0);
+
+  const sec = sectionOf(text, "## 4. 変更作業の完了と公開（push・PR）");
+  need("PR のマージ: 旧い「利用者が GitHub 上で PR を squash マージする」を残さない", !sec.includes("利用者が GitHub 上で PR を squash マージする"));
+  need("PR のマージ: 手順 4 は取り込み先ごとの手順へ従わせる形", /^4\. 利用者が PR をマージする。取り込み先ごとの手順は下の「PR のマージ（取り込み先ごと）」に従う。/m.test(sec));
+  need("PR のマージ: 4 章全体に反対の指示を含まない", contradictionsIn(sec).length === 0);
+
+  const branch = itemOf(sec, "**分岐元向けの PR");
+  need("分岐元: 項目がある", branch !== "");
+  need("分岐元: 利用者が自分の端末で brw pr-merge <PR 番号> を実行する（同じ項目内）", branch.includes("利用者が自分の端末で `brw pr-merge <PR 番号>` を実行する"));
+  need("分岐元: 対話端末が必要（同じ項目内）", branch.includes("対話端末が必要"));
+  need("分岐元: 確認した SHA を指定して squash マージされる（同じ項目内）", branch.includes("確認した SHA を指定して squash マージされる"));
+  need("分岐元: `!` は端末判定を満たさない可能性があるため別の端末で実行する（同じ項目内）", /`!` での実行は端末判定を満たさない可能性があるため、別の端末で実行する。/.test(branch));
+  need("分岐元: 反対の指示を含まない（同じ項目内）", contradictionsIn(branch).length === 0);
+
+  const prot = itemOf(sec, "**保護ブランチ（`protectedBranches`）向けの PR**");
+  need("保護: 項目がある", prot !== "");
+  need("保護: brw pr-merge は拒否する（同じ項目内）", prot.includes("`brw pr-merge` は拒否する"));
+  need("保護: GitHub 上で条件を満たす利用者がマージする（同じ項目内）", prot.includes("利用者が GitHub 上でマージする"));
+  need("保護: 反対の指示を含まない（同じ項目内）", contradictionsIn(prot).length === 0);
+
+  const rej = itemOf(sec, "**開発ブランチ向け・宣言外のブランチ向け");
+  need("拒否: 開発・宣言外・別リポジトリ・開いていない PR は brw pr-merge が拒否する（同じ項目内）", /別リポジトリ（フォーク）向け・開いていない PR.*`brw pr-merge` が拒否する/s.test(rej));
+
+  const agent = itemOf(sec, "**エージェント**");
+  need("エージェント: gh pr merge・API・MCP・自動マージ予約・brw pr-merge 実行をしない（同じ項目内）", /`gh pr merge`・GitHub の API・MCP によるマージ、自動マージの予約、`brw pr-merge` の実行をしない/.test(agent));
+  need("エージェント: 利用者に別の端末での実行を依頼する（同じ項目内）", agent.includes("利用者に別の端末での実行を依頼する"));
+  need("エージェント: 反対の指示を含まない（同じ項目内）", contradictionsIn(agent).length === 0);
+
+  const tok = itemOf(sec, "**トークン**");
+  need("トークン（SKILL）: 利用者のものに限る（同じ項目内）", tok.includes("利用者のものに限る"));
+  need("トークン（SKILL）: エージェントの環境にマージ権限のあるトークンを渡さない（同じ項目内）", tok.includes("エージェントの環境にマージ権限のあるトークンを渡さない"));
+  return gaps;
+};
+
+// 18.6: 導入の資料（setup.md）の「### PR のマージ（利用者の端末）」の節だけを対象に、項目ごとの成立を確かめる
+export const setupMergeGaps = (text) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const sec = subsectionOf(text, "### PR のマージ（利用者の端末）");
+  need("setup: PR のマージの小節がある", sec !== "");
+  need("setup: 小節に反対の指示を含まない", contradictionsIn(sec).length === 0);
+
+  const branch = itemOf(sec, "**分岐元向けの PR**");
+  need("setup 分岐元: 利用者が自分の端末で brw pr-merge <PR 番号> を実行する（同じ項目内）", branch.includes("利用者が自分の端末で `brw pr-merge <PR 番号>` を実行する"));
+  need("setup 分岐元: 対話端末が必要（同じ項目内）", branch.includes("対話端末が必要"));
+  need("setup 分岐元: `!` は端末判定を満たさないため別の端末で実行する（同じ項目内）", /`!` での実行は端末判定を満たさない可能性があるため、別の端末で実行する。/.test(branch));
+
+  const prot = itemOf(sec, "**保護ブランチ向けの PR**");
+  need("setup 保護: brw pr-merge は拒否する（同じ項目内）", prot.includes("`brw pr-merge` は拒否する"));
+  need("setup 保護: GitHub 上でマージする（同じ項目内）", prot.includes("GitHub 上でマージする"));
+
+  const tok = itemOf(sec, "**トークン**");
+  need("setup トークン: GH_TOKEN・GITHUB_TOKEN・gh auth login の保存済みログインを挙げる（同じ項目内）", tok.includes("`GH_TOKEN`・`GITHUB_TOKEN`・`gh auth login` の保存済みログイン"));
+  need("setup トークン: 利用者のものに限る（同じ項目内）", tok.includes("利用者のものに限る"));
+  need("setup トークン: エージェントの環境にマージ権限のあるトークンを渡さない（同じ項目内）", tok.includes("エージェントの環境にマージ権限のあるトークンを渡さない"));
+
+  const bypass = itemOf(sec, "**迂回の限界**");
+  need("setup 迂回: 端末判定は協調的な誤用の防止で、疑似端末などによる迂回を防ぐ強制ではない（同じ項目内）", bypass.includes("協調的な誤用の防止") && bypass.includes("迂回を防ぐ強制ではない"));
+  need("setup 迂回: 迂回を許さない保証は GitHub 側のマージ権限と Ruleset が与える（同じ項目内）", bypass.includes("GitHub 側のマージ権限と Ruleset が与える"));
+
+  const cond = itemOf(sec, "**マージ条件**");
+  need("setup 条件: 必須チェック・レビューは GitHub 側が決め、満たさないと 405 で拒否する（同じ項目内）", cond.includes("GitHub が 405 で拒否し"));
+
+  const state = itemOf(sec, "**状態**");
+  need("setup 状態: 状態ファイルを作らず、ブランチを削除しない（片付けは brw finish）（同じ項目内）", state.includes("状態ファイル") && state.includes("ブランチを削除しない") && state.includes("`brw finish`"));
+  return gaps;
+};
+
+// config.md: autoApprove の節で、エージェントのマージが確認ではなく拒否であることを確かめる
+export const configMergeGaps = (text) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const sec = sectionOf(text, AUTO);
+  need("config: エージェントのマージ（gh pr merge・API・MCP・自動マージ予約）は常に拒否される（確認ではなく拒否）と同じ文で言う", sec.includes("エージェントによる `gh pr merge`・GitHub の API・MCP のマージ・自動マージの予約は常に拒否される（確認ではなく拒否）。"));
+  need("config: 分岐元向けは利用者が brw pr-merge を実行すると同じ文で言う", sec.includes("分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。"));
+  need("config: brw pr-merge も autoApprove の対象外で、利用者が自分の端末で実行すると同じ文で言う", sec.includes("`brw pr-merge` も `autoApprove` の対象外で、利用者が自分の端末で実行する。"));
+  need("config: brw pr-merge を autoApprove の対象（確認を省く）と言わない", !sec.includes("`brw pr-merge` も `autoApprove` の対象で、確認を省く"));
+  need("config: マージの文で「Codex の brw guard には影響しない」を残さない（マージの拒否とは別の判定）", !sec.includes("`brw guard` には影響しない"));
+  need("config: 旧い「常に確認を求める」を残さない", !text.includes("マージ（`gh pr merge` など）は対象外で、常に確認を求める"));
+  need("config: マージの文に反対の指示を含まない", contradictionsIn(sec).length === 0);
+  return gaps;
+};
+
 // 変異版: 対象の語句を置き換えた合成の文書を作る（語句が無ければ null）
 const mutate = (text, from, to) => (text.includes(from) ? text.replace(from, to) : null);
 
@@ -149,6 +266,55 @@ export const runInstructionChecks = (eq) => {
     const m = mutate(config, from, to);
     eq(`instructions/17.1 config 変異版「${name}」を検出する`, m !== null && configGaps(m).length > 0, true);
   }
+
+  // ---- 18.6: 取り込み先ごとの PR のマージ（文の成立・矛盾・変異版） ----
+  const setup = read("references/setup.md");
+  eq("instructions/18.6 SKILL.md の PR のマージの手順が取り込み先ごとに成立している", prMergeGaps(skill), []);
+  eq("instructions/18.6 setup.md の PR のマージの小節が成立している", setupMergeGaps(setup), []);
+  eq("instructions/18.6 config.md のエージェントのマージの扱いが成立している", configMergeGaps(config), []);
+
+  const mergeMutants = [
+    ["分岐元の「別の端末で実行する」を削除", skill, "可能性があるため、別の端末で実行する。", "可能性がある。", prMergeGaps],
+    ["保護ブランチ向けを GitHub 上から brw pr-merge へ反転", skill, "利用者が GitHub 上でマージする。", "利用者が `brw pr-merge` でマージする。", prMergeGaps],
+    ["SKILL のトークンの「利用者のものに限る」を削除", skill, "は利用者のものに限る。", "は誰のものでもよい。", prMergeGaps],
+    ["SKILL 分岐元の項目に「エージェントが brw pr-merge を実行してよい」を追加（矛盾）", skill, "別の端末で実行する。", "別の端末で実行する。エージェントが `brw pr-merge` を実行してよい。", prMergeGaps],
+    ["SKILL 保護の項目に「保護ブランチ向けも brw pr-merge でマージする」を追加（矛盾）", skill, "利用者が GitHub 上でマージする。", "利用者が GitHub 上でマージする。保護ブランチ向けも `brw pr-merge` でマージする。", prMergeGaps],
+    ["SKILL 守ることを旧い「マージは利用者の許可を得る」へ戻す", skill, "切り出し元・保護ブランチへのマージはエージェントが行わない。", "切り出し元・保護ブランチへのマージは利用者の許可を得る。", prMergeGaps],
+    ["setup の分岐元の「`!` での実行」の注意を削除", setup, "Claude Code の `!` での実行は端末判定を満たさない可能性があるため、別の端末で実行する。", "別の端末で実行する。", setupMergeGaps],
+    ["setup のトークンの「利用者のものに限る」を削除", setup, "は利用者のものに限る。", "は誰のものでもよい。", setupMergeGaps],
+    ["setup の迂回の限界（強制ではない）を反転", setup, "迂回を防ぐ強制ではない。", "迂回を防ぐ強制である。", setupMergeGaps],
+    ["setup の状態ファイルの禁止を削除", setup, "状態ファイルや作業の記録を作らず、", "", setupMergeGaps],
+    ["setup の分岐元の項目に「`!` で実行してよい」を追加（矛盾）", setup, "別の端末で実行する。", "別の端末で実行する。`!` で実行してよい。", setupMergeGaps],
+  ];
+  for (const [name, doc, from, to, gapsOf] of mergeMutants) {
+    const m = mutate(doc, from, to);
+    eq(`instructions/18.6 変異版「${name}」を検出する`, m !== null && gapsOf(m).length > 0, true);
+  }
+  // 項目を小節の外（### PR のマージの次の見出しの後ろ）へ移した合成文書
+  const branchLine = setup.split("\n").find((l) => l.startsWith("- **分岐元向けの PR**"));
+  const moved = branchLine
+    ? setup.replace(branchLine + "\n", "").replace("## 4. Ruleset とフックを導入する（brw setup）", "## 4. Ruleset とフックを導入する（brw setup）\n\n" + branchLine)
+    : null;
+  eq("instructions/18.6 変異版「分岐元の項目を小節の外へ移す」を検出する", moved !== null && setupMergeGaps(moved).length > 0, true);
+  const cfgMergeMutants = [
+    ["config のエージェントのマージを許可制へ反転", config, "常に拒否される（確認ではなく拒否）。", "利用者の許可を得れば実行できる（確認を求める）。"],
+    ["config に「利用者の許可を得ればエージェントがマージできる」を追加（矛盾）", config, "分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。", "分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。利用者の許可を得ればエージェントがマージできる。"],
+  ];
+  for (const [name, doc, from, to] of cfgMergeMutants) {
+    const m = mutate(doc, from, to);
+    eq(`instructions/18.6 config 変異版「${name}」を検出する`, m !== null && configMergeGaps(m).length > 0, true);
+  }
+  // brw pr-merge の対象外の一文: 削除・反転した合成文書を configMergeGaps に渡し、ギャップが報告されることを確かめる
+  const excludeSentence = "`brw pr-merge` も `autoApprove` の対象外で、利用者が自分の端末で実行する。";
+  const excludeMutants = [
+    ["brw pr-merge の対象外の一文を削除", excludeSentence, ""],
+    ["brw pr-merge を autoApprove の対象（確認を省く）へ反転", excludeSentence, "`brw pr-merge` も `autoApprove` の対象で、確認を省く。"],
+  ];
+  for (const [name, from, to] of excludeMutants) {
+    const m = mutate(config, from, to);
+    eq(`instructions/18.6 config 変異版「${name}」を configMergeGaps が検出する`, m !== null && configMergeGaps(m).length > 0, true);
+  }
+  eq("instructions/18.6 config 変異版「Codex の brw guard の一文を戻す」を configMergeGaps が検出する", configMergeGaps(config.replace("分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。", "分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。Codex の `brw guard` には影響しない。")).length > 0, true);
 
   // ---- 旧い文面・例の残存 ----
   eq("instructions/17.1 旧い「許可を求めずに行ってよい」の文面を残さない", skill.includes("作業ブランチへの commit と push は、許可を求めずに行ってよい"), false);

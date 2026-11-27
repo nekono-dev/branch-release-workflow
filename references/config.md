@@ -116,7 +116,7 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 - `--base` が `baseBranch` でないか省いた PR、取り込み元が作業ブランチでない PR、`-R`（他のリポジトリ）・`--web` を伴う PR
 - 宣言が未登録か、作業ツリーで `HEAD` から書き換えたもの（作業中に自分で許可を足せないようにする）
 
-切り出し元・保護ブランチへのマージ（`gh pr merge` など）は対象外で、常に確認を求める。Codex の `brw guard` には影響しない。
+エージェントによる `gh pr merge`・GitHub の API・MCP のマージ・自動マージの予約は常に拒否される（確認ではなく拒否）。分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。`brw pr-merge` も `autoApprove` の対象外で、利用者が自分の端末で実行する。詳しくは SKILL.md の 4 章と `references/setup.md` の「PR のマージ（利用者の端末）」。
 
 `autoApprove.push: false` は、push の確認省略を無効にする設定である。push はフックの通常の承認に任せる。さらに、区切りの push の指示と応答の終了時の未 push の案内では、push の禁止として扱い、commit までにとどめて未 push を報告する（未コミットの変更の案内は残る）。
 
