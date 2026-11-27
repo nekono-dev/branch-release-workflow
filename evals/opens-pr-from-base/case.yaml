@@ -1,0 +1,10 @@
+schema_version: "1.1"
+name: opens-pr-from-base
+# 評価環境の制約: fixture（_fixture/setup-repo.sh）の origin はローカルの bare リポジトリで、GitHub に接続しない。
+# そのため brw pr は、取り込み（sync）・差の確認までは実行するが、送り先（push 先の GitHub リポジトリ）を確定できず
+# 「送り先の確定」で止まる。これは opens-pr-and-cleans-up など既存のケースと同じ制約である。
+# 本ケースの判定は、GitHub 上の PR の有無ではなく、実行の trace（呼び出しの順・本文の扱い・止まり方）で行う。
+expected_outcome: |
+  分岐元 develop のチェックアウトで、brw pr-template で本文の雛形と記入指示を得る。git fetch・git log・git diff --stat で取り込む内容を確かめ、案内された本文ファイルに本文を書く。brw pr --title で PR の作成を試みる（取り込み → 作成 → 報告の 3 段）。評価環境では送り先の確定で止まってよい。直接の gh pr create は使わない。別コミット・push・片付けは行わず、develop のブランチと作業場所は残る。
+context:
+  scaffold_script: place-files.sh

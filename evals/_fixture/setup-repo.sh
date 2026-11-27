@@ -8,6 +8,7 @@
 #   merged-work     宣言あり。dev/contact-link は push 済みで origin/develop にマージ済み、dev/wip-banner は push 済みで未マージ。どちらも worktree が残っている
 #   no-config       宣言ファイルが無い
 #   design-note-uncommitted  宣言あり。dev/design-note の worktree に docs/design-note.md（未 commit・未追跡の新規ファイル）がある
+#   base-ahead      宣言あり。protectedBranches は main だけで、develop が分岐元。develop は main より 1 commit 進んで push 済みで、develop をチェックアウトしている
 set -eu
 variant="${1:?variant}"
 here="$(pwd)"
@@ -57,6 +58,10 @@ if [ "$variant" != no-config ]; then
   }
 }
 JSON
+  if [ "$variant" = base-ahead ]; then
+    # develop を分岐元にするため、保護ブランチは main だけにする
+    sed -i 's/"protectedBranches": \["main", "develop"\]/"protectedBranches": ["main"]/' .claude/branch-release-workflow.json
+  fi
 fi
 git add -A && git commit -q -m "initial"
 git branch develop
@@ -120,5 +125,11 @@ HTML
 MD
     )
     git fetch -q origin ;;
+  base-ahead)
+    # develop（分岐元）に変更を取り込んで push し、develop のチェックアウトのまま残す
+    git checkout -q develop
+    sed -i 's#<main>#<section class="news"><h2>新着情報</h2><p>春の新商品を追加しました。</p></section>\n  <main>#' index.html
+    git commit -q -am "新着情報の欄を develop に追加"
+    git push -q origin develop ;;
   *) echo "unknown variant: $variant" >&2; exit 2 ;;
 esac

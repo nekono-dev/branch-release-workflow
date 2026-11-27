@@ -224,6 +224,94 @@ export const configMergeGaps = (text) => {
   return gaps;
 };
 
+// 8.3: 分岐元から保護ブランチへの PR の手順（SKILL.md の 4 章の項目）と、受け付けられない組の手作業の手順が文として成立しているか。
+// 必要な文は同じ項目の中で成立していること、反対の指示（別コミット・分岐元での作成・片付け）を含まないことを確かめる。
+const BASE_PR_SECTION = "## 4. 変更作業の完了と公開（push・PR）";
+const BASE_PR_ITEM = "**分岐元から保護ブランチへの PR**";
+const BASE_PR_MANUAL = "**`brw pr` で作れない組の手作業**";
+const BASE_PR_CONTRADICTIONS = [
+  "分岐元で `brw create`",
+  "別コミットを作る",
+  "分岐元のブランチを片付ける",
+  "直接の `gh pr create` で作る",
+];
+const contradictsIn = (text) => BASE_PR_CONTRADICTIONS.filter((p) => text.includes(p));
+// 4 章全体に出してはいけない分岐元の誤った指示（分岐元で作業を始める・分岐元を片付ける）
+const SECTION_CONTRADICTIONS = ["分岐元で `brw create`", "分岐元で別コミットを作る", "分岐元のブランチを片付ける", "分岐元を片付ける"];
+// マーカーを含む 1 文（句点「。」で区切る）。無ければ空文字
+const sentenceOf = (text, marker) => text.split("。").find((s) => s.includes(marker)) ?? "";
+
+export const basePrGaps = (text) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const sec = sectionOf(text, BASE_PR_SECTION);
+  need("分岐元PR: 4 章の節がある", sec !== "");
+
+  const item = itemOf(sec, BASE_PR_ITEM);
+  need("分岐元PR: 項目がある", item !== "");
+  need("分岐元PR: 分岐元のチェックアウトで次の順に行うと同じ項目で言う", item.includes("分岐元のチェックアウトで次の順に行う"));
+  need("分岐元PR: brw pr-template で本文の雛形と記入指示を得る（同じ項目内）", item.includes("`brw pr-template`"));
+  need("分岐元PR: 比較は fetch の後に git log・git diff --stat で確かめる（同じ項目内）", item.includes("git fetch") && item.includes("`git log`") && item.includes("`git diff --stat`"));
+  need("分岐元PR: brw pr --title で作る（同じ項目内）", item.includes("`brw pr --title \"<タイトル>\"`"));
+  need("分岐元PR: 取り込み → 作成 → 報告の 3 段だけ（同じ項目内）", item.includes("3 段（取り込み → 作成 → 報告）だけ"));
+  need("分岐元PR: 作業の記録・別コミット・push・片付けは行わない（同じ項目内）", item.includes("作業の記録・別コミット・push・片付けは行わない"));
+  need("分岐元PR: 分岐元のブランチと作業場所は残る（同じ項目内）", item.includes("分岐元のブランチと作業場所は残る"));
+  need("分岐元PR: 未コミットの変更は PR に含まれず件数が表示される（同じ項目内）", item.includes("未コミットの変更は PR に含まれず") && item.includes("件数が表示される"));
+  need("分岐元PR: 止まる場合（未 push・分岐・差なし・本文・作成先）を挙げる（同じ項目内）", ["未 push", "分岐", "差がない", "本文", "`--target <保護ブランチ>`"].every((w) => item.includes(w)));
+  need("分岐元PR: 承認が必要なとき --confirmed の全文を利用者が自分の端末で実行する（同じ項目内）", item.includes("`--confirmed`") && item.includes("利用者が自分の端末で"));
+  need("分岐元PR: 作成した PR のマージは brw pr-merge か GitHub 上（同じ項目内）", item.includes("`brw pr-merge`") && item.includes("GitHub 上"));
+  need("分岐元PR: 反対の指示を含まない（同じ項目内）", contradictsIn(item).length === 0);
+
+  // 場合ごとに、その場合の「1 文」の中で成立していることを確かめる（別の場合の語を同じ文に混ぜても通さない）
+  const manual = itemOf(sec, BASE_PR_MANUAL);
+  need("手作業: 項目がある", manual !== "");
+  const dev = sentenceOf(manual, "開発ブランチ間");
+  need("手作業 開発間: PR を使わず brw merge <取り込み元> を示す（同じ文内）", dev.includes("PR を使わず") && dev.includes("`brw merge <取り込み元>`"));
+  need("手作業 開発間: 作成画面の URL を出さない（同じ文内）", dev !== "" && !dev.includes("compare/"));
+  const same = sentenceOf(manual, "取り込み元と取り込み先が同じ");
+  need("手作業 同名: 取り込みは不要と示す（同じ文内）", same.includes("取り込みは不要"));
+  need("手作業 同名: 作成画面の URL も brw merge も示さない（同じ文内）", same !== "" && !same.includes("compare/") && !same.includes("brw merge"));
+  const other = sentenceOf(manual, "宣言外のブランチ");
+  need("手作業 その他: 宣言外・保護が取り込み元・分岐元→分岐元/開発を挙げる（同じ文内）", ["宣言外のブランチ", "保護ブランチを取り込み元", "分岐元→分岐元/開発"].every((w) => other.includes(w)));
+  need("手作業 その他: GitHub 上で PR を作成し、拒否の案内に出る作成画面の URL を開く（同じ文内）", other.includes("拒否") && other.includes("GitHub 上で PR を作成") && other.includes("作成画面の URL") && other.includes("`https://github.com/<owner>/<repo>/compare/<base>...<head>?expand=1`"));
+  const web = sentenceOf(manual, "Web 画面");
+  need("手作業 Web: URL が出ないときは Web 画面（Pull requests → New pull request）で取り込み先と取り込み元を選ぶ（同じ文内）", web.includes("URL が出ない") && web.includes("Pull requests → New pull request") && web.includes("取り込み先と取り込み元を選んで"));
+  const main = sentenceOf(manual, "`main` が唯一の分岐元");
+  need("手作業 main: GitHub 上で作成するか宣言を見直す（同じ文内）", main.includes("GitHub 上で作成するか宣言を見直す"));
+  need("手作業: 反対の指示を含まない（同じ項目内）", contradictsIn(manual).length === 0);
+  return gaps;
+};
+
+// 8.3: 4 章の冒頭の分岐（開発ブランチ向けの手順と、分岐元の専用の手順）と、開発ブランチ向けの項目の適用範囲、4 章全体の矛盾
+export const scopeGaps = (text) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const sec = sectionOf(text, BASE_PR_SECTION);
+  const intro = sec.split("\n1. ")[0];
+  need("4章冒頭: 開発ブランチ向けの手順と、分岐元の専用の手順の分岐を 1 文で言う", intro.includes("この章の 1〜4 の手順と下の各項目は開発ブランチでの作業向け。分岐元から保護ブランチへの PR は、下の専用の項目（分岐元から保護ブランチへの PR）の手順を使う（作業ブランチは作らず、別コミット・push・片付けは行わない）。"));
+  const unc = itemOf(sec, "**未コミットの変更の扱い**");
+  need("適用範囲: 未コミットの項目に（開発ブランチの場合）を付ける", unc.includes("**未コミットの変更の扱い**（開発ブランチの場合）"));
+  const clean = itemOf(sec, "**片付け**");
+  need("適用範囲: 片付けの項目に（開発ブランチの場合）を付ける", clean.includes("**片付け**（開発ブランチの場合）"));
+  need("4章全体: 分岐元の誤った指示（分岐元で作業を始める・別コミット・片付け）を含まない", SECTION_CONTRADICTIONS.every((p) => !sec.includes(p)));
+  return gaps;
+};
+
+// 8.3: 資料（setup.md の小節・config.md の一文）が分岐元からの PR の手順を指すか
+export const basePrRefGaps = (setupText, configText) => {
+  const gaps = [];
+  const need = (name, ok) => { if (!ok) gaps.push(name); };
+  const sec = subsectionOf(setupText, "### 分岐元から保護ブランチへの PR（分岐元のチェックアウト）");
+  need("資料 setup: 分岐元からの PR の小節がある", sec !== "");
+  need("資料 setup: 分岐元のチェックアウトで brw pr-template と brw pr を実行すると同じ小節で言う", sec.includes("分岐元のチェックアウト") && sec.includes("`brw pr-template`") && sec.includes("`brw pr`"));
+  need("資料 setup: 取り込み → 作成 → 報告の 3 段で、作業の記録・別コミット・片付けは行わないと同じ小節で言う", sec.includes("3 段") && sec.includes("別コミット") && sec.includes("片付け"));
+  need("資料 setup: 詳しい手順は SKILL.md の 4 章を指す", sec.includes("SKILL.md の 4 章"));
+  const cfg = sectionOf(configText, AUTO);
+  need("資料 config: 分岐元（baseBranch）から保護ブランチへの PR は brw pr で作ると文で言う", configText.includes("分岐元（`baseBranch`）から保護ブランチへの PR は、`brw pr` で作る。"));
+  need("資料 config: push: false のとき、この PR も通常の承認に回ると同じ文で言う", /push: false`.*この PR も通常の承認に回る/s.test(cfg));
+  return gaps;
+};
+
 // 変異版: 対象の語句を置き換えた合成の文書を作る（語句が無ければ null）
 const mutate = (text, from, to) => (text.includes(from) ? text.replace(from, to) : null);
 
@@ -346,5 +434,61 @@ export const runInstructionChecks = (eq) => {
   if (existsSync(join(caseDir, "case.yaml"))) {
     const yaml = readFileSync(join(caseDir, "case.yaml"), "utf8");
     eq("instructions/17.1 評価ケースの name が名前と一致する", yaml.includes("name: commits-and-pushes-at-boundary"), true);
+  }
+
+  // ---- 8.3: 分岐元から保護ブランチへの PR（実際の文書・変異版・資料・評価ケース） ----
+  const setupDoc = read("references/setup.md");
+  const skillGaps = (t) => [...basePrGaps(t), ...scopeGaps(t)];
+  eq("instructions/8.3 SKILL.md の分岐元からの PR・手作業・4 章の適用範囲が成立している", skillGaps(skill), []);
+  eq("instructions/8.3 setup.md・config.md の分岐元からの PR の資料が成立している", basePrRefGaps(setupDoc, config), []);
+  const basePrMutants = [
+    ["3 段（取り込み → 作成 → 報告）を 2 段へ反転", skill, "3 段（取り込み → 作成 → 報告）だけ", "2 段（作成 → 報告）だけ"],
+    ["作業の記録・別コミット・push・片付けは行わないを削除", skill, "作業の記録・別コミット・push・片付けは行わない", "作業の記録と push は行う"],
+    ["分岐元のブランチと作業場所は残るを削除", skill, "分岐元のブランチと作業場所は残る", "分岐元のブランチは片付ける"],
+    ["分岐元のチェックアウトの指定を削除（分岐元での作成を許す）", skill, "分岐元のチェックアウトで次の順に行う", "分岐元で `brw create` を実行し、次の順に行う"],
+    ["分岐元の項目に「別コミットを作る」を追加（矛盾）", skill, "未コミットの変更は PR に含まれず", "別コミットを作る。未コミットの変更は PR に含まれず"],
+    ["作成画面の URL を削除", skill, "`https://github.com/<owner>/<repo>/compare/<base>...<head>?expand=1`", "Web 画面"],
+    ["開発ブランチ間の取り込みを brw pr へ反転", skill, "開発ブランチ間の取り込みは PR を使わず `brw merge <取り込み元>`", "開発ブランチ間の取り込みは `brw pr` で作る"],
+    ["資料 setup の 3 段の注記を削除", setupDoc, "3 段（取り込み → 作成 → 報告）だけを行い、", ""],
+    ["否定の反転: 作業の記録・別コミット・push・片付けは行わない → 行う", skill, "作業の記録・別コミット・push・片付けは行わないので", "作業の記録・別コミット・push・片付けは行うので"],
+    ["適用範囲の削除: 4 章冒頭の開発ブランチ向けの限定", skill, "この章の 1〜4 の手順と下の各項目は開発ブランチでの作業向け。", ""],
+    ["分岐元の項目に brw create を促す文を追加（矛盾）", skill, "分岐元のチェックアウトで次の順に行う。", "分岐元のチェックアウトで次の順に行う。分岐元で `brw create` を実行してから作業する。"],
+    ["開発間の文に作成画面の URL を混ぜる", skill, "開発ブランチ間の取り込みは PR を使わず `brw merge <取り込み元>` を使う", "開発ブランチ間の取り込みは PR を使わず `brw merge <取り込み元>` を使い、作成画面の URL（`https://github.com/<owner>/<repo>/compare/<base>...<head>?expand=1`）も出る"],
+    ["同名の場合分けの「取り込みは不要」を反転", skill, "取り込みは不要で、", "取り込みが必要で、"],
+    ["未コミットの項目の（開発ブランチの場合）を削除", skill, "**未コミットの変更の扱い**（開発ブランチの場合）", "**未コミットの変更の扱い**"],
+    ["片付けの（開発ブランチの場合）を削除", skill, "**片付け**（開発ブランチの場合）", "**片付け**"],
+    ["Web 画面の取り込み先・取り込み元の選択を削除", skill, "取り込み先と取り込み元を選んで作成する", "作成する"],
+  ];
+  for (const [name, doc, from, to] of basePrMutants) {
+    const m = mutate(doc, from, to);
+    const gapsOf = doc === setupDoc
+      ? (t) => basePrRefGaps(t, config)
+      : skillGaps;
+    eq(`instructions/8.3 変異版「${name}」を検出する`, m !== null && gapsOf(m).length > 0, true);
+  }
+  // 禁止語: 追加した手順の文に呼び出し側の置き場を示す語を出さない
+  const basePrText = [sectionOf(skill, BASE_PR_SECTION)].join("\n");
+  eq("instructions/8.3 追加した手順に呼び出し側の置き場を示す語がない", FORBIDDEN.find((re) => re.test(basePrText))?.source ?? null, null);
+
+  // 評価ケース opens-pr-from-base（opens-pr-and-cleans-up と同じ構成）
+  const prCaseDir = join(root, "evals/opens-pr-from-base");
+  eq("instructions/8.3 評価ケース opens-pr-from-base の構成ファイルがそろう", ["case.yaml", "prompt.md", "place-files.sh"].every((f) => existsSync(join(prCaseDir, f))), true);
+  eq("instructions/8.3 評価ケース opens-pr-from-base の graders が 1 つ以上ある", existsSync(join(prCaseDir, "graders")) && readdirSync(join(prCaseDir, "graders")).length >= 1, true);
+  if (existsSync(join(prCaseDir, "case.yaml"))) {
+    eq("instructions/8.3 評価ケースの name が名前と一致する", readFileSync(join(prCaseDir, "case.yaml"), "utf8").includes("name: opens-pr-from-base"), true);
+  }
+  if (existsSync(join(prCaseDir, "place-files.sh"))) {
+    eq("instructions/8.3 評価ケースの fixture バリアントが共通の fixture にある", readFileSync(join(prCaseDir, "place-files.sh"), "utf8").includes("base-ahead") && read("evals/_fixture/setup-repo.sh").includes("base-ahead)"), true);
+  }
+  // 評価の実行環境の制約（origin がローカルの bare で GitHub に接続しない）を case.yaml に明記する
+  if (existsSync(join(prCaseDir, "case.yaml"))) {
+    const caseYaml = readFileSync(join(prCaseDir, "case.yaml"), "utf8");
+    eq("instructions/8.3 評価ケースに GitHub 接続の制約（ローカルの bare・評価環境）を明記する", caseYaml.includes("評価環境") && caseYaml.includes("ローカルの bare") && caseYaml.includes("GitHub"), true);
+  }
+  // 本文の判定は、分岐元が本体のこの fixture でも案内されたパスを使うことを見る（作業ツリーの外かどうかは判定しない）
+  const grader01 = join(prCaseDir, "graders/01-check.md");
+  if (existsSync(grader01)) {
+    const g = readFileSync(grader01, "utf8");
+    eq("instructions/8.3 評価ケース graders/01 は brw pr-template が出力したパスの本文を使うことを判定する", g.includes("brw pr-template が出力したパス") && !g.includes("作業ツリーの中に置いていない"), true);
   }
 };
