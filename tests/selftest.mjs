@@ -44,6 +44,7 @@ import { runIntegrationPublishChecks } from "./integration-publish.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runTtyObserveChecks } from "./tty-observe.mjs";
+import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
@@ -663,6 +664,9 @@ await runStopObserveChecks(eq);
 
 // ---- 実環境の標準入出力の端末判定の引数・記録・判定・整形（brw-enforcement 14.2） ----
 await runTtyObserveChecks(eq);
+
+// ---- 作業ブランチの残りの検出（brw-enforcement 16.1） ----
+await runWorkRemainderChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
