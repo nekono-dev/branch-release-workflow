@@ -348,7 +348,24 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 - **状態の削除（④）**: ロックを取得し、この作業の記録だけを取り除く。取り除いた後に**他の記録（公開済みを含む）が 1 つでも残っていればファイルを残し**、残っていなければファイルとロックを削除する。
 - **部分的な失敗の回復**: 状態ファイルは worktree の実体パスのハッシュで決まるため、worktree が消えた後は探せない。そこで、①の時点で状態ファイルのパスを `git config branch.<ブランチ>.brwState` に記録する。③で worktree は消えたがブランチの削除が失敗したときは、「本体で `brw finish <ブランチ>` を実行する」と案内する。手動の `brw finish` は、削除に成功した後に `brwState` が記録されていれば同じ手順（④）で状態を削除し、設定を外す（手動の片付けも状態を残さなくなる）。④の途中で失敗したときは、片付けが済んでいて状態が残っていることを表示し、`brw finish <ブランチ>` での回復を案内する。
 - **手動の `brw finish`（共有部分）**: 手動側の遠隔確認も `origin` 固定ではなく、`branch.<ブランチ>.pushRemote`（既存の `remoteNameOf`）を使うよう揃える。「遠隔に無いとき片付けてよい」は手動側だけの条件のままにする（取り込み済みの判定を前提とするため）。
-- 案内: 本体のパスと「次の作業は `brw create <名前>`」。作業場所が消えた後のコマンドは、ホストが本体へ戻して実行する（research.md #1）。
+- 案内: 本体のパスと「次の作業は `brw create <名前>`」に加え、**「この PR の続きの作業は `brw resume <ブランチ>`」**（7.1）。作業場所が消えた後の作業ディレクトリは、実機（Claude Code 2.1.329、2026-11-27）で、本体でセッションを開始した場合はホストが本体へ戻し、作業場所の中で開始した場合はホームに落ちる（フックの `CLAUDE_PROJECT_DIR` は削除済みのパスのまま）。後者のときだけ `cd <本体>` を案内する（4.9）。Codex はコマンドごとに別のシェルで実行され、作業ディレクトリが消える状況にならない。
+- **再開の記録（7.2）**: 片付けが `cleaned` のとき、`resume-record.mjs` の `writeRecord(main, {branch, prUrl, repository, sessionId, at})` を呼ぶ（片付けの判定・状態の削除とは独立。書けなくても片付けの結果は変えず警告だけ）。
+
+### 再開の記録と案内（`scripts/resume-record.mjs`、`scripts/brw.mjs` の `resume`、`scripts/agent-hooks.mjs` の `UserPromptSubmit`）
+
+```typescript
+interface ResumeEntry { branch: string; prUrl: string | null; repository: string | null; sessionId: string | null; at: string }  // at は ISO 日時
+/** <git 共通ディレクトリ>/brw/resume.json（先頭が最新、最大 10 件、同じ branch は置き換え）。ロック＋一時ファイル置換で書く。失敗は警告（呼び出し側の結果を変えない） */
+function writeRecord(main: string, e: ResumeEntry): { ok: true } | { ok: false, message: string };
+function readRecords(main: string): ResumeEntry[];            // 読めない・形が不正は空配列（案内しない側）
+/** 7.4・7.6: 案内の対象を決める純粋関数＋Git の読み取りだけ */
+function resumableFor(cwd: string, sessionId: string | null, now: Date): ResumeEntry | null;
+```
+- 記録の置き場は作業状態（`<共通ディレクトリ>/brw/work/`）とは別のファイル `resume.json`（作業状態の削除・片付けの判定に影響しない。要件 7.2）。
+- **`brw resume`（引数なし）**（7.3）: 本体で `git for-each-ref refs/remotes/<リモート>/` から宣言の `workBranches` に合うブランチを取り、`git worktree list` に作業場所があるものを除き、`resume.json` の公開記録があるものを先頭にして一覧する（ネットワークを使わない。最新でなければ `git fetch` を案内）。引数ありの従来の動作は変えない。
+- **`UserPromptSubmit`**（7.4〜7.6）: Claude Code・Codex とも `agent-hooks.mjs <host> UserPromptSubmit`。入力の `cwd`（Codex は本体のまま、Claude は本体かホーム）と `session_id` から、`cwd` のリポジトリ（無ければ `CLAUDE_PROJECT_DIR` が `<本体>/.claude/worktrees/<別名>` の形のとき本体を導出）の記録を読み、`resumableFor`（同じ `sessionId`、`at` から 24 時間以内、その作業ブランチの作業場所が無い、`refs/remotes/<リモート>/<ブランチ>` がある、宣言が読めて開発ブランチ）が見つけたとき、`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<案内>"}}` を返す（案内は 500 文字以内。ブランチ名は無害化。`brw resume <ブランチ>` と `brw create <名前>` の使い分け）。**副作用なし**（作業場所の作成・記録の書き換え・通信をしない。作成は `brw resume`）。見つからなければ応答なし。
+- 登録: `hooks/hooks.json`（Claude）に `UserPromptSubmit`、`hook-install.mjs`（Codex の `.codex/hooks.json`）に `UserPromptSubmit`、`HOST_EVENTS`・`hook-diagnose.mjs` の `ROUTE_EVENTS`・信頼の診断に `UserPromptSubmit` を追加する。
+- 限界: セッションを識別できない（`session_id` が無い）ときは何も渡さない（別セッションへの誤案内を避ける）。別のセッション・24 時間を超えた再開は `brw resume`（引数なし）の一覧と手順書で行う。
 
 ### 判定層（`scripts/operation-decision.mjs`）
 
@@ -415,3 +432,4 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 - 2026-11-26: 要件 1.8〜1.11、2.8、3.10、4.12（恒常的な分岐元から保護ブランチへの PR）の設計を追加した。利用者の決定により、作業の記録は作業ブランチにだけ適用し、分岐元からの PR は「取り込み → 作成 → 報告」の 3 段だけの軽い経路（`base-pr`）にした（案 P2）。判定の 5 か所の前提のうち、直接の PR 作成の判定（`evalPrCreateRules`）と `brw pr` の事前確認・雛形・案内だけを変え、作業の記録に結び付く `work start`・準備・計画・push は変えない。PoC で、ローカルの分岐元が先行していると `merge --ff-only` が成功してしまうことが分かったため、先行を別に検出する。要件・設計・タスクの承認は外したまま（タスクは再生成が必要）。
 - 2026-11-26（設計の検証）: `base-pr` が `origin` を固定で使っていた点を、`remoteNameOf` で解決するリモートに改めた。承認が必要な場合の `--confirmed`（`base-pr` 自身が端末判定を持つ）と、PR 作成時の head の OID の照合を設計に足した。
 - 2026-11-27（最終検証での修正）: ファイル構成に `base-sync.mjs` を加えた。`createOrReusePr` の実際の署名は `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`。`branch` は取り込み元のブランチ名。`beforeCreate` は PR を新規に作る直前だけ呼ばれ、承認の判定で止められる）。
+- 2026-11-27（要件 4.9 の改訂と 7 の追加）: 実機の観測（Claude Code 2.1.329）で、本体でセッションを開始した場合は作業場所の削除後にホストが作業ディレクトリを本体へ戻し、作業場所の中で開始した場合だけホームに落ちると分かったため、4.9 を「戻さない場合に `cd` を案内」に改めた。利用者の依頼により、公開後の続きの作業を削除済みの作業場所から再開するための要件 7（片付けの案内・再開の記録・`brw resume` の一覧・`UserPromptSubmit` の文脈注入）の設計を追加した。フックは判定と文脈の提供だけで、作業場所の作成は行わない（設計の原則）。
