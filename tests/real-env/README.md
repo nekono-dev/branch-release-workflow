@@ -181,3 +181,78 @@ node tests/real-env/tty-observe.mjs --host codex         # Codex を 1 回呼び
 - Codex は一時の `CODEX_HOME`（認証は一時のコピー。実行の後に削除）で実行した。生の出力は実行時の `/tmp/brw-real-env/tty-observe/<ホスト>-*/`。
 - Codex の再観測（2026-11-26、認証は一時のコピー・実行後に削除）: 端末判定・Stop の観測とも総合「一致」。利用者の `~/.codex/auth.json` のハッシュは実行の前後で同じだった。
 - 記録の検証（`tty-observe.mjs`・`stop-observe.mjs` 共通）: 記録の 1 行ごとに、必須項目と型・値（`mode` は `direct`/`pty`、`stdin`/`stdout` は `undefined`/`false`/`true` の文字列、Stop の記録は `stop_hook_active`・`block` が真偽値、など）を検査する。構文エラーも形式の不正も「不正な行」として数え、1 件でもあれば総合を「一致」にしない（想定外の正規の値があれば「不一致」、それ以外は「未観測」）。未知の追加項目と空行は許可する。
+
+## 追加した規則の実環境の確認（19.2）
+
+追加した規則（開発ブランチの確認省略・保護ブランチの拒否・Stop の block と再入・`brw pr-merge` の端末限定）を、実ホストと実 GitHub で観測する。`BRW_REAL_ENV=1` を付けたときだけ動く。
+
+### 実行の状態
+
+- 観測は実行済みで、結果は末尾の「追加した規則の実環境の確認の結果（19.2）」に記録した。この節の手順は、その結果を再現するためのもの。
+- 結果の判定に使わなかった項目（記録が無い・根拠が揃わないもの）は「未観測」として扱う。
+
+### 手順
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/enforce-observe.mjs --stage hosts --host claude --dry-run   # 呼び出しなしで計画を表示
+node tests/real-env/enforce-observe.mjs --stage hosts --host claude            # 本番（ホストを最大 4 回呼ぶ）
+node tests/real-env/enforce-observe.mjs --stage hosts --host codex             # 本番（最大 4 回）
+node tests/real-env/prepare.mjs                                                 # merge 段階の前に状態ファイルを作る
+node tests/real-env/enforce-observe.mjs --stage merge --dry-run                # 計画のみ（GitHub へ書き込まない）
+node tests/real-env/enforce-observe.mjs --stage merge                          # 本番（使い捨てブランチ 3 本と PR 2 件だけ）
+node tests/real-env/cleanup.mjs                                                 # 記録されたものだけを削除
+```
+
+- `hosts` 段階（H1・H2・H3・H3w の 4 シナリオ、ホストごと最大 4 回）: origin は GitHub 形式の URL だが、試験用 ssh でローカルの bare リポジトリへ向ける。`gh` は偽物で、呼ばれたら失敗する。フックは `hook-logger.mjs` を挟み、記録（`<作業場所>/hook-log/<ホスト>.jsonl`）と作業場所の Git の状態から判定する。作業場所は `/tmp/brw-real-env/enforce-observe/` 配下。Codex は一時の `CODEX_HOME` を使う（実行の後に削除）。
+- `merge` 段階: 使い捨てブランチ `verify/brw-base-<epoch>`・`verify/brw-prot-<epoch>`・`dev/verify-merge-<epoch>` を main の現在の commit から作り、PR-1（head → 分岐元）と PR-2（head → 保護扱い）を立てる。`brw pr-merge` を非端末（M1）・疑似端末で入力なし（M2）・`n`（M3n）・`y`（M3y）で実行し、エージェントのフック経路（M4a・M4b）を `scripts/agent-hooks.mjs` に実際の入力の形で渡す。疑似端末は `script` を使い、プロンプト `マージしますか [y/N]` の出力を待ってから答えを送る（60 秒で打ち切る）。
+
+### 安全制約
+
+- GitHub へ書き込むのは、上の使い捨てブランチ 3 本と PR 2 件だけ。main・既存のブランチ・既存の PR・Ruleset・リポジトリ設定には書き込まない。`hosts` 段階は GitHub へ書き込まない。
+- 使い捨てブランチと PR は `prepare.mjs --record` で状態ファイルに記録し、`cleanup.mjs` が記録されたものだけを削除する（`dev/verify-merge-<番号>` の名前も削除対象に含める。既に閉じた PR・マージ済みの PR は閉じ直さない）。
+- `brw pr-merge` の M1 は `GH_TOKEN` を無効な値にして実行する。`refs` が変わらないことで書き込みが無いことを確かめる。
+- 利用者の `~/.claude`・`~/.codex` は読み書きしない。Codex の認証は一時のコピーで、実行の後に消す。
+- 資格情報（トークン）は表示・記録しない。
+- 呼び出し回数は既存の共有カウンタ（`events/calls.json`。Claude 12 回・Codex 14 回の上限）に加算する。`hosts` 段階は 1 ホストあたり最大 4 回。
+
+### 記録の検証規則
+
+- フックの記録（`hook-log/<ホスト>.jsonl`）の 1 行ごとに、時刻 `ts`（日時の文字列）、`host`（想定のホスト）、`event`（空でない文字列）、`input`（オブジェクト）、`stdout`（空、または JSON のオブジェクト）、`exit`（整数）を検査する。構文エラーも形式の不正も「不正な行」として数え、1 件でもあればそのシナリオを「記録不正」とし、一致にしない。
+- ホストの終了コードが 0 以外、またはタイムアウトのときは一致にしない（「未観測」）。
+- merge 段階の観測（M1・M2・M3n・M3y・M4a・M4b）は、6 件すべてがそろい、形式が正しく、条件（終了コード・PR の状態の読み戻し・refs の不変・squash の親が 1 つ・マージ commit が分岐元の先頭と一致など）をすべて満たしたときだけ「一致」。欠けは「未観測」、条件外れは「不一致」、形式の不正や重複は「記録不正」。
+- 根拠の厳密さ: H1・H2 は、`git add … && git commit …` が同じ Bash 呼び出し（同じ command）に含まれる記録だけを根拠にする（分けて実行した記録は未観測）。H1 の allow・H2 の deny・H3 の block は、終了コード 0 で応答が期待どおりの JSON のときだけ一致とする。再入（stop_hook_active:true）の応答なしは、終了コード 0 で stdout が空（空白のみを含む）のときだけ一致とし、block・他の JSON・非 0 の終了コードは不一致とする。
+- M1 は「利用者が自分の端末」を含み、質問（`マージしますか`）を含まないこと。M2 は「保護ブランチ」「GitHub 上」を含み、質問を含まないこと（入力を送っていない）。M3n は PR の表示（番号・タイトル・取り込み・head の SHA）→ 質問 → 送った入力 `n` → `中止しました` の順で、終了コード 1・PR は open・refs 不変のときだけ一致。M3y は同じ表示・質問・入力 `y`・`マージしました` の順で、終了コード 0・PR は merged・squash（親が 1 つ）・head は残る、のときだけ一致。
+- 想定と異なる結果は「不一致」、記録が無いものは「未観測」と書き、成功扱いにしない。
+
+## 追加した規則の実環境の確認の結果（19.2、実行日 2026-11-27）
+
+Claude Code 2.1.329・codex-cli 0.172.0、実 GitHub（`nekono-dev/branch-release-workflow` の使い捨てブランチだけ）。判定は記録の検証（1 行ごとの必須項目の型・値、ホストの終了コード、フックの終了コードと応答、プロンプトの表示と送った入力の順序）を通した結果で、想定と異なるものは成功として記録していない。
+
+経緯: 最初の実行の後、レビューで判定の緩さ（M3n・M2 がプロンプトの有無を見ない、Stop の再入が JSON 応答を通す、H1 が `git add` と `git commit` の別呼び出しを通す）を指摘され、判定を厳密にして実環境をもう一度実行した。厳密化した判定の最初の merge 実行では、判定側が `brw pr-merge` の表示（タイトルとブランチ名をバッククォートで囲む）と合わず M3n・M3y が「不一致」になった（実際の動作は正しかった）。判定を直して再実行した結果が下の表（merge 段階の最終実行は PR #17・#18）。
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| H1 開発ブランチの `git add … && git commit …`（複合）の確認省略 | **一致**: PreToolUse が allow（`登録済みの宣言に従う通常の commit`）で、確認なしに commit が作られた。続く Stop が「未 push の commit が残っている」と 1 回止め、モデルは push まで進めて終了コード 0（最初の実行は `--max-turns 4` の上限で終了コード 1 となり「未観測」と判定された。上限を 8 にして再実行し一致。bare に `記録` の commit が反映されていたことも確認） | **未観測**: PreToolUse は応答なし（Codex は allow を返せない）、`codex exec` では PermissionRequest が届かず、サンドボックス（workspace-write）が `.git` を書き込み禁止にするため commit も作られなかった。8.4 で記録した既存の制約と同じで、本件の変更の不具合ではない。承認方針 `on-request` の対話（TUI）での allow の実到達は、この環境では観測できていない |
+| H2 保護ブランチ main の commit の拒否 | **一致**: PreToolUse の deny、HEAD 不変、終了コード 0 | **一致**: 同じ |
+| H3 未コミットのまま終わる応答の Stop | **一致**: 1 回目が block（理由に「未コミット」と `new.txt`）、再入（`stop_hook_active:true`）は応答なしで通る、終了コード 0 | **一致**: 同じ |
+| H3w 別の worktree に残した未コミットの Stop | **一致**: block・再入の通過 | **一致**: block・再入の通過（Codex の Stop の cwd が本体のままでも、全 worktree の走査で検出） |
+| M1 非端末の `brw pr-merge` | 終了コード 1、「利用者が自分の端末」、PR は open のまま、`refs` は不変（`GH_TOKEN` を無効にしても同じ＝通信なし） | （ホスト非依存） |
+| M2 保護扱いの取り込み先への `brw pr-merge`（疑似端末） | 質問の前に拒否（「保護ブランチです…GitHub 上でマージしてください」）、終了コード 1、PR は open のまま | （同上） |
+| M3n 分岐元向けの `brw pr-merge` に `n`（疑似端末） | 「中止しました」、終了コード 1、PR は open のまま | （同上） |
+| M3y 同じく `y` | 終了コード 0、PR は merged、マージ commit が分岐元ブランチの先頭と一致、squash（親 1 つ）、head のブランチは削除されない | （同上） |
+| M4a エージェントの Bash の `node <brw> pr-merge <番号>` | PreToolUse の deny（`pr-merge-by-agent`、案内に「利用者が自分の端末で実行」） | （フック入力を直接渡して確認。Claude と Codex は同じ判定の経路） |
+| M4b エージェントの `gh pr merge` | PreToolUse の deny、案内に `brw pr-merge`（「分岐元向けは別の端末で、保護ブランチ向けは GitHub 上」） | 8.4 の再実行（X3）でも deny を確認（Codex の PreToolUse） |
+
+- 8.4 の `host-events.mjs` を、新しい案内文・Stop の統合のもとで再実行した（誤って `--reset-counter` に全シナリオが続いて走った）。Claude は C1〜C8 すべて OK。Codex は X1〜X7 のうち X3 だけが NG: `git push` のサンドボックス内での追跡参照の更新失敗（`.git` が読み取り専用）による既存の制約で、`gh pr merge`・`--auto`・`gh pr create` の deny と新しい案内（`brw pr-merge`）は届いていた。ほかは OK。
+- 後片付け: 使い捨てブランチ `verify/brw-base-*`（2 本）・`verify/brw-prot-*`・`dev/verify-merge-*`、PR #17（マージ済み）・#18（クローズ）、一時クローン・一時 HOME を削除した。`main` の commit は不変（`bd2c9b8`）。
+- 未確認のもの: Codex の対話（TUI）での PermissionRequest の allow の実到達、Claude Code の `!` での実行が端末判定を満たすか（SKILL.md は「可能性がある」と書き別の端末を案内）、Windows など他の環境。
+
+### 観測の道具の判定に残る制約（19.2 のレビューで指摘され、受け入れたもの）
+
+判定を変えるたびに実 GitHub・実ホストの再実行が要るため、次の緩さは直していない。結果の表は、これらに頼らず、実行ごとに観測の生の記録と GitHub の読み戻しを人が確認したものである（refs の不変・PR の状態・マージ commit の親の数・`main` の SHA を `gh api` で読み直した）。
+
+- H2: 複合コマンドの deny が 1 件あれば、同じ呼び出しの別の記録が非 0 終了や応答なしでも一致にする（該当する各記録の終了コード・応答を個別には確かめない）。
+- M1〜M3n の「refs 不変」: 読み取りに失敗した ref と存在しない ref をどちらも `null` として数えるため、前後とも読み取りに失敗すると不変と誤って判定しうる。
+- H1・H2 の複合コマンドの判定: `git add … && git commit …` が同一の Bash 呼び出しにあることは確かめるが、引用文字列の中の例（`echo 'git add x && git commit …'`）と区別しない。
+- M4b: deny と終了コードだけを確かめ、案内文（`brw pr-merge`・取り込み先別の案内）は判定に含めない（案内文の内容は単体試験と、host-events.mjs（C3・X3）が実機の応答を表示して確かめる）。

@@ -33,13 +33,17 @@ for (const id of rulesets) {
   failed ||= !gone;
 }
 for (const n of state.prs ?? []) {
+  // マージ済み（19.2 の M3y）や既に閉じた PR は閉じ直さない（閉じると失敗になるため）
+  const cur = ghJson(`repos/${SLUG}/pulls/${n}`);
+  if (cur.ok && cur.data.state === "closed") { out(`PR #${n}: 既に閉じている（マージ済みを含む）ため触りません`); continue; }
   const r = ghApi(["-X", "PATCH", `repos/${SLUG}/pulls/${n}`, "-f", "state=closed"]);
   out(`PR #${n}: ${r.code === 0 ? "クローズ" : `失敗 ${r.err.trim().split("\n")[0]}`}`);
   failed ||= r.code !== 0;
 }
 const branches = [...new Set([...(state.extraBranches ?? []), ...(state.branchCreated ? [state.branch] : [])])];
 for (const b of branches) {
-  if (!b.startsWith("verify/")) { out(`ブランチ ${b}: verify/ 以外のため触りません`); continue; }
+  // 検証用の名前だけを消す（19.2 の PR の head は dev/verify-merge-<番号> の形）
+  if (!/^(verify\/|dev\/verify-merge-\d+$)/.test(b)) { out(`ブランチ ${b}: 検証用の名前ではないため触りません`); continue; }
   const r = ghApi(["-X", "DELETE", `repos/${SLUG}/git/refs/heads/${b}`]);
   const gone = r.code === 0 || /404|422|Not Found|Reference does not exist/.test(r.err);
   out(`ブランチ ${b}: ${gone ? "削除（または既に無し）" : `失敗 ${r.err.trim().split("\n")[0]}`}`);

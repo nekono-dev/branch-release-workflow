@@ -45,6 +45,7 @@ import { runIntegrationEnforcementChecks } from "./integration-enforcement.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runTtyObserveChecks } from "./tty-observe.mjs";
+import { runEnforceObserveChecks } from "./enforce-observe.mjs";
 import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
 import { runInstructionChecks } from "./instructions.mjs";
@@ -670,6 +671,9 @@ await runStopObserveChecks(eq);
 
 // ---- 実環境の標準入出力の端末判定の引数・記録・判定・整形（brw-enforcement 14.2） ----
 await runTtyObserveChecks(eq);
+
+// ---- 実環境の追加した規則の観測の引数・記録の検証・判定・計画（brw-enforcement 19.2） ----
+await runEnforceObserveChecks(eq);
 
 // ---- 作業ブランチの残りの検出（brw-enforcement 16.1） ----
 await runWorkRemainderChecks(eq);
