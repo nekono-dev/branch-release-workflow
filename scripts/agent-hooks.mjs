@@ -636,9 +636,17 @@ function publishGuidance(ev) {
  * 宣言の autoApprove.push が明示的に false のとき真（未登録の既定の false とは区別する）。読み取りだけを行い、判定できなければ null。
  */
 function remainderGuidanceOf(ev) {
+  const cwd = cwdOf(ev);
+  if (!cwd) return null;
+  return remainderGuidanceForCwd(cwd);
+}
+
+/**
+ * 残りの案内の本文（16.4 で Stop と brw guard --finish が共用する）。cwd は cd の手順の基準にだけ使う。
+ * 残りが無い・判定できないときは null（案内しない側に倒す）。読み取りだけを行う。
+ */
+export function remainderGuidanceForCwd(cwd) {
   try {
-    const cwd = cwdOf(ev);
-    if (!cwd) return null;
     const remainders = remaindersOf(cwd);
     if (remainders.length === 0) return null;
     // 宣言は本体（先頭の worktree）から読む（remaindersOf と同じ読み方。実パスは -z の一覧から取る）

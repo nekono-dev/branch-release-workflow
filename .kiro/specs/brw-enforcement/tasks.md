@@ -282,7 +282,7 @@
   - _Depends: 15.3_
   - _Requirements: 2.14, 2.18_
 
-- [ ] 16. 開発ブランチの残りを終了時に検出して案内する
+- [x] 16. 開発ブランチの残りを終了時に検出して案内する
 - [x] 16.1 (P) リポジトリの全 worktree の開発ブランチの、未コミットの変更と未 push の commit を検出する
   - 作業ディレクトリのリポジトリの全 worktree（`git worktree list --porcelain`。上限 20 件）のうち、そのブランチが開発ブランチのものを対象にする。保護ブランチ・恒常的な分岐元・宣言外・detached HEAD・prunable の worktree、未導入のリポジトリは対象外にする。作業の記録やブランチの作られ方、Stop の作業ディレクトリが作業中の worktree を指すことには依存せず、Git だけを使う。
   - 未コミットの変更は新規の未追跡ファイルを含み、無視されたファイルを含めない。未 push の commit は、要件の用語どおり、各リモートの同名のブランチと恒常的な分岐元（リモート追跡ブランチ）のどちらにも無い commit の数で数え、追跡ブランチの無い新規ブランチでは分岐元との差の全 commit を数える。秘密情報らしい名前のファイル（`tidy.mjs` の `SECRET_PATTERNS`）を別に集める。ネットワークを使わず、判定できないときは案内しない側に倒す。
@@ -303,7 +303,7 @@
   - _Boundary: フック変換、作業ブランチの残り_
   - _Depends: 16.2, 6.2_
   - _Requirements: 2.9, 2.10, 2.12, 2.13, 2.16_
-- [ ] 16.4 フックが使えない環境向けに `brw guard --finish` を作る
+- [x] 16.4 フックが使えない環境向けに `brw guard --finish` を作る
   - 引数が `--finish` ちょうど 1 つのとき、コマンドを渡さずに全 worktree の残りを判定し、残りがあれば案内を `[block]` つきで出して終了コード 1、無ければ `[allow]` で 0 を返す。従来の「コマンド文字列を 1 つ渡す」形の出力と終了コードは変えない。
   - 残りあり・無し・対象外ブランチ・push 禁止の各場面で、Stop と同じ判定結果が返り、どの worktree から実行しても同じになることを単体テストで確認できる。
   - _Boundary: CLI、作業ブランチの残り_
@@ -423,3 +423,4 @@
 - 16.1（2026-11-27、完了。レビュー 5 回）: 検出は `scripts/work-remainder.mjs` の `remaindersOf(cwd)`（`Remainder = {branch, path, dirty, dirtyCount, unpushed, secretLike}`）。開発ブランチの判定は `classifyBranch === "development"`（命名規則に合わないものは宣言外。設計の「judgeBranch で allow」を実装に合わせて改めた）。未 push は**要件の用語どおり**、各リモートの同名ブランチと恒常的な分岐元の追跡ブランチ（`refs/remotes/<r>/…`）を除外して数える（設計の PoC は `--not --remotes` だったが、別名のリモートブランチにだけある commit を取りこぼすため改めた。ローカルの分岐元は除外に使わない。除外する参照が無ければ全 commit。リモート無しも全 commit で、push できないときは要件 2.11 の報告と再入の Stop で扱う。unborn は 0）。未コミットは `status --porcelain -z --untracked-files=normal`（R/C は X・Y どちらでも次のレコードを読み飛ばす）。畳まれた未追跡ディレクトリは dirty 1 件のまま、`ls-files --others --exclude-standard`（`--literal-pathspecs`、全件）で中を調べて secretLike にだけ反映する。worktree の一覧は `-z`（Git 2.36 以降。古い Git は改行区切りで、改行を含むパスは見落とす制約）。宣言は本体（先頭の worktree）から読み、不正・未導入は空。**16.2 以降の注意**: 案内文は dirty 先頭 10 件・worktree 先頭 5 件に切る。分岐元の追跡ブランチを `git fetch` していないと、分岐元の commit を余分に数えうる（案内の側に倒れる）。テストの fixture は分岐元をリモートへ push する形（`mkBrwRepo`）。
 - 16.2（2026-11-27、完了。レビュー 6 回）: 案内文は `scripts/work-remainder.mjs` の純粋関数 `remainderGuidance(remainders, policy)`（`policy = {noPush, cwd?}`。残りが無い・noPush で未 push だけなら null）。**案内に埋め込む名前（ファイル名・ブランチ名・パス）はモデルへ渡る信頼できない入力**として `escapeValue`/`visible`（Unicode の Cc・Cf・Zl・Zp・Co・Cn・Cs と `\` と改行を `\xNN`・`\uNNNN`・`\\` に直し、バッククォートも `\x60`、200 文字で切る）で 1 行のデータにし、バッククォートで囲む。`cd '<パス>'`（POSIX の単一引用）は、cwd が worktree のルートと完全一致しないときに出し、パスが無害化で変わる（`plainPath` が偽）なら cd を出さず手動の案内にする。サブディレクトリの cwd ではルートへ cd を案内する（変更パスはルート基準）。案内には `git status`・`git diff --cached` でステージ内容を確認し無関係な変更・秘密らしいファイルを `git restore --staged` で外すこと、秘密情報を含みうるファイルを commit に含めない一般の注意（残りの種類によらず）、push できないときの報告、失敗時の報告、「この作業によるものでなければ報告して終了してよい」を含む。noPush は「commit までにとどめ、未 push を報告」。限界: NBSP・全角スペース（Zs）は可視化しない。cwd との一致は文字列比較（symlink 経由は cd が余分に出るだけ）。16.3 は Stop の cwd を渡す。
 - 16.3（2026-11-27、完了。レビュー 2 回）: Stop は `agent-hooks.mjs` の `stopGuidance` が `publishGuidance`（既存の公開の案内。セッション・状態ファイル・HEAD が無いと null。文面は従来と同一）と `remainderGuidanceOf`（全 worktree の Git の状態だけで評価。cwd が無ければ null）を 1 つの block にまとめる（公開の案内が先、空行を挟む）。再入は両方とも null。push 禁止は worktree ごとに、`restrictionsFor(<worktree>).noPush` か `declaredNoPushOf(cwd)`（宣言の `autoApprove.push` が**明示的に** false。未登録の既定の false とは区別）。`remainderGuidance` は残りごとの `noPush` を policy より優先する。本体のパスは `mainWorktreeOf(cwd)`（`-z` の一覧の先頭）で `remaindersOf` と共有する。既存テストの `repoOf`（tests/agent-hooks.mjs・tests/agent-hooks-session.mjs）の fixture に「分岐元 develop をリモートへ push する」処理を足した（assertion は変えていない。16.1 の数え方では、分岐元がリモートに無いと継承 commit が未 push になるため）。限界: `restrictionsFor` は状態ファイルが壊れていると noPush を返す既存の安全側の挙動で、その場合は未 push が案内されず未コミットだけ案内される。Stop は BRW 導入リポジトリで毎回 git を数回実行する（worktree 最大 20 件。性能は未計測）。実機の確認は 19.2。
+- 16.4（2026-11-27、完了。16 群はこれで完了）: `brw guard --finish`（`scripts/brw.mjs` の `guardFinish`）は、`mainWorktreeOf(cwd)`（本体）を基準に `agent-hooks.mjs` の `remainderGuidanceForCwd(cwd)`（Stop と共用。Stop の `remainderGuidanceOf` はこれを呼ぶだけ）で判定し、`[block] <案内>` で終了コード 1、残り無し・判定不能は `[allow] 未コミットの変更も未 push の commit も残っていません。` で 0。引数の形（0 個・2 個以上・`--finish` と他の併用）は使い方で 2。基準を本体にそろえるため、どの worktree から実行しても同じ出力になる（Stop はイベントの cwd を使うので、cwd が本体以外のとき cd の行だけ異なりうる）。判定不能（宣言の不正・Git 外・未導入）は「判定できなかった」旨を出さず `[allow]`（案内しない側に倒す）。

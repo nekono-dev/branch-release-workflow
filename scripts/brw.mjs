@@ -35,7 +35,8 @@ import {
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
-import { denyOfCommand } from "./agent-hooks.mjs";
+import { denyOfCommand, remainderGuidanceForCwd } from "./agent-hooks.mjs";
+import { mainWorktreeOf } from "./work-remainder.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { carryChanges } from "./carry.mjs";
@@ -754,9 +755,23 @@ function renderWrangler(args) {
 // 手順書の経路で、共通の判定の拒否を必ず止める操作の種類: ブランチの作成・再開（create）と PR 作成（pr-create）
 const GUARD_OP_KINDS = ["create", "pr-create"];
 
+// 終了前の残りの確認（16.4）。コマンドを渡さず、全 worktree の残りを Stop と同じ判定で見る（フックが使えない環境向け）。
+// 基準は本体の worktree にそろえ、どの worktree から実行しても同じ出力になるようにする。判定できなければ残り無しとして扱う。
+function guardFinish() {
+  const main = mainWorktreeOf(process.cwd());
+  const guidance = main ? remainderGuidanceForCwd(main) : null;
+  if (guidance === null) {
+    console.log("[allow] 未コミットの変更も未 push の commit も残っていません。");
+    return;
+  }
+  console.log(`[block] ${guidance}`);
+  process.exit(1);
+}
+
 // Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
 function guard(args) {
-  if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド"', 2);
+  if (args.length === 1 && args[0] === "--finish") return guardFinish();
+  if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド" または guard --finish', 2);
   // 作成・再開・PR 作成を含むコマンドは、共通の判定（フックと同じ）が拒否したら、拒否の code によらず止める。
   // それ以外（commit・push だけ）は従来の判定へ進み、出力と終了コードを変えない
   const denial = denyOfCommand(args[0], process.cwd());

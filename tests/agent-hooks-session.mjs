@@ -1,5 +1,6 @@
 // 作業 ID の関連付け（PostToolUse）と終了時の案内（Stop）の契約テスト（brw-enforcement 6.2）。selftest.mjs から呼ばれる。
 // 実際のホストは呼ばず、入力の形（fixture）と応答の形を確かめる。遠隔（bare remote）と GitHub には触れない。
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -447,6 +448,111 @@ export const runAgentHookSessionChecks = async (eq) => {
       writeFileSync(join(dir, "new.txt"), "x\n");
       const c = stopOf("codex", dir);
       eq("enforcement/2.16 特殊なパスの本体で未コミットがあれば、commit までの案内にし、未 push を理由にしない", [block(c), c?.reason?.includes("commit までにとどめ"), c?.reason?.includes("git push")], [true, true, false]);
+    } finally {
+      r.cleanup();
+    }
+  }
+  // ---- brw guard --finish: 終了前の残りの確認（brw-enforcement 16.4。Stop と同じ判定を、コマンドを渡さずに行う） ----
+  const FIN_ALLOW = "[allow] 未コミットの変更も未 push の commit も残っていません。";
+  const BLOCK = "[block] ";
+  const finishOf = (dir, args = ["--finish"]) => {
+    const g = spawnSync("node", [BRW, "guard", ...args], { cwd: dir, encoding: "utf8" });
+    return { status: g.status, out: g.stdout, err: g.stderr };
+  };
+  {
+    // 残りあり（未コミット）: [block] と終了コード 1。案内に worktree のパスと commit の手順を含み、Stop の reason 本文と同じ
+    const r = repoOf();
+    try {
+      gitOut(r.dir, "update-ref", "refs/remotes/origin/dev/foo", "HEAD");
+      eq("enforcement/2.19 残りが無ければ [allow] と終了コード 0 を返す", finishOf(r.dir), { status: 0, out: `${FIN_ALLOW}\n`, err: "" });
+      writeNew(r.dir);
+      const f = finishOf(r.dir);
+      const stopBody = (stopOf("claude", r.dir)?.reason ?? "").slice(RPFX.length);
+      eq("enforcement/2.19 未コミットがあれば [block] で終了コード 1、案内に worktree のパスと commit の手順を含む", [f.status, f.out.startsWith(BLOCK), f.out.includes(r.dir), f.out.includes("git commit"), f.err], [1, true, true, true, ""]);
+      eq("enforcement/2.19 [block] の案内本文は Stop の reason 本文と同じ（接頭辞を除く）", [f.out.slice(BLOCK.length).trimEnd(), stopBody], [stopBody, stopBody]);
+      rmSync(join(r.dir, "new.txt"));
+      gitOut(r.dir, "commit", "--allow-empty", "-q", "-m", "未 push の commit");
+      const u = finishOf(r.dir);
+      eq("enforcement/2.19 未 push の commit だけでも [block] で終了コード 1 を返す", [u.status, u.out.startsWith(BLOCK), u.out.includes("未 push の commit")], [1, true, true]);
+    } finally {
+      r.cleanup();
+    }
+  }
+  {
+    // 対象外（保護ブランチ・宣言外のブランチ）と、未導入のリポジトリ・Git の外は [allow]（判定できない側に倒す）
+    const r = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    const plain = mkRepoWithRemote({ branch: "dev/foo", config: null });
+    const outside = mkdtempSync(join(tmpdir(), "brw-nogit3-"));
+    try {
+      writeNew(r.dir);
+      eq("enforcement/2.19 保護ブランチの未コミットは対象外として [allow] を返す", finishOf(r.dir), { status: 0, out: `${FIN_ALLOW}\n`, err: "" });
+      rmSync(join(r.dir, "new.txt"));
+      gitOut(r.dir, "checkout", "-q", "-b", "feature/x");
+      writeNew(r.dir);
+      eq("enforcement/2.19 宣言外のブランチの未コミットは [allow] で終了コード 0 を返す", finishOf(r.dir).status, 0);
+      writeNew(plain.dir);
+      eq("enforcement/2.19 BRW 未導入のリポジトリでは [allow] を返す", finishOf(plain.dir), { status: 0, out: `${FIN_ALLOW}\n`, err: "" });
+      eq("enforcement/2.19 Git の外では [allow] で終了コード 0 を返す", finishOf(outside).status, 0);
+    } finally {
+      plain.cleanup();
+      rmSync(outside, { recursive: true, force: true });
+      r.cleanup();
+    }
+  }
+  {
+    // push 禁止（宣言の autoApprove.push: false）: 未 push だけなら [allow]、未コミットがあれば commit までの案内で [block]
+    const r = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: { push: false } } });
+    try {
+      gitOut(r.dir, "push", "-q", "origin", "main:refs/heads/develop");
+      gitOut(r.dir, "commit", "--allow-empty", "-q", "-m", "未 push の commit");
+      eq("enforcement/2.19 宣言の autoApprove.push: false で未 push だけなら [allow] を返す", finishOf(r.dir).status, 0);
+      writeNew(r.dir);
+      const f = finishOf(r.dir);
+      eq("enforcement/2.19 宣言の autoApprove.push: false で未コミットがあれば、commit までの案内で [block]", [f.status, f.out.startsWith(BLOCK), f.out.includes("commit までにとどめ"), f.out.includes("git push")], [1, true, true, false]);
+    } finally {
+      r.cleanup();
+    }
+  }
+  {
+    // 作業の制限（noPush）も push 禁止として扱う: 未 push だけなら [allow]
+    const r = repoOf();
+    try {
+      gitOut(r.dir, "update-ref", "refs/remotes/origin/dev/foo", "HEAD");
+      const id = publish.startWork(r.dir, {}).work.workId;
+      publish.setRestrictions(r.dir, id, { noPush: true });
+      gitOut(r.dir, "commit", "--allow-empty", "-q", "-m", "未 push の commit");
+      eq("enforcement/2.19 作業の制限 noPush で未 push だけなら [allow] を返す", finishOf(r.dir).status, 0);
+    } finally {
+      r.cleanup();
+    }
+  }
+  {
+    // どの worktree から実行しても同じ結果（本体・作業の worktree のどちらからも、残りのある worktree を判定する）
+    const r = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    const wt = mkWorktree(r.dir, "dev/wt");
+    try {
+      gitOut(wt, "push", "-q", "-u", "origin", "dev/wt");
+      writeNew(wt);
+      const fromMain = finishOf(r.dir);
+      const fromWt = finishOf(wt);
+      eq("enforcement/2.19 本体・作業の worktree のどちらから実行しても、同じ出力と終了コードになる", fromWt, fromMain);
+      eq("enforcement/2.19 本体から実行しても、別の worktree の開発ブランチの残りを [block] で案内する", [fromMain.status, fromMain.out.startsWith(BLOCK), fromMain.out.includes(wt)], [1, true, true]);
+    } finally {
+      r.cleanup();
+    }
+  }
+  {
+    // 従来の形（コマンド文字列を 1 つ渡す）の出力と終了コードは変えない。使い方は 2（--finish を含む使い方の文言）
+    const r = repoOf();
+    try {
+      const legacy = finishOf(r.dir, ["git commit -m x"]);
+      eq("enforcement/2.19 従来の guard \"git commit -m x\" の出力と終了コードを変えない", [legacy.status, legacy.out], [0, "[allow] \n"]);
+      const none = finishOf(r.dir, []);
+      eq("enforcement/2.19 引数が無い guard は使い方で終了コード 2 を返し、guard --finish を示す", [none.status, none.err.includes("guard --finish")], [2, true]);
+      const extra = finishOf(r.dir, ["--finish", "extra"]);
+      eq("enforcement/2.19 guard --finish に余分な引数があれば使い方で終了コード 2", [extra.status, extra.err.includes("guard --finish")], [2, true]);
+      const mixed = finishOf(r.dir, ["--finish", "git commit -m x"]);
+      eq("enforcement/2.19 guard --finish と他の引数の併用は使い方で終了コード 2", [mixed.status, mixed.err.includes("guard --finish")], [2, true]);
     } finally {
       r.cleanup();
     }
