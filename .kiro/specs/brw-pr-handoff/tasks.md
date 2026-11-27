@@ -210,6 +210,17 @@
   - _Boundary: 統合テスト、実環境検証_
   - _Depends: 9.3, 9.4, 9.5_
   - _Requirements: 4.9, 7.1, 7.4, 7.7_
+- [ ] 9.7 セッションの手がかりを実行前に記録し、片付けの記録に使う
+  - `agent-hooks.mjs` の `PreToolUse`（Bash。Claude・Codex）で、信頼済みの `node <brw.mjs> pr …` の呼び出しを見たとき、`resume-record.mjs` に追加する `writeSessionHint(main, {sessionId, dir, now})` で `<git 共通ディレクトリ>/brw/session-hint.json`（最新 1 件、0600・一時ファイル→rename・通常ファイルのみ・サイズ上限）を書く。許可・拒否の判定は変えず、失敗してもフックを止めない。`readSessionHint(main, worktreePath, now)`（10 分以内かつ `dir` が一致するときだけ `sessionId` を返す）を `pr-flow.mjs` の `finishUp` が使い、再開の記録の `sessionId` に入れる。`PostToolUse` の `attachSession` は補完として残す。
+  - 片付け後の記録に、同じ呼び出しのセッションの `sessionId` が入る（`dir` が違う・古い・不正なメモでは null のまま）。実行前後で作業場所・refs・通信が変わらない（メモ以外）。統合試験（tests/integration-resume.mjs）で、`PostToolUse` が届かない場合（Claude の「Exit code 1」相当）でも UserPromptSubmit の案内が出ることを確かめる。
+  - _Boundary: フック変換、再開の記録_
+  - _Depends: 9.2, 9.4_
+  - _Requirements: 7.2, 7.4_
+- [ ] 9.8 実機で案内の到達を再観測する
+  - 9.6 後半の観測の道具（`tests/real-env/resume-observe.mjs`）で、実機の Claude Code（本体で開始）の同じセッションの次の入力に案内が届くこと（記録の `sessionId` が付き、`UserPromptSubmit` の案内が届く）を再観測し、結果を README に追記する。Codex は認証が無ければ「未観測」のまま記録する。想定と異なる結果は成功として記録せず、一致したら `feasibility.md` の設計の確認を `通過` に戻す。
+  - _Boundary: 実環境検証_
+  - _Depends: 9.7_
+  - _Requirements: 4.9, 7.4_
 - 5.1（2026-11-27、完了）: 実 git の検証は `tests/base-sync-git.mjs`（19 件。一時リポジトリ＋bare remote、HOME・Git 設定を隔離）。観測を固定した: 最新・リモート先行（`merge --ff-only` で取り込める）・**ローカル先行でも `ff-only` が成功する**（先行は `rev-list --count <remote>/<base>..<base>` で別に数える必要がある根拠）・分岐（`ff-only` が失敗、先行・遅れとも 1 以上）・保護ブランチと差なし（差 0）・未追跡ファイルだけなら取り込めて内容が残る・同じ追跡ファイルを変更していると衝突で失敗して内容が残る・`pushRemote`/`remote.pushDefault` が `origin` 以外のとき origin 固定だと遅れを見逃す（解決したリモート名で比べる）。7.2 の部品はこの観測を前提にする。
 - 6.1・6.2（2026-11-27、完了。レビュー 5 回。6 群はこれで完了）: 判定は `evalPrCreateRules`（scripts/operation-decision.mjs）。**取り込み元が恒常的な分岐元（`base`）、取り込み先が保護ブランチ**の組が新しく適合（`pr-create-base-protected`）。ほかの組（開発間・宣言外・保護が取り込み元・分岐元→分岐元/開発/宣言外・別リポジトリ head）の拒否は不変、エージェント起点の直接の作成は適合でも `pr-create-use-brw` で拒否、`origin: "brw-publish"` だけが通る。案内は組ごとに選ぶ `prAlternative`・`prFlowAlternative`: `brw pr` で作れる組（開発→保護・分岐元、分岐元→保護）だけに `brw pr-template`→`brw pr` を示し、作れない組には「作れない理由→GitHub 上での作成手順→作成画面の URL（`/compare/<base>...<head>?expand=1`。ref は Git の規則で検証し Unicode は許し、各区間を `encodeURIComponent`。不正・長すぎる ref は URL を出さず Web 画面の手順だけ）」、開発ブランチ間は URL を出さず `brw merge`、同名（head と base が同じ）は「取り込みは不要」。長さは**最終的な reason と alternative の連結が 500 文字**に収まるよう管理し（結論を先頭、ref の表示は 60 文字（エスケープ後）で省略、URL は残りの文字数に全体が収まるときだけ、パスを含む実行の形は末尾）、`brw work start` の分岐元の拒否文に「分岐元から保護ブランチへの PR は `brw pr` で作れる」を追加（publish-cli.mjs）。副産物: 過去のタスクで commit 済みのテストにあった生の制御文字（U+202E・U+200B・U+FEFF・U+2028。tests/decision.mjs・work-remainder.mjs・pr-merge.mjs）を `\uXXXX` 表記に改めた（ソースで表示順が偽装されるのを防ぐ）。**7.x の注意**: 案内は `brw pr` を分岐元でも示すが、実体（調整役）は 7.3・7.4 で作る。
 - 7.1（2026-11-27、完了）: `scripts/publish-pr.mjs` に `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`）を切り出し、`runPublishPr` はこれを使う（挙動不変）。作業の記録・状態・計画に依存しない。成功は `{ok:true, reused, created, reconciled, pull}`、止まる場合は `{ok:false, kind:"failed"|"invalidInput"|"prohibited"|"needsApproval", code, message, ...}`（`base-conflict`・`pr-draft`・`pr-ambiguous`・`pr-mismatch`（`createdUrl`・`differences` つき）・`pr-unconfirmed`・`pr-title-required` など）。`beforeCreate` は作成の直前（既存 PR が無いときだけ）に呼ばれ、止める結果（承認待ち・禁止）を返せる（7.3 が承認の判定に使う）。
