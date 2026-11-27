@@ -3,7 +3,7 @@
 // 作業の記録（状態ファイル）・ブランチの作られ方・cwd が指す場所には依存しない。ネットワークを使わず、状態は変更しない。
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, resolve, sep } from "node:path";
 import { classifyBranch, loadConfig } from "./lib.mjs";
 import { SECRET_PATTERNS } from "./tidy.mjs";
 
@@ -195,4 +195,109 @@ export function remaindersOf(cwd) {
     // 想定外の失敗は、残りが無いものとして扱う（案内しない側に倒す）
     return [];
   }
+}
+
+// 案内文の上限（16.2）。超えた分は「ほか N 件」と書く
+const GUIDE_WORKTREE_LIMIT = 5;
+const GUIDE_PATH_LIMIT = 10;
+// 案内に書く名前の長さの上限（コードポイント数）
+const GUIDE_VALUE_MAX = 200;
+
+// 可視化する文字: 制御文字（C0・DEL・C1）、改行類、書式制御文字（双方向・ゼロ幅・BOM など）、行・段落の区切り、私用領域、未割り当て、代理対。
+// Unicode の文字種で判定する（通常の日本語・空白 U+0020・NBSP などは残す）
+const INVISIBLE_G = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}]/gu;
+const escapeInvisible = (c) => {
+  if (c === "\n") return "\\n";
+  if (c === "\r") return "\\r";
+  if (c === "\t") return "\\t";
+  const cp = c.codePointAt(0);
+  if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`;
+  if (cp <= 0xffff) return `\\u${cp.toString(16).padStart(4, "0")}`;
+  return `\\u{${cp.toString(16)}}`;
+};
+
+// 値を 1 行のデータに直した本体（囲みなし）。200 文字で切り、バックスラッシュ（先に）・可視化対象・バッククォートの順に直す。
+// 後で足す \n・\x60 などと、実際の文字を区別するため、バックスラッシュは先に二重にする
+const escapeValue = (value) => {
+  const chars = Array.from(String(value));
+  const cut = chars.length > GUIDE_VALUE_MAX ? `${chars.slice(0, GUIDE_VALUE_MAX).join("")}…` : chars.join("");
+  return cut.replace(/\\/g, "\\\\").replace(INVISIBLE_G, escapeInvisible).replace(/`/g, "\\x60");
+};
+
+// 信頼できない値（ファイル名・ブランチ名・パス）を、案内の中で 1 行のデータとして示す（バッククォートで囲む）
+const visible = (value) => "`" + escapeValue(value) + "`";
+
+// cd の行に出せるパスか。無害化で値が変わらないものだけ（visible の比較と一致させ、判定の食い違いを作らない）
+const plainPath = (p) => escapeValue(p) === p;
+
+// POSIX シェルの単一引用（' は '\'' にする）。cd の手順で使う
+const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
+// 名前の一覧を上限で切る。超えた分は「ほか N 件」を付ける（total は件数の総数）。各値は visible で示す
+const listWithMore = (names, total, limit) => {
+  const shown = names.slice(0, limit).map(visible).join(", ");
+  const rest = total - Math.min(names.length, limit);
+  return rest > 0 ? `${shown} ほか ${rest} 件` : shown;
+};
+
+// cwd が worktree のルートと完全に一致するか（末尾のスラッシュは除いて比べる）。
+// サブディレクトリは一致とみなさない: 表示するパスはルート基準のため、そこから git add すると誤ったパスを指すため
+const isRoot = (cwd, path) => resolve(cwd) === resolve(path);
+
+/**
+ * 残りの案内文を作る（brw-enforcement 16.2）。純粋関数（Git・ファイルに触れない）。
+ * remainders は remaindersOf の戻り値、policy は {noPush, cwd?}。
+ * noPush（作業の制限・確認省略の無効による push 禁止）のときは未 push を理由にせず、未 push だけの残りは外す。
+ * 名前・パスは可視化して値として示し、cd の手順はシェルで安全に引用する。残りが無ければ null、あれば案内文を返す。
+ */
+export function remainderGuidance(remainders, policy = {}) {
+  const noPush = policy?.noPush === true;
+  const cwd = typeof policy?.cwd === "string" && policy.cwd !== "" ? policy.cwd : null;
+  const all = Array.isArray(remainders) ? remainders : [];
+  const items = all.filter((r) => !(noPush && r.dirtyCount === 0));
+  if (items.length === 0) return null;
+
+  const hasDirty = items.some((r) => r.dirtyCount > 0);
+  // push 禁止のときは未 push を案内に出さない
+  const hasUnpushed = !noPush && items.some((r) => r.unpushed > 0);
+  const head = hasDirty && hasUnpushed
+    ? "未コミットの変更または未 push の commit が残っている開発ブランチがあります。"
+    : hasDirty
+      ? "未コミットの変更が残っている開発ブランチがあります。"
+      : "未 push の commit が残っている開発ブランチがあります。";
+
+  const shown = items.slice(0, GUIDE_WORKTREE_LIMIT);
+  const lines = [head, noPush ? "次の worktree の変更を commit までにとどめてください。" : "次の worktree の残りを、この作業で生じた変更なら commit・push してください。"];
+  shown.forEach((r, i) => {
+    lines.push("");
+    lines.push(`${i + 1}. ブランチ ${visible(r.branch)}（${visible(r.path)}）`);
+    // 作業ディレクトリと別の worktree なら、そこへ移ってから行う。制御文字を含むパスは cd にせず、手動で移る案内にする
+    // cd の行は、無害化で値が変わらないパス（制御文字・バッククォートを含まず 200 文字以内）だけに出す。それ以外は可視化した値で手動の案内にする
+    if (cwd === null || !isRoot(cwd, r.path)) {
+      if (plainPath(r.path)) lines.push(`   - cd ${shellQuote(r.path)} で移ってから行う`);
+      else lines.push(`   - このパスは制御文字・バッククォート・長さのため案内に直接書けず、cd の手順は出しません。${visible(r.path)} へ手動で移ってください`);
+    }
+    if (r.dirtyCount > 0) lines.push(`   - 未コミットの変更 ${r.dirtyCount} 件: ${listWithMore(r.dirty, r.dirtyCount, GUIDE_PATH_LIMIT)}`);
+    if (!noPush && r.unpushed > 0) lines.push(`   - 未 push の commit ${r.unpushed} 件`);
+    if (r.secretLike.length > 0) lines.push(`   - 秘密情報らしい名前のファイル（${listWithMore(r.secretLike, r.secretLike.length, GUIDE_PATH_LIMIT)}）は commit に含めない`);
+    // 次の操作。add は変更したパスだけにする
+    const steps = [];
+    if (r.dirtyCount > 0) steps.push("git add <変更したパス>", "git commit");
+    if (!noPush && (r.dirtyCount > 0 || r.unpushed > 0)) steps.push("git push");
+    if (steps.length > 0) lines.push(`   - 次の操作: ${steps.join(" → ")}${noPush ? "（push はしない）" : "（brw を使う場合も同じ手順）"}`);
+  });
+  const more = items.length - shown.length;
+  if (more > 0) lines.push("", `ほか ${more} 件の worktree にも残りがあります。`);
+
+  lines.push("");
+  // commit の前に、ステージ済みの無関係な変更や秘密らしいファイルを外す（既にステージされた変更が混ざるのを防ぐ）
+  // 秘密らしいファイルの注意は、残りの種類によらず含める（未 push だけの案内・noPush の案内も同じ）
+  lines.push("秘密情報を含みうるファイル（.env・鍵・credentials など）は commit に含めないでください。");
+  if (hasDirty) lines.push("commit する前に `git status`・`git diff --cached` でステージ内容を確認し、この作業と無関係な変更や秘密らしいファイルが含まれていれば `git restore --staged <パス>` で外してください。");
+  lines.push(noPush
+    ? "この作業で生じた変更なら commit までにとどめ、未 push であることを報告して終了してください。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。"
+    : "この作業で生じた変更なら commit・push する。この作業によるものでなければ、その旨を報告して終了してよい（別のセッションが作業中の worktree の可能性があるため）。");
+  if (!noPush) lines.push("push できないとき（認証・保護・ネットワークなど）は、その理由を利用者へ報告してから終了してください。");
+  lines.push("失敗したときは、成功した処理・未完了の処理・失敗理由を報告して終了してください。");
+  return lines.join("\n");
 }
