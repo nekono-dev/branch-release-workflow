@@ -59,6 +59,124 @@ export const runEnforcementChecks = async (eq) => {
   eq("enforcement/1.1 --dry-run の commit は照会として扱う", first("git commit --dry-run").kind, "query");
   eq("enforcement/1.1 ワークツリーごとに現在のブランチを使う", (() => { const wt = mkWorktree(d, "dev/wt"); return [first("git commit -m x", wt).branch, first(`git -C ${wt} commit -m x`, d).branch]; })(), ["dev/wt", "dev/wt"]);
   eq("enforcement/1.1 コミットメッセージの $(...) と heredoc は操作に見せない", c("git commit -m \"$(cat <<'EOF'\nfix: git push origin main\nEOF\n)\"").operations.map((o) => o.kind), ["commit"]);
+  // commit の通常形（15.2・要件 2.14）。flags は commit だけが持つ
+  const cflags = (cmd) => first(cmd)?.flags;
+  const normalOf = (cmd) => cflags(cmd)?.normal;
+  eq("enforcement/2.14 通常形の commit は normal になる", [
+    "git commit -m x", "git commit -m \"fix: x\"", "git commit -am 'fix: x'", "git commit -s -m x", "git commit -mx", "git commit -mn",
+    "git commit --message=x", "git commit -m 'literal $X'", "git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"",
+    "git commit -F - <<'EOF'\nfix\nEOF\n",
+  ].map(normalOf), [true, true, true, true, true, true, true, true, true, true]);
+  eq("enforcement/2.14 クォートした heredoc の本文は展開されず、通常形として判定する", [c("git commit -m \"$(cat <<'EOF'\n$(git push origin main) $X\nEOF\n)\"").operations.map((o) => o.kind), normalOf("git commit -m \"$(cat <<'EOF'\n$(git push origin main) $X\nEOF\n)\"")], [["commit"], true]);
+  eq("enforcement/2.14 --amend・--no-verify・-n（束ねた形を含む）を印として持つ", [
+    cflags("git commit --amend -m x")?.amend, cflags("git commit -m x")?.amend,
+    cflags("git commit --no-verify -m x")?.noVerify, cflags("git commit -n -m x")?.noVerify, cflags("git commit -nm x")?.noVerify, cflags("git commit -an -m x")?.noVerify,
+    cflags("git commit -mn")?.noVerify, cflags("git commit -m x")?.noVerify,
+  ], [true, false, true, true, true, true, false, false]);
+  eq("enforcement/2.14 除外形は normal にならない（amend・noVerify）", ["git commit --amend -m x", "git commit --no-verify -m x", "git commit -n -m x", "git commit -nm x"].map(normalOf), [false, false, false, false]);
+  eq("enforcement/2.14 設定の上書き（-c・--config-env）と環境変数の前置は印を持ち normal にならない", [
+    cflags("git -c user.name=x commit -m x")?.configOverride, cflags("git --config-env=user.name=X commit -m x")?.configOverride, cflags("git commit -m x")?.configOverride,
+    cflags("FOO=bar git commit -m x")?.envAssign, cflags("env FOO=bar git commit -m x")?.envAssign, cflags("git commit -m x")?.envAssign,
+    ...["git -c user.name=x commit -m x", "git --config-env=user.name=X commit -m x", "FOO=bar git commit -m x", "env FOO=bar git commit -m x"].map(normalOf),
+  ], [true, true, false, true, true, false, false, false, false, false]);
+  eq("enforcement/2.14 メッセージに展開を含むものは normal にならない", [
+    "git commit -m \"$VAR\"", "git commit -m \"$(date)\"", "git commit -m \"`date`\"", "git commit -m \"x$(date)\"", "git commit -m $X",
+    "git commit -m \"$((1+1))\"", "git commit -m \"$(cat <<EOF\nfix\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\" -m \"$(date)\"",
+    "git commit -m *", "git commit -F msg.txt", "git commit -F - <<EOF\nfix $HOME\nEOF\n", "echo fix | git commit -F -", "git commit -m x $(date)",
+    "git commit -t tpl -m x", "git commit --bogus -m x", "git commit -m",
+  ].map(normalOf), Array(16).fill(false));
+  // レビュー指摘の穴（置換の語分割・リダイレクト・1 語の複数展開・fd 指定・前方一致）
+  eq("enforcement/2.14 引用されていない置換・一部だけの引用・前後に文字がある置換は normal にならない", [
+    "git commit -m $(cat <<'EOF'\nx --amend\nEOF\n)", "git commit -m x$(cat <<'EOF'\nx\nEOF\n)", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"suffix", "git commit -m \"pre $(cat <<'EOF'\nx\nEOF\n)\"",
+  ].map(normalOf), [false, false, false, false]);
+  eq("enforcement/2.14 commit のリダイレクトは -F - の引用 heredoc 1 つ以外は normal にならない", [
+    "git commit -m x <<EOF\n$(git push origin main)\nEOF\n", "git commit -m x >$(date)", "git commit -F - 3<<'EOF'\nx\nEOF\n", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" 2>&1", "git commit -m x <<'EOF'\nx\nEOF\n",
+  ].map(normalOf), [false, false, false, false, false]);
+  eq("enforcement/2.14 1 語に複数の展開や余分な文字が混ざる -m は normal にならない", [
+    "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)$((1+$(date)))\"", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)$(date)\"", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" -m \"$MSG\"", "git commit -m \"$MSG\" -m \"$(cat <<'EOF'\nx\nEOF\n)\"",
+  ].map(normalOf), [false, false, false, false]);
+  eq("enforcement/2.14 展開付きの --message= と $'...'、前方一致の未知オプションは normal にならない", [
+    "git commit --message=$(cat <<'EOF'\nx\nEOF\n)", "git commit --message=\"$(cat <<'EOF'\nx\nEOF\n)\"", "git commit -m $'x --amend'", "git commit -m x --no-v", "git commit --am -m x", "git commit -m x --amendx",
+  ].map(normalOf), [false, false, false, false, false, false]);
+  eq("enforcement/2.14 複数の commit は各操作ごとに判定し、引用 heredoc の複数の -m は通常形として判定する", [c("git commit -m a && git commit --amend -m b").operations.map((o) => o.flags?.normal), c("git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" -m \"$(cat <<'EOF'\ny\nEOF\n)\"").operations.map((o) => o.flags?.normal), normalOf("git commit -anm x")], [[true, false], [true], false]);
+  eq("enforcement/2.14 git -C と -c の組み合わせは設定の上書きとして判定する", [cflags(`git -C ${d} -c k=v commit -m x`)?.configOverride, normalOf(`git -C ${d} -c k=v commit -m x`)], [true, false]);
+  // 設定の上書き: -c は値が同じ語に結合した形（-cKEY=VAL）でも configOverride とし、通常にしない
+  eq("enforcement/2.14 -c の結合形（-cKEY=VAL）と --config-env の結合形は設定の上書きとして判定する", [
+    cflags("git -cuser.name=x commit -m x")?.configOverride, normalOf("git -cuser.name=x commit -m x"),
+    cflags("git --config-env=user.name=X commit -m x")?.configOverride, normalOf("git --config-env=user.name=X commit -m x"),
+    cflags("git -c user.name=x commit -m x")?.configOverride, normalOf("git -c user.name=x commit -m x"),
+  ], [true, false, true, false, true, false]);
+  // wrapper（env・nice など）経由の commit は通常にしない。command だけ引数を変えないので通常のまま
+  eq("enforcement/2.14 wrapper（env・nice・timeout など）経由の commit は通常にしない", [
+    "env -i git commit -m x", "nice git commit -m x", "timeout 5 git commit -m x", "sudo git commit -m x", "exec git commit -m x",
+    "time git commit -m x", "command -p git commit -m x", "env -u$VAR git commit -m x",
+  ].map(normalOf), Array(8).fill(false));
+  eq("enforcement/2.14 command だけの wrapper は引数を変えないので通常のまま", [normalOf("command git commit -m x")], [true]);
+  // env の作業ディレクトリ・分割文字列の変更（結合形を含む）は対象を確定できない（unparseable）
+  eq("enforcement/2.14 env の --chdir・-C・-S（結合形を含む）は対象を確定できない", [
+    "env --chdir=/tmp git commit -m x", "env -C/tmp git commit -m x", "env -C /tmp git commit -m x", "env --split-string=git commit -m x", "env -S'git commit -m x'",
+  ].map((cmd) => first(cmd)?.kind), Array(5).fill("unparseable"));
+  // 回帰: env の後ろの git が持つ -C は env の作業ディレクトリ変更ではない。従来どおり対象を解決する（HEAD と同じ種類・対象）
+  eq("enforcement/3 env の後ろの git の -C は解決する（env 自身の -C と区別する）", [
+    first("env git -C . push origin HEAD")?.kind, first("env git -C . merge topic")?.kind, first("env git -C . rebase main")?.kind, first("env git -C . commit -m x")?.kind,
+    first("env git -C . commit -m x")?.branch,
+  ], ["push", "merge", "commit", "commit", "dev/foo"]);
+  // heredoc は宣言したコマンド（<< を持つ項目）に結び付ける。後ろの commit の -F - は、自分の heredoc が無ければ通常にしない
+  eq("enforcement/2.14 heredoc は宣言したコマンドに結び付き、後ろの commit の -F - を通常にしない", [
+    normalOf("cat <<'EOF'; git commit -F -\nx\nEOF\n"), normalOf("git commit -F - ; cat <<'EOF'\nx\nEOF\n"),
+    normalOf("cat <<'EOF' | git commit -F -\nx\nEOF\n"), normalOf("git commit -F - <<'EOF'\nx\nEOF\n"), normalOf("git commit -m x ; cat <<'EOF'\nx\nEOF\n"),
+    // 展開されるヒアドキュメントをシェルへ渡す commit は通常にしない。区切りをクォートしたものは本文が展開されないので通常のまま
+    normalOf("cat <<EOF | sh\ngit commit -m x\nEOF\n"), normalOf("cat <<'EOF' | sh\ngit commit -m x\nEOF\n"),
+  ], [false, false, false, true, true, false, true]);
+  // env の長いオプションの省略形（--chd・--c・--s など）も、env 自身の作業ディレクトリ変更・環境変更として対象を確定できない
+  eq("enforcement/4 env の長いオプションの省略形は対象を確定できない（push・merge を含む）", [
+    "env --chd=/tmp git push origin main", "env --chd /tmp git push origin main", "env --c=/tmp git merge topic", "env --s=x git push origin main",
+    "env --unset=HOME git push origin main", "env --chdir=/tmp git merge topic",
+  ].map((cmd) => first(cmd)?.kind), Array(6).fill("unparseable"));
+  // 先頭オプションの値（-C）に引用なしのチルダ展開があれば通常にしない。対象の解決は従来どおり（HOME を repo に向けて確かめる）
+  {
+    const savedHome = process.env.HOME;
+    process.env.HOME = d;
+    try {
+      eq("enforcement/2.14 -C の引用なしのチルダ展開は通常にしない（引用された形は通常のまま）", [
+        normalOf("git -C ~ commit -m x"), normalOf("git -C ~/. commit -m x"), normalOf(`git -C '${d}' commit -m x`), normalOf(`git -C ${d} commit -m x`),
+      ], [false, false, true, true]);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+  }
+  // 再レビュー指摘: 位置引数のワイルドカード（--の後を含む）、置換の中の副作用（リダイレクト・余分な引数・連結）
+  eq("enforcement/2.14 位置引数のワイルドカード（--の後を含む）は normal にならない", [
+    "git commit -m x *", "git commit -m x -- *", "git commit -m x -- $X", "git commit -m x -*",
+  ].map(normalOf), [false, false, false, false]);
+  eq("enforcement/2.14 置換の中の cat に余分なリダイレクト・引数・連結があれば normal にならない", [
+    "git commit -m \"$(cat <<'EOF' > /tmp/sideeffect\nx\nEOF\n)\"", "git commit -m \"$(cat <<'EOF' 2>/dev/null\nx\nEOF\n)\"", "git commit -m \"$(cat 3<<'EOF'\nx\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF' extra\nx\nEOF\n)\"", "git commit -m \"$(cat <<'EOF' && rm x\nx\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n; rm x)\"",
+    "git commit -m \"$(cat <<'EOF' & \nx\nEOF\n)\"", "git commit -m \"$(cat <<'EOF' ; rm x\nx\nEOF\n)\"",
+  ].map(normalOf), [false, false, false, false, false, false, false, false]);
+  eq("enforcement/2.14 展開を含むメッセージと未対応の -F は messageNormal で区別する",[cflags("git commit -m \"$VAR\"")?.messageNormal, cflags("git commit -F - <<EOF\nfix $HOME\nEOF\n")?.messageNormal, cflags("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"")?.messageNormal], [false, false, true]);
+  // 許可リスト式（15.2 の作り直し）: 通常形と証明できたものだけ normal にする。正例・負例を表で並べる
+  const normalTable = (label, cmds, expected) => eq(label, cmds.map(normalOf), cmds.map(() => expected));
+  normalTable("enforcement/2.14 許可リスト: 通常にすべき実用形（メッセージの出所が静的）", [
+    "git commit -m \"msg\"", "git commit -m 'msg'", "git commit -m \"line1\\nline2\"", "git commit -m \"a\nb\"",
+    "git commit -m \"$(cat <<'EOF'\nfix: x\n本文\nEOF\n)\"", "git commit -m \"a\" -m 'b'",
+    "git commit -m \"$(cat <<'EOF'\na\nEOF\n)\" -m \"$(cat <<'EOF'\nb\nEOF\n)\"",
+    "git commit -F - <<'EOF'\n本文\nEOF\n", "git commit -a -s -q -v -m x", "git commit --allow-empty -m x",
+    "git commit --author=\"Name <a@example.com>\" -m x", "git commit --date=2020-01-01T00:00:00 -m x",
+    "git commit -m \"msg\" -- path/to/file", "git commit -m msg -- '/abs/path'", "git commit -m \"~\"", "git commit -m '$HOME'",
+    "git commit -m \"\\$X\"", "git commit -m \\~", "git commit -m hello", "git commit -m x --gpg-sign=KEY",
+  ], true);
+  normalTable("enforcement/2.14 許可リスト: 通常にしてはならない形（メッセージが無い・出所が別・対話・展開）", [
+    "git commit", "git commit -- -m hello", "git commit -C HEAD", "git commit -c HEAD", "git commit --reuse-message=HEAD",
+    "git commit --reedit-message HEAD", "git commit --fixup HEAD", "git commit --squash HEAD", "git commit -m ok --fixup HEAD",
+    "git commit -t tpl -m x", "git commit --template=tpl -m x", "git commit -e -m ok", "git commit --edit -m ok",
+    "git commit -e -m \"$(cat <<'EOF'\nfix\nEOF\n)\"",
+    "git commit -m ~", "git commit --author ~ -m x", "git commit -m x -- ~/file", "git commit -m x -- ~",
+    "git commit -m $\"hello\"", "git commit -m $'x'", "git commit -m \"a\"'b'", "git commit -m hello!world", "git commit -m \"hello!world\"",
+    "git commit -m hello\\ world", "git commit -nm x", "git commit -anm x", "git commit --amend -m x", "git commit --no-verify -m x",
+    "git commit --no-v -m x", "git commit --am -m x", "git -cuser.name=x commit -m ok", "git -c user.name=x commit -m ok",
+    "git commit -m x -S$KEY", "git commit -m x --author=~", "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" --author ~", "git commit -F msg.txt",
+  ], false);
 
   // ---- 作成・再開 ----
   eq("enforcement/1.2 ブランチの作成を分類する", ["git switch -c dev/n", "git checkout -b dev/n", "git branch dev/n", "git switch --create dev/n main", "git checkout --orphan dev/n"].map((x) => [first(x).kind, first(x).action, first(x).branch]), Array(5).fill(["create", "create", "dev/n"]));

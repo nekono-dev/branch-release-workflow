@@ -23,8 +23,9 @@ const MAX_DEPTH = 4;
 
 // ---- 字句解析 ---------------------------------------------------------------
 // 戻り値: 項目の配列。{ type: "open" | "close" } か
-//   { type: "cmd", words: [{ v, dyn, glob, redir }], subs: string[], sep, heredoc? }
-// dyn: 値が展開（$VAR・$(...)・`...`）で決まる。glob: 引用符なしの * ? [ {。redir: リダイレクトの一部。
+//   { type: "cmd", words: [{ v, dyn, glob, redir }], subs: string[], sep, heredoc, heredocQuoted: boolean[] }
+// dyn: 値が展開（$VAR・$(...)・`...`）で決まる。glob: 引用符なしの * ? [ {。tilde: 引用符なしの先頭の ~ がホームに置換された。redir: リダイレクトの一部。
+// heredocQuoted: 読んだ heredoc ごとに、区切りがクォート（'EOF'・"EOF"）されていたか。クォートなしは本文が展開される。
 
 // 閉じ括弧までの本文を返す（引用符と入れ子を考慮）。戻り値: { body, end } か、閉じていなければ null
 function balanced(s, start, open, close) {
@@ -53,20 +54,26 @@ export function lex(s) {
   let cmdHeredoc = "";
   let nextIsRedirTarget = false;
   let broken = false;
+  // 語の元の文字列（raw）を取るための位置。wordStart は語の先頭、pos は処理中の文字の位置
+  let wordStart = 0;
+  let pos = 0;
   const flush = () => {
     if (cur === null) return;
     if (nextIsRedirTarget) { cur.redir = true; nextIsRedirTarget = false; }
+    cur.raw = s.slice(wordStart, pos);
     words.push(cur);
     cur = null;
   };
-  const word = () => (cur ??= { v: "", dyn: false, glob: false, redir: false });
+  const word = () => (cur ??= { v: "", dyn: false, glob: false, redir: false, tilde: false });
   const endCmd = (sep) => {
     flush();
-    if (words.length || subs.length) items.push({ type: "cmd", words, subs, sep, heredoc: cmdHeredoc });
+    if (words.length || subs.length) items.push({ type: "cmd", words, subs, sep, heredoc: cmdHeredoc, heredocQuoted: [] });
     words = []; subs = []; cmdHeredoc = "";
   };
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
+    pos = i;
+    if (cur === null) wordStart = i;
     if (c === "\\") {
       if (s[i + 1] === "\n") { i++; continue; }
       word().v += s[++i] ?? "";
@@ -153,8 +160,9 @@ export function lex(s) {
           body += line + "\n";
         }
         if (!found) broken = true;
-        const last = items[items.length - 1];
-        if (last?.type === "cmd") last.heredoc += body;
+        // 本文は、<< を宣言したコマンドの項目へ結び付ける（直前に積んだ項目とは限らない）
+        const owner = items[h.owner];
+        if (owner?.type === "cmd") { owner.heredoc += body; owner.heredocQuoted.push(h.quoted); }
         i = Math.min(pos - 1, s.length);
       }
       pendingHeredocs = [];
@@ -195,10 +203,12 @@ export function lex(s) {
         const q = s[k] === "'" || s[k] === '"' ? s[k] : null;
         if (q) { const e = s.indexOf(q, k + 1); if (e < 0) { broken = true; break; } delim = s.slice(k + 1, e); k = e + 1; }
         else { while (k < s.length && !/[\s;&|()<>]/.test(s[k])) delim += s[k++]; }
-        pendingHeredocs.push({ delim, strip });
+        // owner: 宣言したコマンドの項目の位置（この時点で積まれている項目の数。次に積まれるのが現在のコマンド）
+        pendingHeredocs.push({ delim, strip, quoted: q !== null, owner: items.length });
         cmdHeredoc = cmdHeredoc || "";
         w.v += "<";
         i = k - 1;
+        pos = k; // 語の元の文字列（raw）の終わりを heredoc の区切りまでにする
         flush();
         continue;
       }
@@ -210,13 +220,15 @@ export function lex(s) {
       const w = word();
       if (c === "*" || c === "?" || c === "[" || c === "{") w.glob = true;
       if (c === "~" && w.v === "" && !w.dyn) {
-        if (s[i + 1] === undefined || s[i + 1] === "/" || /\s/.test(s[i + 1])) { w.v += HOME(); continue; }
+        // ホームへの置換は元の語の性質（チルダ展開）を残すため印を付ける（引用・エスケープされた ~ は付かない）
+        if (s[i + 1] === undefined || s[i + 1] === "/" || /\s/.test(s[i + 1])) { w.v += HOME(); w.tilde = true; continue; }
         w.dyn = true;
       }
       w.v += c;
     }
   }
   if (broken) return { items: [], broken: true };
+  pos = s.length;
   endCmd(";");
   return { items, broken: false };
 }
@@ -633,6 +645,8 @@ function classifyScript(script, ctx, depth, ops) {
       classifyNested(sub, ctx, depth, ops);
     }
     let words = it.words.filter((w) => !w.redir);
+    // 先頭の time は予約語として外すが、引数を変えない形でも通常形にはしない（wrapper と同じ扱い）
+    const timed = words[0] !== undefined && !words[0].dyn && words[0].v === "time";
     while (words.length && !words[0].dyn && KEYWORDS.has(words[0].v)) words = words.slice(1);
     // `function NAME { 本文` は定義部分（function と名前）だけを外し、`{` 以降の本文を分類する
     if (words.length && !words[0].dyn && words[0].v === "function") {
@@ -647,16 +661,24 @@ function classifyScript(script, ctx, depth, ops) {
     const firstWordOf = (x) => x.words.filter((w) => !w.redir).find((w) => !ASSIGN.test(w.v))?.v ?? "";
     if (it.heredoc && pipeline.some((x) => SHELLS.has(firstWordOf(x)) || ["eval", "xargs", "source", "."].includes(firstWordOf(x)))) {
       if (depth >= MAX_DEPTH) ops.push(makeOp("unparseable", ctx.cwd, ["heredoc の入れ子が深く、解釈できません。"], {}));
-      else classifyNested(it.heredoc, ctx, depth, ops);
+      else {
+        const before = ops.length;
+        classifyNested(it.heredoc, ctx, depth, ops);
+        // 展開されるヒアドキュメント（区切りがクォートされていない）の中の commit は、本文の展開で中身が変わりうるため通常にしない
+        if (!it.heredocQuoted.every(Boolean)) for (const op of ops.slice(before)) if (op.flags) op.flags.normal = false;
+      }
     }
     const inPipe = n > 0 && items[n - 1].type === "cmd" && items[n - 1].sep === "|";
     // シェルへ渡る入力の手がかり: here-string・標準入力のファイル・パイプの前段
-    const info = { inPipe, hereString: null, stdinFile: null, feeders: [] };
+    // redirs: words からは外れるリダイレクトの語（commit の通常形の判定が使う）
+    const info = { inPipe, hereString: null, stdinFile: null, feeders: [], subs: it.subs, redirs: it.words.filter((w) => w.redir), stdinHeredoc: false, wrapped: timed };
     for (let q = 0; q < it.words.length; q++) {
       const w = it.words[q];
       if (w.redir && /^\d*<<<$/.test(w.v)) info.hereString = it.words[q + 1] ?? { v: "", dyn: true };
       else if (w.redir && /^0?<$/.test(w.v)) info.stdinFile = it.words[q + 1] ?? { v: "", dyn: true };
     }
+    // 標準入力が、クォートした heredoc の本文だけで決まる（パイプ・here-string・ファイルが無い）か
+    info.stdinHeredoc = !inPipe && it.heredocQuoted.length === 1 && it.heredocQuoted[0] && info.hereString === null && info.stdinFile === null;
     for (let k = n - 1; items[k]?.type === "cmd" && items[k].sep === "|"; k--) info.feeders.push(items[k]);
     handleCommand(words, ctx, depth, ops, info);
   }
@@ -694,7 +716,7 @@ function handleCommand(words, ctx, depth, ops, info) {
     return;
   }
   if (isGit(name)) {
-    ops.push(gitOp(rest.slice(1), ctx, assigns, envTarget));
+    ops.push(gitOp(rest.slice(1), ctx, assigns, envTarget, info));
     return;
   }
   if (isGh(name)) {
@@ -757,14 +779,22 @@ function handleCommand(words, ctx, depth, ops, info) {
     return;
   }
   if (WRAPPERS.has(name)) {
+    // env の作業ディレクトリ・分割文字列・環境変数の変更は、git を含む限り対象を確定できない。
+    // 長いオプションは env --help の一覧の有効な前方一致（--chd・--c・--s など。getopt の省略形）もすべて対象とする
+    const ENV_LONG = ["ignore-environment", "null", "unset", "chdir", "split-string", "block-signal", "default-signal", "ignore-signal", "list-signal-handling", "debug", "help", "version", "argv0"];
+    const envLongOpt = (v) => { const m = /^--([^=]+)/.exec(v); return m !== null && ENV_LONG.some((o) => o.startsWith(m[1])); };
+    const envDirChange = (v) => envLongOpt(v) || (/^-[^-]/.test(v) && /[CS]/.test(v.slice(1)));
+    // 検査するのは env 自身の語（最初の git・gh より前。-S の文字列の中の git も含む）だけ。git 以降の語（git の -C など）は見ない
+    const toolAt = rest.findIndex((w, i) => i > 0 && (isGit(w.v) || isGh(w.v)));
+    const envOwn = rest.slice(1, toolAt < 0 ? rest.length : toolAt);
+    if (name === "env" && envOwn.some((w) => envDirChange(w.v)) && rest.slice(1).some((w) => /(git|gh)/.test(w.v))) {
+      ops.push(makeOp("unparseable", ctx.cwd, ["env が作業ディレクトリを変えるため、対象を確定できません。"], {}));
+      return;
+    }
     const gi = rest.findIndex((w, i) => i > 0 && (isGit(w.v) || isGh(w.v)));
     if (gi < 0) return;
     const viaGh = isGh(rest[gi].v);
     const between = rest.slice(1, gi);
-    if (name === "env" && between.some((w) => ["-C", "--chdir", "-S", "--split-string"].includes(w.v))) {
-      ops.push(makeOp("unparseable", ctx.cwd, ["env が作業ディレクトリを変えるため、対象を確定できません。"], {}));
-      return;
-    }
     if (between.some((w) => !(w.v.startsWith("-") || /^\d+(\.\d+)?[smhd]?$/.test(w.v) || ASSIGN.test(w.v)))) {
       ops.push(makeOp("unparseable", ctx.cwd, [`'${name}' 経由の ${viaGh ? "gh" : "git"} で、実行内容を確定できません。`], {}));
       return;
@@ -774,7 +804,9 @@ function handleCommand(words, ctx, depth, ops, info) {
       pushGh(rest.slice(gi + 1), ctx, [...assigns, ...extra], ops);
       return;
     }
-    ops.push(gitOp(rest.slice(gi + 1), ctx, [...assigns, ...extra], envTarget || extra.some((a) => GIT_TARGET_ENV.test(a))));
+    // wrapper 経由は、引数を変えないと確認できる command だけ（オプションなし）を通常形の対象にする。それ以外は通常にしない
+    const wrappedInfo = name === "command" && between.length === 0 ? info : { ...info, wrapped: true };
+    ops.push(gitOp(rest.slice(gi + 1), ctx, [...assigns, ...extra], envTarget || extra.some((a) => GIT_TARGET_ENV.test(a)), wrappedInfo));
     return;
   }
   if (EXECUTORS.has(name) && rest.some((w, i) => i > 0 && (isGit(w.v) || isGh(w.v)))) {
@@ -801,28 +833,166 @@ function makeOp(kind, dir, unresolved, fields) {
   return { kind, cwd: usableDir(dir), root: info.root, repoState: info.repoState, unresolved, ...fields };
 }
 
-function gitOp(args, ctx, assigns, envTarget) {
+// commit の通常形の判定（タスク 15.2・要件 2.14）。許可リスト式: 既定は通常でなく、下の許可形と証明できたときだけ normal にする
+
+// 引用符で区切られた heredoc の本文だけを持つ `cat <<'区切り'` の形（$(...) の中身）なら本文を、そうでなければ null を返す
+function quotedHeredocOf(script) {
+  const { items, broken } = lex(script);
+  if (broken || items.length !== 1 || items[0].type !== "cmd") return null;
+  const it = items[0];
+  // 語は cat だけ（引数なし）、リダイレクトは標準入力のクォートした heredoc 1 つだけ（fd 指定・出力・入力の追加は不可）、
+  // 文は改行で終わる 1 つだけ（; && & | で連ねない）、置換・展開を含まない
+  const ws = it.words.filter((w) => !w.redir);
+  const redirs = it.words.filter((w) => w.redir);
+  if (ws.length !== 1 || ws[0].dyn || ws[0].glob || ws[0].v !== "cat" || it.subs.length) return null;
+  if (redirs.length !== 1 || redirs[0].v !== "<<" || it.heredocQuoted.length !== 1 || !it.heredocQuoted[0]) return null;
+  if (it.sep !== "\n") return null;
+  return it.heredoc;
+}
+
+// 同じ語のオプション文字の許可表。BOOL は値を取らず、対話動作もメッセージの出所も変えないもの
+const COMMIT_BOOL_SHORT = new Set(["a", "i", "o", "q", "s", "v", "z"]);
+const COMMIT_BOOL_LONG = new Set(["--all", "--include", "--only", "--signoff", "--no-signoff", "--allow-empty", "--allow-empty-message", "--quiet", "--verbose", "--reset-author", "--no-gpg-sign", "--verify", "--no-edit", "--no-post-rewrite"]);
+// 値を取る形。値の種類: text（メッセージ）・file（-F・--file。標準入力のクォートした heredoc だけ通常）・lit（静的な値だけ通常）
+const COMMIT_VALUE_SHORT = { m: "text", F: "file" };
+const COMMIT_VALUE_LONG = { "--message": "text", "--file": "file", "--author": "lit", "--date": "lit" };
+// 値が任意で、同じ語に付けたときだけ値を持つ（-u・-S・--untracked-files・--gpg-sign）。語が静的なら通常
+const COMMIT_OPT_SHORT = new Set(["u", "S"]);
+const COMMIT_OPT_LONG = new Set(["--untracked-files", "--gpg-sign"]);
+// 静的な値の形: 素の語（メタ文字・チルダ・履歴展開を含まない。\ で 1 文字だけ逃がしたものは可）、単一引用、展開を含まない二重引用
+const STATIC_PLAIN = /^(?:[^\s'"\\$`!~*?\[\]{}()<>&|;#]|\\[^\s!])+$/;
+const STATIC_SINGLE = /^'[^'!]*'$/;
+const STATIC_DOUBLE = /^"(?:[^"\\$`!]|\\[^!])*"$/;
+const staticRaw = (raw) => STATIC_PLAIN.test(raw) || STATIC_SINGLE.test(raw) || STATIC_DOUBLE.test(raw);
+// 語の元の文字列が `"$(本文)"` の形で、本文がクォートした heredoc の cat なら本文を、違えば null を返す
+const quotedHeredocRaw = (raw) => {
+  if (!raw.startsWith('"$(') || !raw.endsWith(')"')) return null;
+  const body = raw.slice(3, -2);
+  return quotedHeredocOf(body) === null ? null : body;
+};
+// 読み飛ばしてよい Git のグローバルオプション（これ以外は未知として通常にしない。gitOp で使う）
+const SAFE_GLOBAL_OPTS = new Set(["--no-pager", "--no-optional-locks"]);
+// 送り先や挙動を変えうる設定のキー（-c の値の検査で使う）
+const SENSITIVE_CONF = /^(remote|url|push|pull|fetch|branch|alias|core|include|init|checkout|receive|uploadpack|credential|http|protocol|safe|submodule|merge|rebase|worktree|filter|diff|hooks|extensions)[.=]|^include/i;
+
+// commit の引数（gitOp の subcommand 以降の語。リダイレクトの語を含む）から通常形の印を作る
+// 戻り値: { amend, noVerify, configOverride, envAssign, messageNormal, unknownArg, fileStdin, normal }
+// info は文の情報（subs: 文中の $(...) の本文、stdinHeredoc: 標準入力がクォートした heredoc 1 つだけか）
+function commitFlags(words, { assigns, configOverride, globalUnknown, info, resolved }) {
+  const f = { amend: false, noVerify: false, configOverride, envAssign: assigns.length > 0, messageNormal: true, unknownArg: globalUnknown, fileStdin: false, normal: false };
+  let msgCount = 0; // 受け入れたメッセージの指定の数（-m と、標準入力の -F -）
+  const dynBodies = []; // 受け入れた `"$(cat <<'EOF'…)"` の本文（文中の $(...) と 1 対 1 で照合する）
+  // 語が展開・ワイルドカード・チルダを含まないか（オプションや位置引数の語に使う）
+  const literal = (w) => !w.dyn && !w.glob && !w.tilde;
+  // 値を検査する。raw は値の元の文字列（無ければ null）。attached は同じ語に付いた値（--message=X・-mX）
+  const takeValue = (kind, raw, attached) => {
+    if (raw === null) { f.unknownArg = true; if (kind !== "lit") f.messageNormal = false; return; }
+    if (kind === "lit") { if (!staticRaw(raw)) f.unknownArg = true; return; }
+    if (kind === "text") {
+      // 付いた形の heredoc は通さない。分離した語の `"$(cat <<'EOF'…)"` は本文を照合対象にする
+      const body = attached ? null : quotedHeredocRaw(raw);
+      if (body !== null) dynBodies.push(body);
+      else if (!staticRaw(raw)) { f.messageNormal = false; return; }
+      msgCount++;
+      return;
+    }
+    // file: 標準入力のクォートした heredoc を読む -F - だけ通常
+    if (!attached && (raw === "-" || raw === "'-'" || raw === '"-"') && info.stdinHeredoc) { f.fileStdin = true; msgCount++; }
+    else f.messageNormal = false;
+  };
+  const args = words.filter((w) => !w.redir);
+  let onlyPositional = false;
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    const v = w.v;
+    // オプション・位置引数の語に展開・ワイルドカード・チルダがあれば、実行時に別の語になりうるため通常にしない（値は takeValue で確かめる）
+    if (!literal(w)) f.unknownArg = true;
+    if (!onlyPositional && v === "--") { onlyPositional = true; continue; }
+    if (onlyPositional || v === "-" || !v.startsWith("-")) continue; // 位置引数（パス）
+    if (v.startsWith("--")) {
+      const eq = v.indexOf("=");
+      const name = eq < 0 ? v : v.slice(0, eq);
+      if (eq < 0 && name === "--amend") f.amend = true;
+      else if (eq < 0 && name === "--no-verify") f.noVerify = true;
+      else if (eq < 0 && COMMIT_BOOL_LONG.has(name)) continue;
+      else if (COMMIT_OPT_LONG.has(name)) continue; // 値は同じ語の中（静的性は上で確認済み）
+      else if (COMMIT_VALUE_LONG[name]) {
+        const kind = COMMIT_VALUE_LONG[name];
+        if (eq >= 0) takeValue(kind, w.raw?.startsWith(`${name}=`) ? w.raw.slice(name.length + 1) : null, true);
+        else takeValue(kind, args[++i]?.raw ?? null, false);
+      } else f.unknownArg = true; // 前方一致の省略形・-e/--edit・--template・--fixup 等を含む未知の形
+      continue;
+    }
+    // 短縮形の束: 1 文字ずつ読む。値を取る文字の後ろは同じ語の残り（無ければ次の語）が値になる
+    for (let k = 1; k < v.length; k++) {
+      const c = v[k];
+      if (COMMIT_BOOL_SHORT.has(c)) continue;
+      if (c === "n") { f.noVerify = true; continue; }
+      if (COMMIT_OPT_SHORT.has(c)) break; // 同じ語の残りが値（静的性は上で確認済み）
+      const kind = COMMIT_VALUE_SHORT[c];
+      if (!kind) { f.unknownArg = true; break; } // -e・-c・-C・-t など未対応の文字
+      if (k + 1 < v.length) {
+        // 同じ語に値が続く（-mX）。オプション文字の部分が素の文字だけのときに限り、語の元の文字列の残りを値とする
+        const head = w.raw?.slice(0, k + 1) ?? "";
+        takeValue(kind, /^-[A-Za-z]+$/.test(head) ? w.raw.slice(k + 1) : null, true);
+      } else takeValue(kind, args[++i]?.raw ?? null, false);
+      break;
+    }
+  }
+  // 文中の $(...) は、-m の語で確かめた本文と 1 対 1 で一致しなければならない（余分な置換があれば通常にしない）
+  const subs = [...(info.subs ?? [])].sort();
+  const bodies = [...dynBodies].sort();
+  if (subs.length !== bodies.length || subs.some((s, k) => s !== bodies[k])) f.unknownArg = true;
+  // リダイレクト: -F - が読むクォートした heredoc の 1 つだけを通常とする（2>&1・fd 指定・出力などは通常にしない）
+  const redirs = info.redirs ?? [];
+  if (redirs.length > 0 && !(redirs.length === 1 && redirs[0].v === "<<" && f.fileStdin && info.stdinHeredoc)) f.unknownArg = true;
+  f.messageNormal = f.messageNormal && msgCount > 0;
+  f.normal = resolved && !f.amend && !f.noVerify && !f.configOverride && !f.envAssign && f.messageNormal && !f.unknownArg;
+  return f;
+}
+
+function gitOp(args, ctx, assigns, envTarget, info = {}) {
   const unresolved = [];
   const add = (r) => unresolved.push(r);
   let dir = ctx.cwd;
   let i = 0;
+  let configOverride = false;
+  // 読み飛ばした未知のグローバルオプション・引数を変える wrapper（info.wrapped）は、通常形の判定で通常にしない
+  let globalUnknown = !!info.wrapped;
   if (envTarget) add("GIT_DIR・GIT_WORK_TREE などの環境変数で対象のリポジトリが変わりうるため、対象を確定できません。");
   if (ctx.envTainted) add("同じコマンドで GIT_DIR・GIT_WORK_TREE などを設定しており、対象を確定できません。");
+  // 先頭オプションとその値の語は、展開・ワイルドカード・引用なしのチルダがあれば通常にしない（対象の解決は従来どおり）
+  const plainGlobal = (w) => !w.dyn && !w.glob && !w.tilde;
   while (i < args.length && args[i].v.startsWith("-")) {
     const w = args[i];
     const v = w.v;
+    if (!plainGlobal(w)) globalUnknown = true;
     if (v === "-C") {
       const next = args[i + 1];
+      if (next && !plainGlobal(next)) globalUnknown = true;
       dir = next && !unsafeWord(next) ? resolvePath(dir, next.v) : null;
       i += 2;
     } else if (v === "-c") {
+      configOverride = true;
+      if (args[i + 1] && !plainGlobal(args[i + 1])) globalUnknown = true;
       const kv = args[i + 1]?.v ?? "";
-      if (/^(remote|url|push|pull|fetch|branch|alias|core|include|init|checkout|receive|uploadpack|credential|http|protocol|safe|submodule|merge|rebase|worktree|filter|diff|hooks|extensions)[.=]|^include/i.test(kv) || args[i + 1]?.dyn) add(`-c ${kv.split("=")[0]} は送り先や挙動を変えうるため、対象を確定できません。`);
+      if (SENSITIVE_CONF.test(kv) || args[i + 1]?.dyn) add(`-c ${kv.split("=")[0]} は送り先や挙動を変えうるため、対象を確定できません。`);
       i += 2;
+    } else if (/^-c./.test(v)) {
+      // 値が同じ語に結合した -c（-cKEY=VAL）。-c と同じ検査を、結合された値に対して行う
+      configOverride = true;
+      const kv = v.slice(2);
+      if (SENSITIVE_CONF.test(kv)) add(`-c ${kv.split("=")[0]} は送り先や挙動を変えうるため、対象を確定できません。`);
+      i++;
     } else if (/^--(git-dir|work-tree|namespace|exec-path|super-prefix|config-env|attr-source)(=|$)/.test(v)) {
+      if (v.startsWith("--config-env")) configOverride = true;
       add(`${v.split("=")[0]} が指定され、対象のリポジトリを確定できません。`);
       i += v.includes("=") ? 1 : 2;
-    } else i++;
+    } else {
+      // 未知のグローバルオプションは読み飛ばしても通常形にしない（-cuser.name=x のような結合形もここに来る）
+      if (!SAFE_GLOBAL_OPTS.has(v)) globalUnknown = true;
+      i++;
+    }
   }
   const subWord = args[i];
   const rest = args.slice(i + 1);
@@ -852,7 +1022,9 @@ function gitOp(args, ctx, assigns, envTarget) {
     if (!branch) add("detached HEAD のため commit 先のブランチを確定できません。");
     if (sub === "rebase" && !hasFlag(a, "--abort", "--continue", "--skip", "--quit", "--edit-todo") && positionals(a, ["--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C", "--whitespace"]).length > 1) add("rebase で別のブランチへ切り替わるため、対象を確定できません。");
     if (sub !== "commit" && dynArgs) add(`${sub} の引数に展開が含まれ、対象を確定できません。`);
-    op = makeOp("commit", dir, unresolved, { branch, via: sub });
+    op = makeOp("commit", dir, unresolved, sub === "commit"
+      ? { branch, via: sub, flags: commitFlags(rest, { assigns, configOverride, globalUnknown, info, resolved: unresolved.length === 0 }) }
+      : { branch, via: sub });
   } else if (sub === "merge" || sub === "pull") {
     needState();
     if (dynArgs) add(`${sub} の引数に展開・ワイルドカードが含まれ、取り込み元を確定できません。`);
