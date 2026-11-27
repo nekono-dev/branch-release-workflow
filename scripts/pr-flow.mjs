@@ -212,6 +212,8 @@ function finishUp({ d, config, main, others, branch, workId, o }) {
     return 0;
   }
   const known = push?.oid && push?.remote && pr?.url && pr?.base ? { url: pr.url, base: pr.base, oid: push.oid, remote: push.remote } : null;
+  // 切り出し元は片付けで消えるため、片付けの前に読んで再開の記録に残す（9.5）
+  const base = branchBase(main.path, config, branch);
   const r = cleanupAfterPr({ main, others, config, branch, workId, known });
   if (r.kind === "kept") {
     d.io.out(`PR は作成済みです。片付けは行いませんでした: ${r.reason}`);
@@ -220,7 +222,7 @@ function finishUp({ d, config, main, others, branch, workId, o }) {
   }
   d.io.out(`片付けました: ${visible(r.branch)}（worktree: ${visible(r.worktree)}）`);
   if (r.stateNote) d.io.out(`注意: ${r.stateNote}`);
-  recordResume(d, { main: r.main, branch: r.branch, pr });
+  recordResume(d, { main: r.main, branch: r.branch, pr, base });
   d.io.out("この PR の続きの作業（検証のやり直し・レビューの指摘への対応など）は、新しい作業ではなく、公開済みの作業ブランチから作業場所を作り直して再開します:");
   d.io.out(resumeLine(r.branch, r.main, r.worktree));
   d.io.out(`新しい作業は、本体で brw create <名前> を実行してください（本体: ${visible(r.main)}）。`);
@@ -241,10 +243,10 @@ function repositoryOf(url) {
  * 片付けた作業の再開の記録を書く（brw-pr-handoff 7.2）。
  * 書けなくても片付けの結果は変えず、警告 1 行だけを出す。sessionId は PostToolUse が後から付けるので空のまま。
  */
-function recordResume(d, { main, branch, pr }) {
+function recordResume(d, { main, branch, pr, base }) {
   let res;
   try {
-    res = writeRecord(main, { branch, prUrl: pr?.url ?? null, repository: repositoryOf(pr?.url), sessionId: null, at: new Date().toISOString() });
+    res = writeRecord(main, { branch, prUrl: pr?.url ?? null, repository: repositoryOf(pr?.url), sessionId: null, base: base ?? null, at: new Date().toISOString() });
   } catch (e) {
     res = { ok: false, message: String(e?.message ?? e).split("\n")[0] };
   }

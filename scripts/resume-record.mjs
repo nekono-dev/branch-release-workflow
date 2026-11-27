@@ -77,7 +77,9 @@ const timeOf = (s) => {
 const normalizeEntry = (e) => {
   if (e === null || typeof e !== "object" || Array.isArray(e)) return null;
   const sessionId = typeof e.sessionId === "string" && e.sessionId.trim() === "" ? null : e.sessionId;
-  const c = { branch: e.branch, prUrl: e.prUrl, repository: e.repository, sessionId, at: e.at };
+  // base（切り出し元の取り込み先）は任意。branch と同じ名前の検証に通らない値・無い値は null（base の無い既存の記録も読める）
+  const base = isSafeBranch(e.base) ? e.base : null;
+  const c = { branch: e.branch, prUrl: e.prUrl, repository: e.repository, sessionId, base, at: e.at };
   if (!isSafeBranch(c.branch) || !isSafeUrl(c.prUrl) || !isSafeRepo(c.repository) || !isSafeSession(c.sessionId) || !Number.isFinite(timeOf(c.at))) return null;
   return c;
 };

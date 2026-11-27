@@ -354,7 +354,7 @@ function cleanupAfterPr(opts: { main: WorktreeInfo; branch: string; config; know
 ### 再開の記録と案内（`scripts/resume-record.mjs`、`scripts/brw.mjs` の `resume`、`scripts/agent-hooks.mjs` の `UserPromptSubmit`）
 
 ```typescript
-interface ResumeEntry { branch: string; prUrl: string | null; repository: string | null; sessionId: string | null; at: string }  // at は ISO 日時
+interface ResumeEntry { branch: string; prUrl: string | null; repository: string | null; sessionId: string | null; base: string | null; at: string }  // at は ISO 日時。base は切り出し元の取り込み先（任意。無い・不正な値は null。base の無い既存の記録も読める）
 /** <git 共通ディレクトリ>/brw/resume.json（先頭が最新、最大 10 件、同じ branch は置き換え）。ロック＋一時ファイル置換で書く。失敗は警告（呼び出し側の結果を変えない） */
 function writeRecord(main: string, e: ResumeEntry): { ok: true } | { ok: false, message: string };
 function readRecords(main: string): ResumeEntry[];            // 読めない・形が不正は空配列（案内しない側）
@@ -364,6 +364,7 @@ function resumableFor(cwd: string, sessionId: string | null, now: Date): ResumeE
 function attachSession(main: string, sessionId: string, now: Date): { ok: boolean };
 ```
 - 記録の置き場は作業状態（`<共通ディレクトリ>/brw/work/`）とは別のファイル `resume.json`（作業状態の削除・片付けの判定に影響しない。要件 7.2）。
+- **切り出し元の記録と復元（9.5）**: 片付けは作業ブランチの設定（`branch.<ブランチ>.brwBase`＝切り出し元の取り込み先）を一緒に消すため、続きの `brw pr` が既定の取り込み先（`baseBranch`）を使い、既存の PR（別の取り込み先を指す）と食い違って止まる。そこで、片付けの前に `branchBase` の値を再開の記録の `base` に入れ、`brw resume <ブランチ>` が作業場所をリモートから作り直したときに、`brwBase` が未設定・記録に有効な `base`・その `base` が宣言で認められた取り込み先（`classifyBranch` が `undeclared` でない）の場合だけ `git config branch.<ブランチ>.brwBase <base>` を設定し直す（1 行で表示する）。記録が無い・不正・宣言外なら何もしない。既に設定されている値は上書きしない。要件（7.7）は変えない。
 - **`brw resume`（引数なし）**（7.3）: 本体で `git for-each-ref refs/remotes/<リモート>/` から宣言の `workBranches` に合うブランチを取り、`git worktree list` に作業場所があるものを除き、`resume.json` の公開記録があるものを先頭にして一覧する（ネットワークを使わない。最新でなければ `git fetch` を案内）。引数ありの従来の動作は変えない。
 - **`UserPromptSubmit`**（7.4〜7.6）: Claude Code・Codex とも `agent-hooks.mjs <host> UserPromptSubmit`。入力の `cwd`（Codex は本体のまま、Claude は本体かホーム）と `session_id` から、`cwd` のリポジトリ（無ければ `CLAUDE_PROJECT_DIR` が `<本体>/.claude/worktrees/<別名>` の形のとき本体を導出）の記録を読み、`resumableFor`（同じ `sessionId`、`at` から 24 時間以内、その作業ブランチの作業場所が無い、`refs/remotes/<リモート>/<ブランチ>` がある、宣言が読めて開発ブランチ）が見つけたとき、`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<案内>"}}` を返す（案内は 500 文字以内。ブランチ名は無害化。`brw resume <ブランチ>` と `brw create <名前>` の使い分け）。**副作用なし**（作業場所の作成・記録の書き換え・通信をしない。作成は `brw resume`）。見つからなければ応答なし。
 - 登録: `hooks/hooks.json`（Claude）に `UserPromptSubmit`、`hook-install.mjs`（Codex の `.codex/hooks.json`）に `UserPromptSubmit`、`HOST_EVENTS`・`hook-diagnose.mjs` の `ROUTE_EVENTS`・信頼の診断に `UserPromptSubmit` を追加する。

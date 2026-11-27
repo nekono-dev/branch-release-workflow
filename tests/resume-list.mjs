@@ -1,6 +1,8 @@
 // `brw resume`（引数なし）の一覧（brw-pr-handoff 7.3・9.3）の試験。selftest.mjs から呼ばれる。
 // 実際の scripts/brw.mjs を子プロセスで実行し、一時リポジトリ（本体・worktree・bare の遠隔）で確かめる。
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeRecord } from "../scripts/resume-record.mjs";
@@ -85,7 +87,7 @@ export const runResumeListChecks = (eq) => {
 
   // ---- 表示の無害化: 書式制御文字は \uXXXX として示し、生の文字は出さない ----
   {
-    const raw = "dev/x‮y";
+    const raw = "dev/x\u202Ey";
     const t = fixture({ names: [raw] });
     const x = brw(t.dir, "resume");
     eq("brw-pr-handoff/9.3 一覧の値の書式制御文字は \\uXXXX として示し、生の文字を出さない", [x.out.includes("dev/x\\u202ey"), x.out.includes(raw)], [true, false]);
@@ -125,4 +127,64 @@ export const runResumeListChecks = (eq) => {
     eq("brw-pr-handoff/7.3 引数ありで遠隔のブランチを指定したときは、従来どおり worktree を作る", [ok.code, ok.out.includes("リモートから取得し直して worktree を作りました")], [0, true]);
     t.cleanup();
   }
+
+  // ---- brw resume: 作業場所をリモートから作り直したとき、再開の記録の base を切り出し元（brwBase）に戻す（9.5） ----
+  // 条件: brwBase が未設定・記録に同じブランチの有効な base・その base が宣言で認められた取り込み先（undeclared でない）のときだけ
+  const brwBaseOf = (cwd, branch) => {
+    const res = spawnSync("git", ["config", "--get", `branch.${branch}.brwBase`], { cwd, encoding: "utf8" });
+    return res.status === 0 ? res.stdout.trim() : null;
+  };
+  // 遠隔にだけあるブランチ（ローカルのブランチと作業場所は無い）を用意する。record は記録の内容（null なら記録を書かない）。presetConfig は再開の前の brwBase
+  const remoteOnly = (branch, { record = null, presetConfig = null } = {}) => {
+    const r = mkRepoWithRemote({ branch: "main", config: CONFIG });
+    gitOut(r.dir, "branch", "develop");
+    gitOut(r.dir, "branch", branch);
+    gitOut(r.dir, "push", "-q", "origin", "develop", branch);
+    gitOut(r.dir, "branch", "-q", "-D", branch);
+    if (presetConfig !== null) gitOut(r.dir, "config", `branch.${branch}.brwBase`, presetConfig);
+    if (record !== null) {
+      const w = writeRecord(r.dir, { branch, prUrl: "https://github.com/acme/app/pull/7", repository: "acme/app", sessionId: null, at: new Date().toISOString(), base: record });
+      if (!w.ok) throw new Error(`記録の準備に失敗: ${w.message}`);
+    }
+    return r;
+  };
+  {
+    const r = remoteOnly("dev/rest", { record: "main" });
+    const res = brw(r.dir, "resume", "dev/rest");
+    eq("brw-pr-handoff/9.5 brw resume: 記録の base（main）を brwBase に戻す（作業場所をリモートから作り直したとき）", [res.code, brwBaseOf(r.dir, "dev/rest")], [0, "main"]);
+    eq("brw-pr-handoff/9.5 brw resume: 戻したことを 1 行で表示する", res.out.includes("切り出し元（main）を再開の記録から復元しました"), true);
+    r.cleanup();
+  }
+  {
+    const r = remoteOnly("dev/nore");
+    const res = brw(r.dir, "resume", "dev/nore");
+    eq("brw-pr-handoff/9.5 brw resume: 記録が無ければ brwBase は設定しない（従来どおり）", [res.code, brwBaseOf(r.dir, "dev/nore")], [0, null]);
+    r.cleanup();
+  }
+  {
+    const r = remoteOnly("dev/undec", { record: "feature/x" });
+    const res = brw(r.dir, "resume", "dev/undec");
+    eq("brw-pr-handoff/9.5 brw resume: 記録の base が宣言外（undeclared）なら設定しない", [res.code, brwBaseOf(r.dir, "dev/undec")], [0, null]);
+    r.cleanup();
+  }
+  {
+    const r = remoteOnly("dev/keep", { record: "main", presetConfig: "develop" });
+    const res = brw(r.dir, "resume", "dev/keep");
+    eq("brw-pr-handoff/9.5 brw resume: 既に設定された brwBase は上書きしない", [res.code, brwBaseOf(r.dir, "dev/keep")], [0, "develop"]);
+    r.cleanup();
+  }
+
+
+  // 書き込みの失敗（brwBase の設定だけを拒否する git の shim）: 復元の成功は表示せず、警告を標準エラーに出す。終了コードは成功のまま
+  {
+    const r = remoteOnly("dev/denied", { record: "main" });
+    const shimDir = mkdtempSync(join(tmpdir(), "brw-rl-shim-"));
+    const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh\ncase " $* " in *" branch."*".brwBase "*) case " $* " in *" --get "*) ;; *) echo "shim: denied" >&2; exit 1;; esac;; esac\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    const res = spawnSync("node", [BRW, "resume", "dev/denied"], { cwd: r.dir, encoding: "utf8", env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, BRW_NO_GH: "1" } });
+    eq("brw-pr-handoff/9.5 brw resume: 復元の書き込みが失敗したら、成功の表示を出さず、標準エラーに警告を出す（終了コードは成功のまま）", [res.status, res.stdout.includes("切り出し元（main）を再開の記録から復元しました"), res.stderr.includes("切り出し元の復元に失敗しました"), brwBaseOf(r.dir, "dev/denied")], [0, false, true, null]);
+    rmSync(shimDir, { recursive: true, force: true });
+    r.cleanup();
+  }
+
 };

@@ -668,10 +668,26 @@ function resume(args) {
   const wt = join(main.path, ".claude/worktrees", aliasOf(branch));
   mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
   execFileSync("git", ["worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`], { cwd: main.path, stdio: "inherit" });
+  restoreBase(main.path, config, branch);
   console.log(`リモートから取得し直して worktree を作りました: ${branch}\n  worktree: ${wt}`);
   hooksForWorktree(main.path, wt);
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
+}
+
+/**
+ * 作業場所をリモートから作り直したとき、片付けで消えた切り出し元（brwBase）を再開の記録の base から戻す（brw-pr-handoff 9.5）。
+ * brwBase が既にあれば上書きしない。記録が無い・base が無い・宣言で認められない（undeclared）なら何もしない（従来どおり）。
+ */
+function restoreBase(mainPath, config, branch) {
+  const key = `branch.${branch}.brwBase`;
+  if (git(mainPath, "config", key) !== null) return;
+  const base = readRecords(mainPath).find((r) => r.branch === branch)?.base;
+  if (!base || classifyBranch(config, base) === "undeclared") return;
+  git(mainPath, "config", key, base);
+  // 書き込みの結果を読み直して確かめてから成功を表示する。失敗は警告（終了コードは変えない）
+  if (git(mainPath, "config", "--get", key) === base) console.log(`切り出し元（${base}）を再開の記録から復元しました: ${branch}`);
+  else console.error(`警告: 切り出し元の復元に失敗しました（${branch} の brwBase を ${base} に設定できませんでした）。続きの公開で取り込み先が既存の PR と食い違うときは \`brw pr --target <取り込み先>\` を指定してください。`);
 }
 
 // 分岐元の worktree での pr-template（brw-pr-handoff 7.4）。作成元（分岐元）と作成先（保護ブランチ）を示し、作業外の変更の節は該当なしとする。

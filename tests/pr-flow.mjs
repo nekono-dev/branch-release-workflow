@@ -201,6 +201,7 @@ export const runPrFlowChecks = async (eq) => {
       const t = setup();
       const x = await run(t, ARGS);
       const rec = readRecords(t.dir);
+      eq("brw-pr-handoff/9.5 片付けは、切り出し元（brwBase）を再開の記録の base に入れる", rec[0]?.base, "main");
       eq("brw-pr-handoff/7.2 片付けの後に、公開した作業ブランチ・PR の URL・リポジトリ・時刻の再開の記録が残り、セッションは空", [rec.length, rec[0]?.branch, rec[0]?.prUrl, rec[0]?.repository, rec[0]?.sessionId, /\.\d{3}Z$/.test(rec[0]?.at ?? "")], [1, "dev/foo", "https://github.com/acme/app/pull/7", "acme/app", null, true]);
       eq("brw-pr-handoff/7.1 片付けの案内は、続きの再開（brw resume）と新しい作業（brw create）を分け、本体のパスと cd を示す", [x.out.includes(`${BRW_RUN} resume dev/foo`), x.out.includes("brw create"), x.out.includes(`cd '${t.dir}'`), x.out.includes(t.dir)], [true, true, true, true]);
       eq("brw-pr-handoff/4.9 本体でセッションを開始した場合は追加の操作が要らないことを示す", x.out.includes("ホストが本体へ戻す"), true);

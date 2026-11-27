@@ -54,11 +54,12 @@ const inRepo = (fn, { config = CONFIG } = {}) => {
 };
 
 // 記録の 1 件（ago は現在から何ミリ秒前か。負なら未来）
-const entryOf = (branch, { ago = MIN, sessionId = null, prUrl = null, repository = null } = {}) => ({
+const entryOf = (branch, { ago = MIN, sessionId = null, prUrl = null, repository = null, base = null } = {}) => ({
   branch,
   prUrl,
   repository,
   sessionId,
+  base,
   at: new Date(NOW.getTime() - ago).toISOString(),
 });
 
@@ -633,6 +634,29 @@ export const runResumeRecordStrictChecks = async (eq) => {
     eq("brw-pr-handoff/9.2 attachSession は危険な名前の記録に付けず、正しい記録に付けて書き直す", [attachSession(dir, "s1", NOW), readRecords(dir).map((e) => [e.branch, e.sessionId])], [{ ok: true, attached: true }, [["dev/good", "s1"]]]);
     eq("brw-pr-handoff/9.2 書き直した記録ファイルに危険な名前が残らない", JSON.parse(readOrNull(fileOf(dir))).entries.map((e) => e.branch), ["dev/good"]);
   });
+  // ---- 切り出し元（base）: 任意の項目。不正・無い値は null に正規化し、base の無い既存の記録も読める（後方互換）（9.5） ----
+  inRepo((dir) => {
+    eq("brw-pr-handoff/9.5 base を書いた記録は、読むときに同じ base で返る", [ok(writeRecord(dir, entryOf("dev/a", { base: "main" }))), readRecords(dir)[0]?.base], [true, "main"]);
+  });
+  inRepo((dir) => {
+    const old = { branch: "dev/a", prUrl: null, repository: null, sessionId: null, at: entryOf("dev/a").at };
+    writeRaw(dir, JSON.stringify({ version: 1, entries: [old] }));
+    eq("brw-pr-handoff/9.5 base の無い既存の記録も読め、base は null になる（後方互換）", readRecords(dir).map((e) => [e.branch, e.base]), [["dev/a", null]]);
+  });
+  inRepo((dir) => {
+    const invalid = ["main;rm", "a b", "", 7, "x".repeat(300), "main\u0007"];
+    const got = invalid.map((b) => {
+      const r = writeRecord(dir, entryOf("dev/a", { base: b }));
+      return [ok(r), readRecords(dir)[0]?.base];
+    });
+    eq("brw-pr-handoff/9.5 不正な base は書き込みを失敗にせず、null として保存する", got, invalid.map(() => [true, null]));
+  });
+  inRepo((dir) => {
+    writeRecord(dir, entryOf("dev/a", { base: "main", ago: 30 * 1000 }));
+    const r = attachSession(dir, "s1", NOW);
+    eq("brw-pr-handoff/9.5 セッションを付けても base は変わらない（attachSession）", [r, readRecords(dir)[0]?.base, readRecords(dir)[0]?.sessionId], [{ ok: true, attached: true }, "main", "s1"]);
+  });
+
 };
 
 // 指定した経過時間の記録を 1 件置き、その記録を resumableFor で探す（境界の試験用）
