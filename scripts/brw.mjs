@@ -8,6 +8,7 @@
 //   pr --completion <申告> --verification <要約> [--title <タイトル>] [--body-file <ファイル>] [--failed] [--target <取り込み先>]
 //                              PR 作成の入口。作業外の変更の別コミット・準備・計画・公開・片付け（宣言で有効なとき）を順に行う
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
+//   resume                     再開できる作業ブランチの一覧を表示する（ネットワークは使わない）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
 //   work start                 変更作業を始め、作業 ID を 1 つ出力する（調査だけの依頼では使わない）
 //   work resume --work <id>    中断した作業を明示して再開する（作業 ID を 1 つ出力する）
@@ -37,7 +38,8 @@ import {
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
 import { denyOfCommand, remainderGuidanceForCwd } from "./agent-hooks.mjs";
-import { mainWorktreeOf } from "./work-remainder.mjs";
+import { mainWorktreeOf, visible } from "./work-remainder.mjs";
+import { readRecords } from "./resume-record.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { carryChanges } from "./carry.mjs";
@@ -584,13 +586,54 @@ function merge(args) {
   fail(`取り込みに失敗しました（${source} → ${target}）。取り込みは行われていません。`);
 }
 
+// 引数なしの resume の一覧（brw-pr-handoff 7.3・9.3）の上限
+const RESUME_LIST_LIMIT = 20;
+
+// 再開できる作業ブランチの一覧。取得済みの遠隔の追跡ブランチと再開の記録から作る（ネットワークは使わない）。
+// 対象: 宣言の開発ブランチで、作業場所（worktree）が無いもの。公開の記録があるものを先頭（記録の新しい順）、続けて名前順。
+function resumeList(main, others, config) {
+  console.log("使い方: brw resume <ブランチ>");
+  // 引数ありの resume は origin からだけ取得するため、一覧の候補も origin の追跡ブランチだけにする
+  if (!(git(main.path, "remote") ?? "").split("\n").includes("origin")) {
+    console.log("origin が無いので一覧を出せません。ブランチ名を指定して brw resume <ブランチ> で再開してください。");
+    return;
+  }
+  const prefix = "refs/remotes/origin/";
+  const names = new Set();
+  for (const ref of (git(main.path, "for-each-ref", "--format=%(refname)", prefix) ?? "").split("\n").filter(Boolean)) {
+    const b = ref.slice(prefix.length);
+    if (b !== "HEAD") names.add(b);
+  }
+  const checkedOut = new Set([main, ...others].map((w) => w.branch));
+  const candidates = [...names].filter((b) => classifyBranch(config, b) === "development" && !checkedOut.has(b));
+  const records = new Map(readRecords(main.path).map((r, rank) => [r.branch, { ...r, rank }]));
+  const list = [
+    ...candidates.filter((b) => records.has(b)).sort((a, b) => records.get(a).rank - records.get(b).rank),
+    ...candidates.filter((b) => !records.has(b)).sort(),
+  ];
+  if (list.length === 0) console.log("再開できる作業ブランチはありません。新しい作業は brw create <名前> で始めてください。");
+  else {
+    console.log("再開できる作業ブランチ（公開の記録があるものを先頭に、新しい順）:");
+    for (const b of list.slice(0, RESUME_LIST_LIMIT)) {
+      const rec = records.get(b);
+      console.log(`  - ${visible(b)}${rec ? `（PR: ${visible(rec.prUrl ?? "なし")}、公開: ${visible(rec.at)}）` : ""}`);
+    }
+    if (list.length > RESUME_LIST_LIMIT) console.log(`ほか ${list.length - RESUME_LIST_LIMIT} 件`);
+  }
+  console.log("注意: この一覧は取得済みの追跡ブランチに基づきます。最新でなければ git fetch を実行してから、もう一度確かめてください。");
+}
+
 // 作業ブランチの続きを始める。ローカルに無ければリモートから取得し直して worktree を作り、
-// 残っていればリモートの更新（別の環境からの push など）を取り込んでから使う
+// 残っていればリモートの更新（別の環境からの push など）を取り込んでから使う。引数が無いときは再開できる作業ブランチの一覧を出す
 function resume(args) {
   const cwd = process.cwd();
   repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
   const [main, ...others] = worktrees(cwd);
   const config = need(main.path);
+  if (args.length === 0) {
+    resumeList(main, others, config);
+    return;
+  }
   const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: resume <ブランチ>", 2);
   // 共通判定: 再開できるのは開発ブランチだけ（保護・分岐元・宣言外は拒否）
   const cls = classifyBranch(config, branch);

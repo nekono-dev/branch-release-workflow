@@ -258,10 +258,10 @@ const escapeValue = (value) => {
 };
 
 // 信頼できない値（ファイル名・ブランチ名・パス）を、案内の中で 1 行のデータとして示す（バッククォートで囲む）
-const visible = (value) => "`" + escapeValue(value) + "`";
+export const visible = (value) => "`" + escapeValue(value) + "`";
 
 // cd の行に出せるパスか。無害化で値が変わらないものだけ（visible の比較と一致させ、判定の食い違いを作らない）
-const plainPath = (p) => escapeValue(p) === p;
+export const plainPath = (p) => escapeValue(p) === p;
 
 // POSIX シェルの単一引用（' は '\'' にする）。cd の手順で使う
 const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
