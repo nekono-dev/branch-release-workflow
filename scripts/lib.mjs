@@ -104,9 +104,9 @@ export function validateConfig(c) {
   if (c.maxNameLength !== undefined && !Number.isInteger(c.maxNameLength)) errs.push("maxNameLength は整数にしてください");
   if (c.autoApprove !== undefined) {
     const a = c.autoApprove;
-    if (typeof a !== "object" || a === null || Array.isArray(a)) errs.push("autoApprove はオブジェクトにしてください（push・pullRequest）");
+    if (typeof a !== "object" || a === null || Array.isArray(a)) errs.push("autoApprove はオブジェクトにしてください（push・pullRequest・commit）");
     else for (const [k, v] of Object.entries(a)) {
-      if (!["push", "pullRequest"].includes(k)) errs.push(`autoApprove.${k} は未知のキーです（push・pullRequest）`);
+      if (!["push", "pullRequest", "commit"].includes(k)) errs.push(`autoApprove.${k} は未知のキーです（push・pullRequest・commit）`);
       else if (typeof v !== "boolean") errs.push(`autoApprove.${k} は true / false にしてください`);
     }
   }
@@ -200,7 +200,7 @@ export function normalizeConfig(c) {
 // 未登録・編集中の宣言（registered が偽）は確認を省略しない
 export const autoApproveOf = (config, registered) => {
   const a = config.autoApprove ?? {};
-  return { push: registered === true && a.push !== false, pullRequest: registered === true && a.pullRequest !== false };
+  return { push: registered === true && a.push !== false, pullRequest: registered === true && a.pullRequest !== false, commit: registered === true && a.commit !== false };
 };
 
 // 作業ブランチの切り出し元。create が記録した brwBase を優先し、無ければ宣言の baseBranch（公開と片付けで共用）
