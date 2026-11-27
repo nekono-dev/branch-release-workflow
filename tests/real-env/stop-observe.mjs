@@ -6,7 +6,7 @@
 //   BRW（scripts/）には依存しない。記録用の Stop フックだけを使う。結果は標準出力に出し、リポジトリには残さない。
 //   想定と異なる結果は「不一致」と書き、成功扱いにしない。記録が無いときは「未観測」と書く。
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync, symlinkSync} from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,15 +75,68 @@ export function hookScriptOf(logFile, host) {
   ].join("\n");
 }
 
-/** 記録（JSON Lines）を読む。壊れた行は読まない（結果を作らない側に倒す）。 */
-export function parseStopLog(text) {
-  const out = [];
+// 記録用フック（hookScriptOf）が書く値の範囲。生成側の契約に合わせる。
+const STOP_HOSTS = ["claude", "codex"];
+const STOP_NOTES = [null, "git-status-failed"];
+
+/**
+ * 理由文に載せる値の説明。値を String() やテンプレート文字列で文字列化しない（toString が使えないオブジェクトは例外になるため）。
+ * null は "null"、配列は "array"、文字列・数値・真偽値は JSON.stringify を長さ 40 字までに切る（失敗時は安全な既定の文言）、それ以外は typeof の名前。
+ */
+export function describeValue(v) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+    try {
+      const s = JSON.stringify(v);
+      return s.length > 40 ? `${s.slice(0, 40)}…` : s;
+    } catch {
+      return "表示できない値";
+    }
+  }
+  return typeof v;
+}
+
+/**
+ * 1 行の記録の形式を確かめる。正規の記録なら null、不正なら理由を返す。
+ * 判定に使う stop_hook_active・block は必須の真偽値。cwd・event・session_id は文字列または null（キーは必須）。
+ * dirty・dirtyCwd は真偽値、scanned は 0 以上の整数、note は null または "git-status-failed"、host は claude・codex。
+ * 未知の追加項目と日時の書式は厳密に見ない。
+ */
+export function invalidStopRecord(rec) {
+  if (rec === null || typeof rec !== "object" || Array.isArray(rec)) return "記録がオブジェクトではない";
+  if (typeof rec.at !== "string" || rec.at === "") return "at が空でない文字列ではない";
+  if (!STOP_HOSTS.includes(rec.host)) return `host が claude・codex のいずれでもない（${describeValue(rec.host)}）`;
+  for (const k of ["event", "session_id", "cwd"]) {
+    if (!(rec[k] === null || typeof rec[k] === "string")) return `${k} が文字列または null ではない（${describeValue(rec[k])}）`;
+  }
+  for (const k of ["stop_hook_active", "dirty", "dirtyCwd", "block"]) {
+    if (typeof rec[k] !== "boolean") return `${k} が真偽値ではない（${describeValue(rec[k])}）`;
+  }
+  if (!(Number.isInteger(rec.scanned) && rec.scanned >= 0)) return `scanned が 0 以上の整数ではない（${describeValue(rec.scanned)}）`;
+  if (!STOP_NOTES.includes(rec.note)) return `note が null・git-status-failed のいずれでもない（${describeValue(rec.note)}）`;
+  return null;
+}
+
+/**
+ * 記録（JSON Lines）を読む。構文エラーの行と、形式の不正な行は entries に入れず、件数（broken）として返す（空行は数えない）。
+ * 判定には、ここで検証した entries と broken を一緒に渡す。
+ */
+export function parseStopLogDetailed(text) {
+  const entries = [];
+  let broken = 0;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); } catch { /* 壊れた行は無視する */ }
+    let rec;
+    try { rec = JSON.parse(line); } catch { broken += 1; continue; }
+    if (invalidStopRecord(rec) !== null) { broken += 1; continue; }
+    entries.push(rec);
   }
-  return out;
+  return { entries, broken };
 }
+
+/** 記録の行だけを読む（判定には使わない。判定は parseStopLogDetailed の件数を judgeStops に渡す）。 */
+export const parseStopLog = (text) => parseStopLogDetailed(text).entries;
 
 const match = (detail) => ({ state: "一致", detail });
 const mismatch = (detail) => ({ state: "不一致", detail });
@@ -95,9 +148,9 @@ const unobserved = (detail) => ({ state: "未観測", detail });
  *   cwdFollowsWorktree: すべての Stop の作業ディレクトリが worktree（実パス）と一致する
  * verdict は、どちらも一致なら「一致」、どれかが不一致なら「不一致」、それ以外（記録不足）は「未観測」。
  */
-export function judgeStops(entries, { worktree }) {
+export function judgeStops(entries, { worktree, broken = 0 } = {}) {
   if (entries.length === 0) {
-    return { blockThenPass: unobserved("Stop の記録が無い"), cwdFollowsWorktree: unobserved("Stop の記録が無い"), verdict: "未観測" };
+    return { blockThenPass: unobserved("Stop の記録が無い"), cwdFollowsWorktree: unobserved("Stop の記録が無い"), record: recordOf(broken), verdict: "未観測" };
   }
   const first = entries[0];
   let a;
@@ -115,9 +168,14 @@ export function judgeStops(entries, { worktree }) {
   const b = wrong
     ? { state: "情報", detail: `Stop の作業ディレクトリは worktree ではなかった（${wrong.cwd ?? "なし"}）。全 worktree の走査で検出する` }
     : { state: "情報", detail: "Stop の作業ディレクトリは worktree に追従した" };
-  const verdict = a.state;
-  return { blockThenPass: a, cwdFollowsWorktree: b, verdict };
+  const record = recordOf(broken);
+  // 解析できない行が 1 件でもあれば、記録が揃っていても一致にしない（不一致は優先する）
+  const verdict = a.state === "不一致" ? "不一致" : record.state === "未観測" ? "未観測" : a.state;
+  return { blockThenPass: a, cwdFollowsWorktree: b, record, verdict };
 }
+
+/** 記録の解析の項目: 構文エラー・形式の不正な行が無いことを確かめる。 */
+const recordOf = (broken) => (broken > 0 ? unobserved(`記録の解析できない行（構文エラー・形式の不正）が ${broken} 件あるため、一致としない`) : match("記録の行はすべて解析でき、形式も正しかった"));
 
 /** 既存の README「観測結果の要約」に追記できる、ホスト・版・日時つきの Markdown を作る。 */
 export function formatReport({ host, version, at, judged, entries, exitCode, timedOut }) {
@@ -130,6 +188,7 @@ export function formatReport({ host, version, at, judged, entries, exitCode, tim
     "|---|---|---|",
     `| 全 worktree の走査で未コミットを検出して 1 回止め、再入（stop_hook_active:true）で通る | ${judged.blockThenPass.state} | ${judged.blockThenPass.detail} |`,
     `| worktree へ移った後の Stop の作業ディレクトリ（情報） | ${judged.cwdFollowsWorktree.state} | ${judged.cwdFollowsWorktree.detail} |`,
+    `| 記録の解析（構文エラー・形式の不正な行の有無） | ${judged.record.state} | ${judged.record.detail} |`,
     "",
     `総合: ${judged.verdict}`,
   ].join("\n");
@@ -173,18 +232,29 @@ export function hostCommand(host, { main, worktree }) {
 }
 
 /**
- * Codex 用の一時の CODEX_HOME を作る。プロジェクト（本体）の信頼を config.toml に書き、認証ファイルは利用者の
- * ~/.codex/auth.json への読み取り用のシンボリックリンクで見せる（0.172 では `-c projects.<dir>.trust_level` が効かないため）。
- * 利用者の ~/.codex は書き換えない。auth.json が無ければ link は null（呼び出し側が未観測として扱う）。
+ * Codex 用の一時の CODEX_HOME を作る。プロジェクト（本体）の信頼を config.toml に書き、認証ファイルは
+ * 利用者の ~/.codex/auth.json を一時の場所へ「コピー」する（リンクにしない。Codex が書き込んでも利用者のファイルは変わらない）。
+ * コピーの権限は 0600、一時の CODEX_HOME は 0700。利用者の ~/.codex は書き換えない。
+ * auth.json が無ければ auth は null（呼び出し側が未観測として扱う）。実行の後は cleanupCodexHome で必ず消す。
  */
 export function prepareCodexHome(base, main, userHome = join(homedir(), ".codex")) {
   const home = join(base, "codex-home");
-  mkdirSync(home, { recursive: true });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  chmodSync(home, 0o700);
   writeFileSync(join(home, "config.toml"), `[projects."${main}"]\ntrust_level = "trusted"\n`);
-  const auth = join(userHome, "auth.json");
-  let link = null;
-  if (existsSync(auth)) { link = join(home, "auth.json"); symlinkSync(auth, link); }
-  return { home, link };
+  const source = join(userHome, "auth.json");
+  let auth = null;
+  if (existsSync(source)) {
+    auth = join(home, "auth.json");
+    copyFileSync(source, auth);
+    chmodSync(auth, 0o600);
+  }
+  return { home, auth };
+}
+
+/** 一時の CODEX_HOME を消す（認証のコピーを残さない）。null・存在しないパスでもよい。 */
+export function cleanupCodexHome(home) {
+  if (home) rmSync(home, { recursive: true, force: true });
 }
 
 /**
@@ -240,13 +310,19 @@ function observeHost(host) {
   const fx = setupRepos(base, host);
   const { bin, args } = hostCommand(host, { main: fx.main, worktree: fx.worktree });
   const env = host === "codex" ? { ...process.env, CODEX_HOME: prepareCodexHome(base, fx.main).home } : process.env;
-  const r = spawnSync(bin, args, { cwd: fx.main, env, input: "", encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+  let r;
+  try {
+    r = spawnSync(bin, args, { cwd: fx.main, env, input: "", encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+  } finally {
+    // 認証のコピーを残さない（Codex の一時の CODEX_HOME を実行の後に消す）
+    if (host === "codex") cleanupCodexHome(env.CODEX_HOME);
+  }
   writeFileSync(join(base, "host.out"), r.stdout ?? "");
   writeFileSync(join(base, "host.err"), r.stderr ?? "");
-  const entries = existsSync(fx.log) ? parseStopLog(readFileSync(fx.log, "utf8")) : [];
-  const judged = judgeStops(entries, { worktree: fx.worktree });
+  const parsed = existsSync(fx.log) ? parseStopLogDetailed(readFileSync(fx.log, "utf8")) : { entries: [], broken: 0 };
+  const judged = judgeStops(parsed.entries, { worktree: fx.worktree, broken: parsed.broken });
   const timedOut = r.error?.code === "ETIMEDOUT";
-  const text = formatReport({ host, version, at: new Date().toISOString(), judged, entries: entries.length, exitCode: r.status ?? -1, timedOut });
+  const text = formatReport({ host, version, at: new Date().toISOString(), judged, entries: parsed.entries.length, exitCode: r.status ?? -1, timedOut });
   return { host, ok: judged.verdict === "一致", text, dir: base };
 }
 

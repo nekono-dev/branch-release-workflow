@@ -141,5 +141,43 @@ node tests/real-env/stop-observe.mjs --host codex         # Codex を 1 回呼�
 | 応答の終了を 1 回止め、再入（`stop_hook_active:true`）で通る | 一致 | （未判定。Stop の cwd が worktree でなく、未コミットの変更を検出できなかったため block されなかった） |
 | worktree へ移った後の Stop の作業ディレクトリ | 一致（worktree） | **不一致**（起動時の本体のまま。エージェントは worktree でファイルを作っていた） |
 
-- Codex のフックの信頼は、一時の `CODEX_HOME`（`config.toml` にプロジェクトの信頼、`auth.json` は読み取り用のリンク）で渡す。0.172 では `-c projects."<dir>".trust_level` が効かない（0.167 では効いた）。
+- Codex のフックの信頼は、一時の `CODEX_HOME`（`config.toml` にプロジェクトの信頼、`auth.json` は利用者のファイルの一時のコピー。権限 0600、実行の後は削除）で渡す。0.172 では `-c projects."<dir>".trust_level` が効かない（0.167 では効いた）。
 
+
+# 標準入出力の端末判定の観測（brw-enforcement 14.2）
+
+`brw pr-merge` は、対話の端末（人が操作する画面）から実行されたときだけマージを行う（要件 3.5）。その前提として、エージェントの Bash やシェルで実行したときに、標準入力・標準出力が「端末」として渡されないことを、実際の Claude Code と Codex で観測する。「端末」は、キーボード入力と画面表示を持つ入出力の先（Node では `isTTY` が `true`）を指す。
+
+`BRW_REAL_ENV=1` のときだけ動く。BRW（scripts/）には依存せず、記録用の 1 ファイルの Node スクリプトだけを使う。
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/tty-observe.mjs --dry-run            # 呼び出しなしで計画を表示
+node tests/real-env/tty-observe.mjs --host claude        # Claude を 1 回呼び出して判定
+node tests/real-env/tty-observe.mjs --host codex         # Codex を 1 回呼び出して判定
+```
+
+- 作業場所は `/tmp/brw-real-env/tty-observe/<ホスト>-*/`（リポジトリ外）。記録用スクリプト `probe.mjs` と記録 `tty.jsonl` を置く。ホストには、このスクリプトを次の 2 通りで実行させる。
+  - `direct`: 直接の実行（期待: 標準入力・標準出力の `isTTY` が `undefined` または `false`）
+  - `pty`: `script -qc '…' /dev/null` 経由の実行（疑似端末を作って子プロセスに渡す。期待: `isTTY` が `true`）
+- 判定は 4 項目。`direct` の記録はすべて両方が端末でないこと、`pty` の記録はすべて両方が端末に見えること（どちらも一致）。1 件でも想定と違えば「不一致」。記録が無い、ホストが非ゼロ終了・タイムアウトした場合、または解析できない行（壊れた JSON）が 1 件でもある場合は、記録が揃っていても総合を「未観測」とする（一致とは書かない）。
+- **確認の限界**: `pty` の結果は、エージェントが疑似端末を作れば端末判定を満たせることを示す。つまり端末判定は協調的なエージェントの誤用を防ぐもので、迂回を防ぐ強制ではない（設計の「確認の強さと限界」）。
+- Codex の信頼は使わない（フックを使わない）。Codex は一時の `CODEX_HOME`（作業場所の中。認証は利用者の `auth.json` の一時のコピーで、権限 0600。実行の後は削除する）を指して、`codex exec -s workspace-write` で実行する。利用者のファイルはコピー元として読むだけで、Codex が書き込んでも変わらない。利用者の `~/.claude`・`~/.codex` は書き換えない。
+- 呼び出し回数は stop-observe.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。
+
+## 観測結果
+
+（未追記。実行結果は親が本節へ追記する。出力の Markdown は `tty-observe.mjs` が標準出力に出す。）
+
+## 端末判定の観測の結果（実行日 2026-11-26、`BRW_REAL_ENV=1 node tests/real-env/tty-observe.mjs --host both`）
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| 直接の実行（Bash・パイプ）で標準入力・標準出力が端末として渡されない | 一致（どちらも `undefined`） | 一致（どちらも `undefined`） |
+| `script` 経由の実行で標準入力・標準出力が端末に見える（確認の限界） | 一致（どちらも `true`） | 一致（どちらも `true`） |
+| ホストの実行（終了コード 0・タイムアウトなし） | 一致 | 一致 |
+
+- 要件 3.5（`brw pr-merge` が、エージェントなど対話端末でない実行から呼ばれたときマージしない）の前提は両ホストで成り立つ。一方、エージェントが疑似端末を作れば端末判定は満たされるため、`brw pr-merge` の端末判定は協調的なエージェントの誤用を防ぐもので、悪意ある迂回を防ぐ強制ではない（design.md「PR のマージ（利用者の端末）」の「確認の強さと限界」）。
+- Codex は一時の `CODEX_HOME`（認証は一時のコピー。実行の後に削除）で実行した。生の出力は実行時の `/tmp/brw-real-env/tty-observe/<ホスト>-*/`。
+- Codex の再観測（2026-11-26、認証は一時のコピー・実行後に削除）: 端末判定・Stop の観測とも総合「一致」。利用者の `~/.codex/auth.json` のハッシュは実行の前後で同じだった。
+- 記録の検証（`tty-observe.mjs`・`stop-observe.mjs` 共通）: 記録の 1 行ごとに、必須項目と型・値（`mode` は `direct`/`pty`、`stdin`/`stdout` は `undefined`/`false`/`true` の文字列、Stop の記録は `stop_hook_active`・`block` が真偽値、など）を検査する。構文エラーも形式の不正も「不正な行」として数え、1 件でもあれば総合を「一致」にしない（想定外の正規の値があれば「不一致」、それ以外は「未観測」）。未知の追加項目と空行は許可する。

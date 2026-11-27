@@ -248,7 +248,7 @@
   - ホスト・版・日時つきで観測結果が残り、Codex の版（0.172.0 以降）での結果が分かる。想定と異なる結果は成功として記録しない。BRW 本体の実装には依存しない。
   - _Boundary: 実環境フック検証_
   - _Requirements: 2.9, 2.10, 2.12_
-- [ ] 14.2 (P) 標準入出力が端末でないことを、両ホストの実行で観測する検証を用意する
+- [x] 14.2 (P) 標準入出力が端末でないことを、両ホストの実行で観測する検証を用意する
   - Claude Code の Bash と Codex の実行で、標準入力・標準出力が端末として渡されないこと、疑似端末（`script`）では端末として見えること（確認の限界）を観測し、結果を記録する。
   - 観測結果が実環境検証の記録に残り、`brw pr-merge` の端末判定の前提（要件 3.5）と限界が読み取れる。
   - _Boundary: 実環境フック検証_
@@ -415,3 +415,4 @@
 - 13（2026-11-25 追加）: 要件 1.6〜1.8（SSH の別名ホストの origin）のタスク。`githubRepoOf` は publish.mjs から再エクスポートするため、agent-hooks.mjs・setup-cli.mjs の読み取りは入口の差し替えだけで別名に対応する。宣言への別名の記載は採らない（利用者の決定）。
 - 2026-11-26: タスク 13（SSH 別名ホスト）完了。`ssh -G` は `ssh://` のポートも `-p` で渡し、ポート別に覚える。`git://`・`https://` のホストには別名の解決を使わない（レビュー指摘）。実環境（別名 `github.com.nekono`）で `brw work ready` が宛先確認まで通ることを確認した（push・PR 作成は行っていない）。
 - 14.1（2026-11-26、完了。観測の結果が設計の前提と食い違い、設計を直した）: 観測の道具は `tests/real-env/stop-observe.mjs`（単体試験 `tests/stop-observe.mjs`、selftest に登録済み）。記録フックは Stop の cwd にかかわらず、同じリポジトリの全 worktree を走査して未コミットを検出する形（設計の Stop の節）。**Claude Code 2.1.329**: block→再入で通過（一致）、Stop の cwd は worktree に追従。**Codex 0.172.0**: Stop の cwd は**起動時の本体のまま**（エージェントは worktree でファイルを作っていた）。cwd だけの検出では見逃す（観測で不一致）。全 worktree の走査にすると block→再入で通過（一致）。worktree は本体の `.claude/worktrees/wt` の下に置く必要がある（本体の外だと Claude で `cd` が引き継がれない）。Codex の信頼は一時の CODEX_HOME（`config.toml` にプロジェクトの信頼、`auth.json` は読み取り用のリンク）で渡す（0.172 では `-c projects.<dir>.trust_level` が効かない）。
+- 14.2（2026-11-27、完了）: 端末判定の観測は `tests/real-env/tty-observe.mjs`（単体試験 `tests/tty-observe.mjs`）。Claude Code 2.1.329・Codex 0.172.0 とも、直接の実行は標準入出力が端末でなく（`undefined`）、`script` 経由は端末に見える（`true`）。結果は `tests/real-env/README.md` に記録。観測の道具の共通の教訓（レビューが 5 回かかった原因）: 記録の 1 行ごとに必須項目の型・値を検証し、不正な行（構文エラー・形式の不正・値の文字列化で例外が出る入力を含む）は総合を「一致」にしない（未観測）。今後の観測の道具も、解析と判定を最初からこの形にする。Codex の認証は一時の CODEX_HOME への 0600 のコピー（実行後に削除。利用者の `~/.codex/auth.json` のハッシュは実行の前後で不変）。`stop-observe.mjs` の `judgeStops` がホストの終了コード・タイムアウトを判定に含めない点は未対応（14.2 の範囲外）。
