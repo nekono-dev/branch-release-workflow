@@ -167,3 +167,57 @@
 ## 要確認（要件へ追加するかの判断が要る）
 - **`.worktree/` が無視されていない導入先で `brw create`・`brw resume` を実行したとき、BRW は何もしないでよいか。** 本体で `git add -A` すると worktree が gitlink として誤ってステージされる（確認済み）。要件 7.9 のとおり BRW は無視設定を書かないが、**無視されていないことを検出して警告する**（書き込みはしない。止めるか通すかも決める）要件を足す選択肢がある。`brw-install-flow` の案内が入るまでの間の安全策になる。
 
+---
+
+# 設計の調査と判断（2026-11-28）: 配置先を `<本体>/.worktree/` に変える更新
+
+## 要約
+- **調査の種類**: 拡張（既存の置き換え・EnterWorktree の判定の配置先を変え、旧置き場の扱いを足す）＋外部の動作への依存（Claude Code・Codex・git）。一次資料の取得と、実機検証（`poc/design_01.md`・`poc/design_02.md`）を行った。
+- **設計に効く発見**:
+  1. 配置先が `.claude/worktrees/` の外になると、**EnterWorktree の `path` 指定は Claude Code 自身の承認（人の確認）を必ず求め、BRW のフックの許可では省けない**（実機 R1 と一次資料）。`.claude/worktrees/` の下（比較 R3）は確認なしで入れる。また、worktree に入ったセッションからは、`.claude/worktrees/` の配下にしか EnterWorktree で移れない（一次資料）。BRW の置き換え（Bash の `cd`）は承認の対象外なので、Claude Code での作業場所の移動は `cd` が実用的になる。
+  2. `.worktree/<別名>` で開始したセッションでも、フックは届く。入力の `cwd` と `CLAUDE_PROJECT_DIR` は**どちらも worktree 自身**（実機 R4）。EnterWorktree で入った場合は、`cwd` が worktree、`CLAUDE_PROJECT_DIR` は本体のまま（一次資料・実機 R3）。
+  3. 配置先が無視されているかは、`git check-ignore -q -- .worktree/<別名>` の終了コード（0 無視、1 無視されない、128 判定不能）で見分けられる。無視されていない本体で `git add -A` をすると、worktree が gitlink として誤ってステージされる（実機で確認）。
+  4. `git worktree move` で、旧置き場の worktree を、未コミットの変更ごと新しい場所へ移せる。ロックされていれば先に `git worktree unlock` が要る。
+
+## 調べたこと
+### Claude Code: EnterWorktree・フック・設定の読み込み
+- **出典**: https://code.claude.com/docs/en/tools-reference（「EnterWorktree tool behavior」）、https://code.claude.com/docs/en/worktrees、https://code.claude.com/docs/en/hooks、https://code.claude.com/docs/en/settings（いずれも 2026-11-28 取得。ページに版・日付の表示は無い）。
+- **事実**: 「a `path` outside `.claude/worktrees/` prompts for your approval before entering」「from within a worktree session, only the `path` form is available and the target must be under `.claude/worktrees/`」。承認は、権限ルールや「今後確認しない」では省けず、`bypassPermissions` のときだけ省かれる。`CLAUDE_PROJECT_DIR` は「the project root where the session started」で、worktree に入っても変わらない。`cwd` は worktree に移る。設定は、EnterWorktree の移動で、移動先の設定が読まれる。project スコープのプラグインは、同じリポジトリの worktree にも読み込まれる。
+- **実機**: `poc/design_01.md`（`claude -p` 2.1.329）。
+- **影響**: EnterWorktree を経由する移動は、承認の人手が要る。BRW は拒否・案内の対象にするが、案内に承認の注意を書く。承認の自動化は、BRW のフックではできない。
+
+### Codex: フックと linked worktree
+- **出典**: https://learn.chatgpt.com/docs/hooks（旧 https://developers.openai.com/codex/hooks からの転送。2026-11-28 取得。版・日付の表示は無い）。
+- **事実**: 「In a linked Git worktree, a project layer can read hooks from the corresponding directory in the main checkout.」。worktree 側に `.codex/` が要るか、worktree の置き場所（`.worktree/` や本体の外）による規則の違いは**記載なし**。フックの信頼は、フックの定義のハッシュで記録される（本体と worktree で共有するかは記載なし）。
+- **影響**: Codex が `.worktree/<別名>` の linked worktree でも、本体の `.codex/hooks.json` を読むことは、**一次資料では確認できず、実機でも未確認**（旧置き場では Codex 0.167 で確認済み）。`feasibility.md` の前提 3 を「未確認」のまま残す。
+
+### git: 配置先の挙動
+- **実機**: `poc/design_02.md`。無視の検出、`git add -A` の影響、旧置き場からの移動、ロックされた worktree。
+
+## 設計判断
+### D1: 配置先の決定・判定・旧置き場の案内を 1 つのモジュールに集める
+- **理由**: 配置先のパスが 5 ファイル 17 か所に散っていて、共通の定義が無い（ギャップ分析）。作る場所（`create`・`resume`）と許す場所（置き換え・EnterWorktree）がずれることを防ぐ。
+- **採用**: 小さな新規モジュール `scripts/placement.mjs`（ギャップ分析の案 C）。`.brw/` の置き場は `brw-pr-handoff` の更新まで現状のままで、別の定数にする。
+
+### D2: 旧置き場の worktree は、配置先として認めず、「ブランチ名で再利用する」経路からも外す
+- **採用**: 旧置き場の判定は配置先モジュールに 1 つだけ置く。`resume`・`finish`（`finishBlocker`）・置き換えの再開先・EnterWorktree の `path` の 4 経路が同じ関数を呼ぶ。`finish` は、旧置き場の worktree を持つブランチを**丸ごと対象外**にする（worktree もブランチも消さない。worktree だけ残してブランチを消すと不整合になるため）。旧置き場以外の場所にある既存 worktree の再利用は、従来どおり（要件に含まれない）。
+
+### D3: EnterWorktree の案内に、承認の注意を加える（要件 2.1 の文言は変えない）
+- **採用**: 2 手の案内は維持し、理由の行に「Claude Code は `.claude/worktrees/` の外の `path` への EnterWorktree で承認を求める。承認できない環境では、`brw create` が移した作業場所（`cd`）で作業する」を加える。要件 2.1・2.2 の見直し（承認の要る EnterWorktree をそもそも案内するか）は、利用者の判断が要るため、設計では変えない。
+
+### D4: `mainOfStart` の形を `.worktree/<別名>` に改める
+- **採用**: 実行先が Git の外（削除済みの作業場所）のとき、`CLAUDE_PROJECT_DIR` が `<本体>/.worktree/<別名>` の形なら本体を導く。旧置き場の形（`.claude/worktrees/<別名>`）は、配置先として認めないため導かない。
+
+### D5: 無視されていない配置先の警告は、作成の後に 1 回、`brw create`・`brw resume` が出す（要件 7.10）
+- **採用**: worktree を作る処理（作成・再作成）の成功の後に、`git check-ignore` が 1 を返したときだけ警告する。0 は何も出さない。128 などの判定不能は、何も出さない（誤警告を避ける）。警告は標準出力の案内に含め、作成は続ける。導入先の設定は書かない（要件 7.9）。`--branch-only`（worktree を作らない）と、既存 worktree の再利用では出さない。
+
+## 簡素化・統合の結果（design-synthesis）
+- 旧置き場の判定（7.4〜7.6・2.6）は、4 経路で同じ関数を使うため、一般化して配置先モジュールに集めた。
+- 新しい部品は `placement.mjs` の 1 つだけ。EnterWorktree と置き換えの案内の書式は、既存の `guidance` を共有する。
+
+## リスク
+- **EnterWorktree の承認**: 配置先の変更により、Claude Code の EnterWorktree は常に承認を求める。非対話（`-p`・CI）では `bypassPermissions` でないと通らない。BRW の置き換え（`cd`）は影響を受けない。
+- **Codex**: 上記のとおり未確認。確認できるまで、設計の実現性の判定は未通過。
+- **無視設定が無い導入先**: 警告（7.10）が安全策。`brw-install-flow` の案内が入るまでの間、利用者が設定を足すまで gitlink の誤ステージの危険が残る。
+- **取りこぼし**: 17 か所の置き換えを、配置先モジュールの導入と試験（旧置き場の文字列が `scripts/` に残っていないことの検査）で防ぐ。
+

@@ -17,7 +17,17 @@
 
 - 判定: 未通過
 
-2026-11-28 の要件の更新により、既存の設計（承認済み）を更新する必要がある。更新後の設計で、前提ごとに根拠を確認する。
+確認日 2026-11-28。**根拠の無い前提: あり（下の 3）**。
+
+| # | 前提 | 根拠 |
+|---|---|---|
+| 1 | EnterWorktree の `path` が `.worktree/<別名>` で、承認を与えれば入れる。BRW のフックの許可では承認を省けない | **一次資料** https://code.claude.com/docs/en/tools-reference「EnterWorktree tool behavior」・https://code.claude.com/docs/en/worktrees（2026-11-28 取得。「a `path` outside `.claude/worktrees/` prompts for your approval before entering」「An `EnterWorktree` permission rule or choosing "don't ask again" doesn't suppress this prompt; only `bypassPermissions` mode skips it.」）。**PoC** `poc/design_01.md` の 1（フックが `allow` を返しても確認で止まる。`.claude/worktrees/` は確認なし）。承認を与えた場合に入れることは、文書の記述のみ（実機では未実施）。**設計への反映**: 案内に承認の注意を書き、移動は `cd` を実用の手段とする |
+| 2 | フックが `.worktree/<別名>` で開始したセッション・EnterWorktree で入ったセッションの両方に届く。`CLAUDE_PROJECT_DIR` の値で本体を導ける | **PoC** `poc/design_01.md` の 2・3（開始時は `cwd`・`CLAUDE_PROJECT_DIR` が worktree 自身、EnterWorktree 後は `cwd` が worktree・`CLAUDE_PROJECT_DIR` が本体）。**一次資料** https://code.claude.com/docs/en/hooks「Reference scripts by path」。**設計への反映**: `mainOfStart` の形を `.worktree/<別名>` にする |
+| 3 | **Codex が `.worktree/<別名>` の linked worktree でも、本体の `.codex/hooks.json` を読んでフックを届ける** | **未確認**。一次資料 https://learn.chatgpt.com/docs/hooks（2026-11-28 取得）は「In a linked Git worktree, a project layer can read hooks from the corresponding directory in the main checkout.」とだけ書き、worktree の置き場所による違いと、worktree 側の `.codex/` の要否は記載なし。旧置き場では Codex 0.167 で確認済み（`references/setup.md`）だが、新しい置き場の実機は未実施（認証の一時コピーが要るため、利用者の判断を待つ） |
+| 4 | git が本体の直下の `.worktree/<別名>` に worktree を作り、一覧・本体の特定・移動が従来どおり動く | **PoC** `poc/design_02.md` の 3・4・5 |
+| 5 | 配置先が無視されているかを `git check-ignore` で検出できる | **PoC** `poc/design_02.md` の 1（0 無視・1 無視されない・128 判定不能。`.gitignore`・`info/exclude`・先頭の `/` なしのパターンで 0） |
+| 6 | 無視されていない本体で `git add -A` をすると worktree が gitlink として誤って追加される（警告の動機） | **PoC** `poc/design_02.md` の 2 |
+| 7 | 旧置き場の worktree を `git worktree move` で（未コミットの変更ごと）新しい場所へ移せる。ロックされていれば拒否される | **PoC** `poc/design_02.md` の 5 |
 
 ## タスク計画の確認
 
