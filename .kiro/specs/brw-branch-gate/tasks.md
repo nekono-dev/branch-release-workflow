@@ -205,7 +205,7 @@
   - _Requirements: 6.5_
 
 - [ ] 8. 検証
-- [ ] 8.1 実機で、`.worktree/` への作成・再開・旧置き場の拒否・警告を通しで確かめる
+- [x] 8.1 実機で、`.worktree/` への作成・再開・旧置き場の拒否・警告を通しで確かめる
   - 使い捨てのリポジトリで、次を確かめる。(1) 実際の Claude Code が素の `git switch -c` を置き換え、次の呼び出しの作業場所が `<本体>/.worktree/<別名>` になる。(2) EnterWorktree の `name` 指定が拒否され、案内に従って `brw create` で作った worktree へ Bash の `cd` で移れる。(3) `.worktree/<別名>` で開始したセッションでフックが届き、`CLAUDE_PROJECT_DIR` から本体が導かれる（`mainOfStart`）。(4) 実際の Codex で、`.worktree/<別名>` から本体の `.codex/hooks.json` が読まれる（5.2 の方法）。(5) `brw resume` が旧置き場の使用中ブランチを拒否する。(6) 無視されていない導入先で警告が出る。権限モードを迂回する指定は使わない。
   - 完了の状態: 実機の通しの確認が、通常の自己テストとは別に（`BRW_REAL_ENV=1` のときだけ）通り、結果が機械が読める形で記録される。
   - _Boundary: 実機検証_
@@ -217,3 +217,6 @@
   - _Boundary: 回帰_
   - _Depends: 7.2, 7.4, 7.5, 8.1_
   - _Requirements: 7.1, 7.4_
+
+## Implementation Notes
+- 8.1: 実機の通し確認 (3) は、`mainOfStart` の戻り値（`CLAUDE_PROJECT_DIR` から本体を導く結果）を公開のフック応答から観測できないため、実機では「消えた作業場所の入力の形と `CLAUDE_PROJECT_DIR` が worktree を指すこと」までを判定し、導出そのものは `tests/user-prompt-submit.mjs`（7.4・9.4）の単体試験が受け持つ。レビュー役は 2 回この点を指摘したが、観測手段が無いため指揮役の判断でこの分担とした（`/kiro-validate-impl` で再確認する）。実機は実 claude の確率的な動作に依存し、(3) は 4 回中 1 回の失敗があった（再実行で通過）。

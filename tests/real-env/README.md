@@ -473,3 +473,19 @@ BRW_REAL_ENV=1 node tests/real-env/resume-observe.mjs --stage codex
 `brw pr` は一時 worktree で状態確認を行う `git` の子プロセス起動が `EPERM` となり、`tidy` 段階で終了コード 1 になった。シェルから直接行った `git status` は成功した。Codex は workspace-write sandbox で実行し、既存の実機検証の制約に合わせて一時リポジトリの Git 共通ディレクトリを `--add-dir` に追加したが、この環境では Node.js からの `spawnSync("git", …)` は許可されなかった。これは再開機能の成功確認ではなく、実行環境の制限を記録した結果である。`.git` への書き込みだけでなく、Codex が起動した Node.js から Git を実行できる sandbox 条件が必要。
 
 偽 `gh` の PR 作成は 0 件、偽 SSH の receive-pack は 0 件。GitHub への接続・書き込みは無かった。Codex の一時 CODEX_HOME と一時 repo は観測後に削除された。認証情報の値は出力・変更していない。
+
+## 配置先 `.worktree/` の実機の通し確認（brw-branch-gate 8.1）
+
+`tests/real-env/placement-e2e.mjs` は、`.worktree/` への作成・再開・旧置き場の拒否・警告を実機で通しで確かめる。`BRW_REAL_ENV=1` を付けたときだけ動き、付けなければ説明を出して終了コード 0 で終わる（通常の `tests/selftest.mjs` には登録しない）。
+
+```sh
+BRW_REAL_ENV=1 node tests/real-env/placement-e2e.mjs          # 本番（claude を 3 回、codex の hooks/list を 1 回呼ぶ）
+BRW_REAL_ENV=1 node tests/real-env/placement-e2e.mjs --keep   # 一時ディレクトリを残す（/tmp/brw-placement-e2e-*）
+```
+
+- 使い捨てのリポジトリ（origin は一時の bare）だけを使う。利用者の `~/.claude`・`~/.codex` は読み書きしない。権限モードを迂回する指定は使わない（`--setting-sources project` と `--allowedTools EnterWorktree,Bash`）。GitHub へは書き込まない。
+- 確かめる項目は次のとおり。(1) 素の `git switch -c dev/foo` が置き換えられ、次の Bash の作業場所が `.worktree/dev-foo` になる。(2) EnterWorktree の name 指定が拒否され、案内に従って `brw create` で作った worktree へ Bash の `cd` で移れる。(3) `.worktree/dev-foo` で開始したセッションが、その worktree を消したあとも、フックが `CLAUDE_PROJECT_DIR`（worktree のパス）を受け取り、作業場所は worktree の外へ移る。導出そのもの（`mainOfStart` の戻り値）は公開の入口（フックの応答）に出ないため実機では観測せず、実機で確かめた入力の形（消えた作業場所の cwd と worktree を指す `CLAUDE_PROJECT_DIR`）を使う単体試験（`tests/user-prompt-submit.mjs` の 7.4・9.4）で確かめる（NOTE として出す）。(4) 実際の Codex で `.worktree/<別名>` から本体の `.codex/hooks.json` が読まれる（`placement-codex.mjs` を子として実行）。(5) `brw resume` が旧置き場 `.claude/worktrees/<別名>` の使用中ブランチを拒否し、移動手順を案内する。(6) `.worktree/` が無視されていない導入先で、`brw create` が成功後に警告を出す。
+- 最後の行に `{"script":"placement-e2e","ok":bool,"checks":[{name,ok}]}` を 1 行の JSON で出す。NG があれば終了コード 1。
+- Claude の応答は確率的なので、(2) の移動はモデルが案内どおりに動いたときだけ一致する。(2) の判定（`placement-judge.mjs`）は、name=bar の EnterWorktree・`brw create`・`cd` の順の記録と、cd のあとの作業場所（または cd と pwd の結果）が worktree であることを見る。任意の Bash の結果が worktree のパスと一致するだけでは成功にしない。
+- (3) は、worktree を消したあとの実機の入力を見る。消えた作業場所の次の Bash の入力は、復帰したシェルの場所で記録される場合（試行で確認）と、消えた worktree のパスのまま記録される場合（実行 2 で確認）がある。どちらでも `CLAUDE_PROJECT_DIR` は worktree のまま渡る。導出の結果そのものは未確認のまま残る。
+- 判定の自己検証（実機を使わない）: `node tests/real-env/placement-judge-selftest.mjs`。壊した記録で NG になることを確かめる。`BRW_REAL_ENV` は要らない。
