@@ -1,6 +1,6 @@
 // 純粋な部品: Codex のフックの承認の記録（キーとハッシュ）を求める。
 // 入出力は行わず、lib/ も import しない（導入コマンドの側の定数とは試験で一致を確かめる）。
-// 計算式の出典: poc/codex-hook-trust/run.mjs の trustEntries（openai/codex の hook_hash に対応）。
+// 計算式の出典: openai/codex のフックの hash 計算（hook_hash）。実機検証の結果は codex-hook-trust の実現性の記録を参照。
 import { createHash } from "node:crypto";
 
 /** 自分のフックの印（lib/catalog.mjs の OWNED_MARKER と同じ値。試験で一致を確かめる） */

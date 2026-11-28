@@ -6,6 +6,7 @@ import { promises as fs, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyPrompt, decideInput, parseRecord, parseWorktreeListPorcelain, parseWorktreeListZ } from "./feasibility-gate-rules.mjs";
+import { stopOutput } from "./stop-notice-rules.mjs";
 
 // 配置先は .agent-hooks/cc-sdd-bootstrap/ なので、2 つ上が導入先の根
 const scriptRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -191,8 +192,10 @@ async function run() {
   const dir = command.spec === null ? null : locateSpec(candidateRoots(cwd), command.spec);
   const record = dir === null ? null : await readRecord(dir);
   const decision = decideInput(command, dir !== null, record);
-  // 止めるときは理由を出す。止めないときは、段階ごとの追加の指示を文脈として渡す（Claude Code・Codex 共通の形）
-  if (decision.kind === "block") output({ decision: "block", reason: decision.reason });
+  // 止めるときは、`decision: "block"`（モデルが動かず、リモートセッションの画面に理由が出ない）ではなく、
+  // 停止の案内と止める指示を追加の文脈として渡し、モデルに応答の文章を作らせる（Claude Code・Codex 共通の形）。
+  // 止めないときは、段階ごとの追加の指示を文脈として渡す。
+  if (decision.kind === "block") output(stopOutput({ prompt: input.prompt, reason: decision.reason }));
   if (decision.kind === "context") {
     output({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: decision.text } });
   }
