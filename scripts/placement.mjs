@@ -2,6 +2,7 @@
 // 配置先は <本体>/.worktree/<別名>。旧置き場は <本体>/.claude/worktrees/ の直下（名前が .brw のものを除く）。
 // 判定は「worktree のルートを実体のパスにし、その親ディレクトリが配置先・旧置き場に等しいか」の一致だけで行う（research.md の D6）。
 // 副作用を持たない（ファイル・git を変えない）。Node 標準ライブラリと lib.mjs の aliasOf だけを使う。
+import { spawnSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { aliasOf } from "./lib.mjs";
@@ -104,4 +105,66 @@ export function isUnderPlacement(main, target) {
 /** `placementZone(main, target) === "legacy"`。判定不能・対象外は偽。偽を「許可してよい」の意味に使わない（`unknown` を区別するなら `placementZone` を使う） */
 export function isLegacyPlacement(main, target) {
   return placementZone(main, target) === "legacy";
+}
+
+// シェルの 1 語として安全に渡す形にする。安全な文字だけなら無引用、それ以外は単引用符で囲み、内側の ' は '\'' にする
+const shQuote = (s) => /^[A-Za-z0-9_/.:=@+,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+
+/**
+ * 旧置き場の worktree を配置先へ移す手順の案内。BRW は自動で移さない（worktree・ブランチ・変更に触れない）。
+ * next は実行できるコマンドの列（最後の 1 行だけ、移せないときの代替の説明）。
+ */
+export function legacyMoveGuidance(main, branch, oldPath) {
+  const newPath = placementOf(main, branch);
+  const o = shQuote(oldPath);
+  const n = shQuote(newPath);
+  const b = shQuote(branch);
+  return {
+    reason: `作業ブランチ ${branch} の worktree は旧置き場 ${oldPath} にあり、BRW の配置先（${newPath}）ではないため扱えません。BRW は worktree・ブランチ・変更に触れず、自動で移しません。次の手順で移してから、もう一度実行してください。ロックされているときだけ 1) を行います。未コミットの変更・未追跡のファイルは 2) の移動でそのまま移ります。`,
+    next: [
+      `git worktree unlock ${o}`,
+      `git worktree move ${o} ${n}`,
+      `brw resume ${b}`,
+      `移せないとき（サブモジュールを持つ worktree など）は、未コミットの変更を commit か退避してから git worktree remove ${o} で片付け（変更が残っていると拒否されます。サブモジュールがあるときは --force が要るため、変更を失わないことを確かめてから）、brw resume ${b} で新しい配置先に作り直してください。`,
+    ],
+  };
+}
+
+/**
+ * `brw finish` で、旧置き場の worktree を片付けられないときの案内。BRW は worktree・ブランチ・変更に触れない。
+ * 進め方は 2 つ: 1) 配置先へ移してから `brw finish` をもう一度実行する、2) 変更が無いことを確かめてから手動で片付ける。
+ * next は実行できるコマンドの列（1 行ごとに 1 つの操作）。
+ */
+export function legacyFinishGuidance(main, branch, oldPath) {
+  const newPath = placementOf(main, branch);
+  const o = shQuote(oldPath);
+  const n = shQuote(newPath);
+  const b = shQuote(branch);
+  return {
+    reason: `作業ブランチ ${branch} の worktree は旧置き場 ${oldPath} にあるため BRW は片付けません（ブランチも消しません）。BRW の配置先は ${newPath} です。BRW は worktree・ブランチ・変更に触れません。`,
+    next: [
+      `1) 移してから片付ける: ロックされているときは先に git worktree unlock ${o}、次に git worktree move ${o} ${n}、最後にもう一度 brw finish ${b} を実行してください。`,
+      `2) 手動で片付ける: 未コミットの変更が無いことを確かめてから git worktree remove ${o} を実行し、取り込み済みなら git branch -d ${b} でブランチも消してください。`,
+    ],
+  };
+}
+
+/**
+ * 配置先のディレクトリ全体が無視されているか。存在しない固定の子 `.worktree/.brw-probe` への git check-ignore の終了コードで判定する。
+ * 0 → ignored、1 → not-ignored、それ以外（git の外・失敗など）→ unknown。ファイル・設定は書かない（git を読むだけ）。
+ */
+export function ignoreStatus(main) {
+  const r = spawnSync("git", ["check-ignore", "-q", "--", `${PLACEMENT_DIR}/.brw-probe`], { cwd: main, stdio: "ignore" });
+  if (r.error) return "unknown";
+  if (r.status === 0) return "ignored";
+  if (r.status === 1) return "not-ignored";
+  return "unknown";
+}
+
+/** 配置先が無視されていないときの警告文（2 行）。導入先の設定は BRW が書き換えない旨を含む */
+export function ignoreWarning() {
+  return [
+    "`.worktree/` が導入先で無視されていません。本体の作業ツリーで `git add -A` などを実行すると、worktree が埋め込みリポジトリとして誤って追加されます。",
+    "`.worktree/` を無視する設定（`.gitignore` への `/.worktree/` の追記など）を導入先に追加してください。BRW はこの設定を書き換えません。",
+  ];
 }

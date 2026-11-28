@@ -1,10 +1,11 @@
 // 配置先の決定と判定（brw-branch-gate の placement）の試験。selftest.mjs から呼ばれる（selftest への登録は 7.4 が行う）。
 // 一時ディレクトリは mkdtempSync で作り、realpathSync で実体にしてから使う。試験の最後に後始末する。
 // `..` を含む入力は join() を使わず文字列を直接組み立てる（join() は `..` を畳んでしまい、生の入力の検査を試せないため）。
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hasParentSegment, isLegacyPlacement, isUnderPlacement, placementOf, placementPrefix, placementRoot, placementZone } from "../scripts/placement.mjs";
+import { hasParentSegment, ignoreStatus, ignoreWarning, isLegacyPlacement, isUnderPlacement, legacyFinishGuidance, legacyMoveGuidance, placementOf, placementPrefix, placementRoot, placementZone } from "../scripts/placement.mjs";
 
 export const runPlacementChecks = async (eq) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "brw-placement-")));
@@ -171,6 +172,111 @@ export const runPlacementChecks = async (eq) => {
       placementOf(plain, "dev/foo"),
     ];
     eq("brw-branch-gate/7.1 配置先と旧置き場の判定が同時に真にならない", samples.filter((p) => isUnderPlacement(main, p) && isLegacyPlacement(main, p)).length, 0);
+
+    // ---- 6.5・7.5: 旧置き場の worktree を移す手順の案内 ----
+    // 空白と単引用符を含む旧パスでも、案内のコマンドがそのまま実行できる形になることを確かめる
+    const oddOld = join(main, ".claude", "worktrees", "dev old'1");
+    const newP = placementOf(main, "dev/old");
+    const guide = legacyMoveGuidance(main, "dev/old", oddOld);
+    const guideAll = [guide.reason, ...guide.next].join("\n");
+    eq("brw-branch-gate/7.5 案内の理由に旧パス・新パス・ブランチが入る", [oddOld, newP, "dev/old"].every((s) => guide.reason.includes(s)), true);
+    eq("brw-branch-gate/7.5 案内の理由は「扱えません」の文面を含む", guide.reason.includes("ではないため扱えません"), true);
+    eq("brw-branch-gate/7.5 案内に git worktree unlock が含まれる", guide.next.some((l) => l.startsWith("git worktree unlock ")), true);
+    eq("brw-branch-gate/7.5 案内に git worktree move が含まれる", guide.next.some((l) => l.startsWith("git worktree move ")), true);
+    eq("brw-branch-gate/7.5 案内に brw resume <ブランチ> が含まれる", guide.next.includes("brw resume dev/old"), true);
+    eq("brw-branch-gate/7.5 移せないときの代替（git worktree remove）が含まれる", guide.next.some((l) => l.includes("git worktree remove ")), true);
+    eq("brw-branch-gate/6.5 案内は BRW が自動で移さないと書く", guide.reason.includes("自動で移しません"), true);
+    eq("brw-branch-gate/7.5 案内に旧パスの unlock・move が空白と単引用符を含んでも、sh で元のパスとして渡る", (() => {
+      const moveArgs = guide.next.find((l) => l.startsWith("git worktree move ")).slice("git worktree move ".length);
+      const unlockArgs = guide.next.find((l) => l.startsWith("git worktree unlock ")).slice("git worktree unlock ".length);
+      const out = execFileSync("sh", ["-c", `set -- ${moveArgs}; printf '%s\\n' "$1" "$2"; set -- ${unlockArgs}; printf '%s\\n' "$1"`], { encoding: "utf8" }).split("\n");
+      return out[0] === oddOld && out[1] === newP && out[2] === oddOld;
+    })(), true);
+    eq("brw-branch-gate/7.5 案内の全体に旧パスと新パスが含まれる", [oddOld, newP].every((s) => guideAll.includes(s)), true);
+
+    // ---- 6.2・7.6: `brw finish` 用の案内（旧置き場の worktree を片付けられないとき） ----
+    const finOld = join(main, ".claude", "worktrees", "dev old'1");
+    const finNew = placementOf(main, "dev/old");
+    const fin = legacyFinishGuidance(main, "dev/old", finOld);
+    const finAll = [fin.reason, ...fin.next].join("\n");
+    eq("brw-branch-gate/7.6 finish の理由に旧パス・新パス・「ブランチも消しません」が入る", [finOld, finNew, "ブランチも消しません"].every((s) => fin.reason.includes(s)), true);
+    eq("brw-branch-gate/7.6 finish の理由は BRW が worktree・ブランチ・変更に触れないと書く", fin.reason.includes("BRW は worktree・ブランチ・変更に触れません"), true);
+    eq("brw-branch-gate/7.6 finish の案内に移動後の brw finish <ブランチ> の再実行が含まれる", fin.next.some((l) => l.includes("brw finish dev/old")), true);
+    eq("brw-branch-gate/7.6 finish の案内に git worktree remove <旧パス> の手動の片付けが含まれる", fin.next.some((l) => l.includes("git worktree remove ")), true);
+    eq("brw-branch-gate/7.6 finish の案内に git branch -d <ブランチ> が含まれる", fin.next.some((l) => l.includes("git branch -d dev/old")), true);
+    eq("brw-branch-gate/7.6 finish の案内に旧パスと新パスが含まれる", [finOld, finNew].every((s) => finAll.includes(s)), true);
+    // 空白・単引用符を含む旧パスとブランチ名を、sh で解釈すると元の文字列に戻る
+    eq("brw-branch-gate/7.6 finish の案内の旧パス・新パス・ブランチ名が sh で元の文字列として渡る", (() => {
+      const oddBranch = "dev/a b'c";
+      const oddNew = placementOf(main, oddBranch);
+      const g = legacyFinishGuidance(main, oddBranch, finOld);
+      const cut = (s, start, end) => {
+        const i = s.indexOf(start);
+        if (i < 0) return null;
+        const from = i + start.length;
+        const j = s.indexOf(end, from);
+        return j < 0 ? null : s.slice(from, j);
+      };
+      const unlockArgs = cut(g.next[0], "git worktree unlock ", "、次に");
+      const moveArgs = cut(g.next[0], "git worktree move ", "、最後に");
+      const removeArgs = cut(g.next[1], "git worktree remove ", " を実行");
+      const branchArgs = cut(g.next[1], "git branch -d ", " でブランチ");
+      const finishArgs = cut(g.next[0], "brw finish ", "を実行");
+      if ([unlockArgs, moveArgs, removeArgs, branchArgs, finishArgs].some((x) => x === null)) return false;
+      const out = execFileSync("sh", ["-c", `set -- ${moveArgs}; printf '%s\\n' "$1" "$2"; set -- ${unlockArgs}; printf '%s\\n' "$1"; set -- ${removeArgs}; printf '%s\\n' "$1"; set -- ${branchArgs}; printf '%s\\n' "$1"; set -- ${finishArgs}; printf '%s\\n' "$1"`], { encoding: "utf8" }).split("\n");
+      return out[0] === finOld && out[1] === oddNew && out[2] === finOld && out[3] === finOld && out[4] === "dev/a b'c" && out[5] === "dev/a b'c";
+    })(), true);
+
+    // ---- 7.9・7.10: 配置先のディレクトリ全体が無視されているかの検出 ----
+    // 導入先の .gitignore と .git/info/exclude が、呼び出しの前後で変わらないことを確かめる
+    const gitRepo = (name, setup) => repo(name, (m) => {
+      execFileSync("git", ["-C", m, "init", "-q"]);
+      setup?.(m);
+    });
+    const snap = (m) => [".gitignore", ".git/info/exclude"].map((f) => {
+      try {
+        return readFileSync(join(m, f), "utf8");
+      } catch {
+        return null;
+      }
+    });
+    const judge = (m) => {
+      const before = snap(m);
+      const st = ignoreStatus(m);
+      const unchanged = JSON.stringify(before) === JSON.stringify(snap(m));
+      const noDir = !existsSync(join(m, ".worktree"));
+      return { st, unchanged, noDir };
+    };
+    const noIgnore = judge(gitRepo("ig-none"));
+    eq("brw-branch-gate/7.10 無視設定なしは not-ignored", noIgnore.st, "not-ignored");
+    eq("brw-branch-gate/7.9 無視設定なしの判定で導入先の設定が変わらない", noIgnore.unchanged, true);
+    eq("brw-branch-gate/7.9 判定で配置先のディレクトリを作らない", noIgnore.noDir, true);
+
+    const dirIgnore = judge(gitRepo("ig-dir", (m) => writeFileSync(join(m, ".gitignore"), "/.worktree/\n")));
+    eq("brw-branch-gate/7.10 .gitignore の /.worktree/ は ignored", dirIgnore.st, "ignored");
+    eq("brw-branch-gate/7.9 /.worktree/ の判定で .gitignore が変わらない", dirIgnore.unchanged, true);
+
+    const excludeIgnore = judge(gitRepo("ig-exclude", (m) => appendFileSync(join(m, ".git", "info", "exclude"), ".worktree/\n")));
+    eq("brw-branch-gate/7.10 info/exclude の .worktree/ は ignored", excludeIgnore.st, "ignored");
+    eq("brw-branch-gate/7.9 info/exclude の判定で除外設定が変わらない", excludeIgnore.unchanged, true);
+
+    const noSlash = judge(gitRepo("ig-noslash", (m) => writeFileSync(join(m, ".gitignore"), ".worktree\n")));
+    eq("brw-branch-gate/7.10 先頭の / が無い .worktree は ignored", noSlash.st, "ignored");
+    eq("brw-branch-gate/7.9 先頭の / が無い判定で .gitignore が変わらない", noSlash.unchanged, true);
+
+    const aliasOnly = judge(gitRepo("ig-alias", (m) => writeFileSync(join(m, ".gitignore"), "/.worktree/dev-x\n")));
+    eq("brw-branch-gate/7.10 別名だけの無視設定は not-ignored（配置先全体は無視されていない）", aliasOnly.st, "not-ignored");
+    eq("brw-branch-gate/7.9 別名だけの判定で .gitignore が変わらない", aliasOnly.unchanged, true);
+
+    const outsideGit = judge(outside);
+    eq("brw-branch-gate/7.10 git の外のディレクトリは unknown", outsideGit.st, "unknown");
+    eq("brw-branch-gate/7.9 git の外の判定で配置先のディレクトリを作らない", outsideGit.noDir, true);
+
+    // ---- 7.10: 無視されていないときの警告文 ----
+    const warnLines = ignoreWarning();
+    const warn = warnLines.join("\n");
+    eq("brw-branch-gate/7.10 警告文は複数行の配列", Array.isArray(warnLines) && warnLines.length >= 2, true);
+    eq("brw-branch-gate/7.10 警告文に .worktree/・git add -A・.gitignore・「書き換えません」を含む", [".worktree/", "git add -A", ".gitignore", "書き換えません"].every((s) => warn.includes(s)), true);
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
