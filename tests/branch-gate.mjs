@@ -13,7 +13,7 @@ const BASE = {
   outcome: "置き換え",
   conclusion: "ブランチ作成を BRW の作成に置き換えました",
   commands: ["cd '/repo' && node 'brw.mjs' create 'dev/foo'"],
-  workdir: "/repo/.claude/worktrees/dev-foo",
+  workdir: "/repo/.worktree/dev-foo",
   notes: "作業場所を新しい worktree に移しました。\n続けて、この worktree で作業してください。",
 };
 
@@ -31,7 +31,7 @@ export const runBranchGateChecks = async (eq) => {
     "[branch-release-workflow] ブランチ作成を BRW の作成に置き換えました",
     "BRW 案内: 置き換え",
     "次のコマンド: cd '/repo' && node 'brw.mjs' create 'dev/foo'",
-    "作業場所: /repo/.claude/worktrees/dev-foo",
+    "作業場所: /repo/.worktree/dev-foo",
   ]);
   eq("brw-branch-gate/4.3 見出しの後の本文に、理由と次の手順の文章が続く", lines.slice(4), [
     "作業場所を新しい worktree に移しました。",
@@ -47,9 +47,9 @@ export const runBranchGateChecks = async (eq) => {
   eq("brw-branch-gate/2.5 2 手の案内は「1) …」「2) …」の順で 1 行に並ぶ", guidance({
     ...BASE,
     outcome: "拒否",
-    commands: ["brw create 'my-task'", "EnterWorktree の path に /repo/.claude/worktrees/my-task を指定する"],
+    commands: ["brw create 'my-task'", "EnterWorktree の path に /repo/.worktree/my-task を指定する"],
     workdir: null,
-  }).split("\n")[2], "次のコマンド: 1) brw create 'my-task' 2) EnterWorktree の path に /repo/.claude/worktrees/my-task を指定する");
+  }).split("\n")[2], "次のコマンド: 1) brw create 'my-task' 2) EnterWorktree の path に /repo/.worktree/my-task を指定する");
   eq("brw-branch-gate/4.1 コマンドが 0 件や 3 件以上のときは組み立てずに止める", [
     (() => { try { guidance({ ...BASE, commands: [] }); return "no-throw"; } catch { return "throw"; } })(),
     (() => { try { guidance({ ...BASE, commands: ["a", "b", "c"] }); return "no-throw"; } catch { return "throw"; } })(),
