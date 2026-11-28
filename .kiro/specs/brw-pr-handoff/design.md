@@ -61,7 +61,7 @@
 ```mermaid
 flowchart TD
   AG[エージェント / cc-sdd-bootstrap] -->|brw pr-template| PT[pr-template]
-  AG -->|本文を記入| BF[本文ファイル .claude/worktrees/.brw]
+  AG -->|本文を記入| BF[本文ファイル .worktree/.brw]
   AG -->|brw pr| PF[pr-flow]
   PF --> TD[tidy: 別コミット]
   PF --> PUB[既存の公開: ready → plan → push・PR]
@@ -121,7 +121,8 @@ SKILL.md / references/config.md / references/setup.md       # 変更
 - `scripts/brw.mjs` — `finish` の安全確認と削除を `cleanup.mjs` へ移す（挙動は変えない）。サブコマンド `pr`・`pr-template` を追加する。
 - `scripts/operation-decision.mjs` — `evalPrCreate` は、規則に適合する場合（現在は確認省略の対象）も拒否にする。案内は `ALT_PR_FLOW`（`brw pr-template` で本文を用意し、`brw pr` で作成）。不適合の拒否の案内は従来のまま。
 - `scripts/operation-decision.mjs` — `evalPrCreateRules` は、取り込み元が恒常的な分岐元で、取り込み先が保護ブランチの組を、規則に適合する PR 作成として扱う（ほかの組の拒否は変えない）。拒否の案内は組ごとに選ぶ関数 `prAlternative(headClass, baseClass, repo)` にし、`brw pr` で作れる組（開発ブランチ→保護・分岐元、分岐元→保護）だけに `brw pr` を示す。作れない組には、作れない理由と、利用者が GitHub 上で作成する手順（作成画面の URL。`https://github.com/<所有者>/<名前>/compare/<取り込み先>...<取り込み元>?expand=1` を通信なしで作る）を示す（要件 1.11）。
-- `scripts/publish-cli.mjs` — `readBody` は、作業ディレクトリ配下の相対パスに加え、`<本体>/.claude/worktrees/.brw/` 配下の絶対パスを受け付ける（実体パスで配下を確認し、`..`・リンクの逸脱を拒否する既存の基準を同じに適用）。
+- 【本文置き場の移動（要件 3.9・3.11・3.12）】置き場は `<本体>/.worktree/.brw/`（`placement.mjs` の `PLACEMENT_DIR` と `.brw` の定数から作る。配置先の判定は `.brw` を worktree として扱わない既存の扱いを維持）。旧置き場 `<本体>/.claude/worktrees/.brw/` の配下の絶対パスは受け付けず（`placement.mjs` の `legacyMoveGuidance` の文言を再利用して）移し方を示して拒否し、自動では移さない。`cleanup.mjs` は新しい置き場の本文だけを消す。実機の前提は `poc/design_01.md`。
+- `scripts/publish-cli.mjs` — `readBody` は、作業ディレクトリ配下の相対パスに加え、`<本体>/.worktree/.brw/` 配下の絶対パスを受け付ける（実体パスで配下を確認し、`..`・リンクの逸脱を拒否する既存の基準を同じに適用）。
 - `scripts/pr-flow.mjs` — 事前確認で、現在のブランチが恒常的な分岐元のときは `base-pr` の `runBasePr` へ渡す（開発ブランチは従来の流れ）。開発ブランチでも分岐元でもないブランチは、理由と取るべき手順を表示して止まる（要件 1.4）。
 - `scripts/brw.mjs` — `prTemplate` は、分岐元でも雛形を出す（作成元・作成先を示し、「作業外の変更」は該当なし。要件 3.10）。`brw work start` の拒否の案内（`publish-cli.mjs`）は、分岐元では「分岐元から保護ブランチへの PR は `brw pr`」と示す。
 
@@ -201,7 +202,7 @@ sequenceDiagram
 | 3.5・3.6 | 作業外の変更・検証の差し込み | `pr-template` | `buildTemplate` |
 | 3.7 | 自己完結した短い記入指示 | `pr-template`（`instruction`） | 標準出力 |
 | 3.8 | 本文なしなら案内 | `pr-flow`（本文の確認） | 終了コード 1 |
-| 3.9 | 本文ファイルを作業ツリーの外に置く | `pr-template`（`bodyPathOf`）、`readBody`（変更） | `.claude/worktrees/.brw/` |
+| 3.9 | 本文ファイルを作業ツリーの外に置く | `pr-template`（`bodyPathOf`）、`readBody`（変更） | `.worktree/.brw/` |
 | 3.10 | 分岐元でも雛形を出す | `pr-template`、`brw.mjs`（`prTemplate`） | 作成元・作成先を示した雛形 |
 | 4.1 | 片付け（worktree・ブランチ） | `cleanup`（`removeBranch`） | `cleanupAfterPr` |
 | 4.2・4.11 | 作業状態の削除（順序） | `cleanup` | `cleanupAfterPr` |
@@ -321,7 +322,7 @@ const SECRET_PATTERNS: RegExp[]; // .env*, *.pem, *.key, id_rsa*, *credentials*,
 
 ```typescript
 function resolveTemplate(worktree: string, language: "ja" | "en"): { source: "repo" | "builtin"; text: string };
-function bodyPathOf(mainPath: string, branch: string): string; // <本体>/.claude/worktrees/.brw/<alias>.md
+function bodyPathOf(mainPath: string, branch: string): string; // <本体>/.worktree/.brw/<alias>.md
 function buildTemplate(ctx: TemplateContext): string;           // 雛形に作業外の変更・検証を差し込んだ本文
 function instruction(ctx: TemplateContext): string;             // 自己完結した短い記入指示
 ```
@@ -366,7 +367,7 @@ function attachSession(main: string, sessionId: string, now: Date): { ok: boolea
 - 記録の置き場は作業状態（`<共通ディレクトリ>/brw/work/`）とは別のファイル `resume.json`（作業状態の削除・片付けの判定に影響しない。要件 7.2）。
 - **切り出し元の記録と復元（9.5）**: 片付けは作業ブランチの設定（`branch.<ブランチ>.brwBase`＝切り出し元の取り込み先）を一緒に消すため、続きの `brw pr` が既定の取り込み先（`baseBranch`）を使い、既存の PR（別の取り込み先を指す）と食い違って止まる。そこで、片付けの前に `branchBase` の値を再開の記録の `base` に入れ、`brw resume <ブランチ>` が作業場所をリモートから作り直したときに、`brwBase` が未設定・記録に有効な `base`・その `base` が宣言で認められた取り込み先（`classifyBranch` が `undeclared` でない）の場合だけ `git config branch.<ブランチ>.brwBase <base>` を設定し直す（1 行で表示する）。記録が無い・不正・宣言外なら何もしない。既に設定されている値は上書きしない。要件（7.7）は変えない。
 - **`brw resume`（引数なし）**（7.3）: 本体で `git for-each-ref refs/remotes/<リモート>/` から宣言の `workBranches` に合うブランチを取り、`git worktree list` に作業場所があるものを除き、`resume.json` の公開記録があるものを先頭にして一覧する（ネットワークを使わない。最新でなければ `git fetch` を案内）。引数ありの従来の動作は変えない。
-- **`UserPromptSubmit`**（7.4〜7.6）: Claude Code・Codex とも `agent-hooks.mjs <host> UserPromptSubmit`。入力の `cwd`（Codex は本体のまま、Claude は本体かホーム）と `session_id` から、`cwd` のリポジトリ（無ければ `CLAUDE_PROJECT_DIR` が `<本体>/.claude/worktrees/<別名>` の形のとき本体を導出）の記録を読み、`resumableFor`（同じ `sessionId`、`at` から 24 時間以内、その作業ブランチの作業場所が無い、`refs/remotes/<リモート>/<ブランチ>` がある、宣言が読めて開発ブランチ）が見つけたとき、`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<案内>"}}` を返す（案内は 500 文字以内。ブランチ名は無害化。`brw resume <ブランチ>` と `brw create <名前>` の使い分け）。**副作用なし**（作業場所の作成・記録の書き換え・通信をしない。作成は `brw resume`）。見つからなければ応答なし。
+- **`UserPromptSubmit`**（7.4〜7.6）: Claude Code・Codex とも `agent-hooks.mjs <host> UserPromptSubmit`。入力の `cwd`（Codex は本体のまま、Claude は本体かホーム）と `session_id` から、`cwd` のリポジトリ（無ければ `CLAUDE_PROJECT_DIR` が `<本体>/.worktree/<別名>` の形のとき本体を導出）の記録を読み、`resumableFor`（同じ `sessionId`、`at` から 24 時間以内、その作業ブランチの作業場所が無い、`refs/remotes/<リモート>/<ブランチ>` がある、宣言が読めて開発ブランチ）が見つけたとき、`{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<案内>"}}` を返す（案内は 500 文字以内。ブランチ名は無害化。`brw resume <ブランチ>` と `brw create <名前>` の使い分け）。**副作用なし**（作業場所の作成・記録の書き換え・通信をしない。作成は `brw resume`）。見つからなければ応答なし。
 - 登録: `hooks/hooks.json`（Claude）に `UserPromptSubmit`、`hook-install.mjs`（Codex の `.codex/hooks.json`）に `UserPromptSubmit`、`HOST_EVENTS`・`hook-diagnose.mjs` の `ROUTE_EVENTS`・信頼の診断に `UserPromptSubmit` を追加する。
 - **セッションの関連付け（旧設計・経緯）**: 以下の PostToolUse を主とする方式は、次項の実機観測を受けて改訂した。記録の `sessionId` は、片付けの時点では分からないと考えていた（`brw pr` が暗黙に始める作業には、`PostToolUse` の関連付け（`work start`・`work resume` だけが対象）が無い）。そこで、`PostToolUse`（Bash）が、信頼済みの `node <brw.mjs> pr …` の成功（`tool_response` の形は既存の `successOutput` を使う）を見たとき、`resume-record.mjs` の `attachSession(main, sessionId, now)` を呼び、**直近 2 分以内に書かれ `sessionId` が空の記録**にそのセッションを付ける（既存の `attachSession` と同じく、`PostToolUse` の関連付けという記録の更新で、作業場所の作成や通信ではない）。複数あれば最新の 1 件だけに付ける。
 - **セッションの関連付けの改訂（9.6 後半の実機の観測、2026-11-27）**: 実機の Claude Code では、片付けつきの `brw pr`（作業場所を消す）の Bash 呼び出しが「Exit code 1」と報告され、`PostToolUse` が届かない（本体で開始・3 回とも）。このため上の `PostToolUse` の `attachSession` だけでは `sessionId` が付かず、案内が届かなかった。そこで、**実行前に届く `PreToolUse`（観測した Claude Code の試行では届いた）で、信頼済みの `node <brw.mjs> pr …` の呼び出しを見たとき、セッションの手がかりを一時のメモ `<git 共通ディレクトリ>/brw/session-hint.json`（`{sessionId, dir, at}`。`dir` は呼び出しの作業場所の実パス。最新 1 件だけを置き換える。0600・一時ファイル→rename・通常ファイルだけ・サイズ上限）に書く**（許可・拒否の判定は変えない。書き込みの失敗はフックを止めない）。片付けの `finishUp` が再開の記録を書くとき、このメモを読み、**`at` が 10 分以内で、`dir` が片付ける作業場所の実パスと一致するとき**だけ `sessionId` として使う（一致しない・古い・読めない・メモが無いときは null のまま。別の作業場所の `brw pr` のメモは `dir` が違うため使われない）。`PostToolUse` の `attachSession`（ブランチ照合つき）は、届いたときの補完として残す。メモは信頼できない入力として厳密に検証する（`sessionId` は 1〜200 文字の安全な文字、`dir` は絶対パス、`at` は UTC の ISO 形式）。`; cd <本体>` を末尾につける形は、字句解析が解釈せずメモが書かれない（限界）。 **限界（要件 7.6 の許容する例外）**: 同じ作業場所で複数セッションの呼び出しが重なり、後続の呼び出しが拒否・失敗した場合やメモ書き込みに失敗した場合、別セッションのメモを採用して誤案内しうる（10 分以内・同じ作業場所）。後続の呼び出しが自分のメモを書けば置き換わり、そのセッションが採用される。
@@ -424,7 +425,7 @@ function attachSession(main: string, sessionId: string, now: Date): { ok: boolea
 - フック: 信頼済みの `brw pr` だけが確認省略の対象になる（6.1）。
 
 ### 実機（`claude -p`、使い捨てリポジトリと偽の GitHub 接続）
-- 本文ファイルを `.claude/worktrees/.brw/` へ Write ツールで確認なしに書けること（research.md #8 の再現）。片付けの後、次の Bash 呼び出しが本体で動くこと。
+- 本文ファイルを `.worktree/.brw/` へ Write ツールで確認なしに書けること（research.md #8 の再現）。片付けの後、次の Bash 呼び出しが本体で動くこと。
 
 ## セキュリティ
 
