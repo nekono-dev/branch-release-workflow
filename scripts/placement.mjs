@@ -1,75 +1,14 @@
-// 作業場所の配置先（brw-branch-gate の placement）。配置先・旧置き場の決定と、配下の判定を 1 か所に持つ。
-// 配置先は <本体>/.worktree/<別名>。旧置き場は <本体>/.claude/worktrees/ の配下（`.brw/` は PR 本文の置き場で worktree ではないため含めない）。
+// 作業場所の配置先（brw-branch-gate の placement）。配置先・旧置き場の決定と、worktree のルートの所属（4 値）を 1 か所に持つ。
+// 配置先は <本体>/.worktree/<別名>。旧置き場は <本体>/.claude/worktrees/ の直下（名前が .brw のものを除く）。
+// 判定は「worktree のルートを実体のパスにし、その親ディレクトリが配置先・旧置き場に等しいか」の一致だけで行う（research.md の D6）。
 // 副作用を持たない（ファイル・git を変えない）。Node 標準ライブラリと lib.mjs の aliasOf だけを使う。
-// 判定は実体のパス（realpath）で行う。配置先・旧置き場のディレクトリが本体の外を指すシンボリックリンクのときは、配下と認めない。
 import { lstatSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { aliasOf } from "./lib.mjs";
 
 const PLACEMENT_DIR = ".worktree";
 const LEGACY_DIR = join(".claude", "worktrees");
 const BRW_DIR = ".brw";
-
-// パス自身（シンボリックリンクを含む）が存在するか。存在しない・壊れたリンクでも、名前があれば true
-const present = (p) => {
-  try { lstatSync(p); return true; } catch { return false; }
-};
-
-// 実体のパスを返す。存在する最も深い祖先を realpath で解決し、残りは文字列で足す（存在しないパスは文字列で比べる）。
-// 解決できないとき（壊れたシンボリックリンクなど）は null
-const canonOrNull = (p) => {
-  let cur = resolve(p);
-  const rest = [];
-  while (!present(cur)) {
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    rest.unshift(basename(cur));
-    cur = parent;
-  }
-  try {
-    return join(realpathSync(cur), ...rest);
-  } catch {
-    return null;
-  }
-};
-
-// 本体の下の既定の置き場（rel）の実体のパスを返す。置き場の実体が本体の内側にあるときだけ返す。
-// 本体の内側を指すシンボリックリンクは認め、判定は実体のパスで行う（リンク名では判定しない）。
-// 本体の外を指すとき、本体そのものを指すとき、解決できない（壊れたリンクなど）ときは null
-const soundDir = (mainReal, rel) => {
-  const real = canonOrNull(join(mainReal, rel));
-  if (real === null || segmentsUnder(mainReal, real) === null) return null;
-  return real;
-};
-
-// base の下にある target の、base からの相対の区切り（セグメント）。配下でないとき null
-const segmentsUnder = (base, target) => {
-  const rel = relative(base, target);
-  if (rel === "" || isAbsolute(rel) || rel.split(sep)[0] === "..") return null;
-  return rel.split(sep);
-};
-
-// 配置先・旧置き場の両方について、target の所属を 1 回で求める。両方が真になることは無い。
-// 実体が旧置き場の領域（旧置き場の実体のディレクトリの配下。`.brw/` の下も含む）にあれば、旧置き場の判定を優先する。
-// 配置先と旧置き場の実体が重なる場合は、配置先とは認めず、安全側（旧置き場として扱う）に倒す。
-const judge = (main, target) => {
-  const none = { placement: false, legacy: false };
-  if (typeof main !== "string" || !isAbsolute(main) || typeof target !== "string" || !isAbsolute(target)) return none;
-  const mainReal = canonOrNull(main);
-  const targetReal = canonOrNull(target);
-  if (mainReal === null || targetReal === null) return none;
-
-  const placementBase = soundDir(mainReal, PLACEMENT_DIR);
-  const legacyBase = soundDir(mainReal, LEGACY_DIR);
-  const inPlacement = placementBase !== null && segmentsUnder(placementBase, targetReal) !== null;
-  const legacySegments = legacyBase !== null ? segmentsUnder(legacyBase, targetReal) : null;
-  // 旧置き場の領域（`.brw/` の下も含む）の中か
-  const inLegacyRegion = legacySegments !== null;
-  return {
-    placement: inPlacement && !inLegacyRegion,
-    legacy: inLegacyRegion && legacySegments[0] !== BRW_DIR,
-  };
-};
 
 /** 配置先のディレクトリ（`<main>/.worktree`）。main は本体の作業ツリーの絶対パス */
 export function placementRoot(main) {
@@ -86,12 +25,83 @@ export function placementPrefix() {
   return `${PLACEMENT_DIR}/`;
 }
 
-/** target が配置先の配下か（配置先ディレクトリそのものは含めない）。相対パスは配下と認めない */
-export function isUnderPlacement(main, target) {
-  return judge(main, target).placement;
+/** 生の入力に `..` の区切りがあるか（`/` と `\` で区切った要素が `..` か）。文字列でなければ真（安全側）。呼び出し側は正規化の前に使う */
+export function hasParentSegment(raw) {
+  if (typeof raw !== "string") return true;
+  return raw.split(/[\\/]/).some((s) => s === "..");
 }
 
-/** target が旧置き場（`<main>/.claude/worktrees/` の配下）の worktree か。`.brw/` の下は含めない */
+// パス自身の状態。"absent"（無い）・"link"（シンボリックリンク）・"entry"（ファイルかディレクトリ）・"error"（判定できない）
+const kindOf = (p) => {
+  try {
+    return lstatSync(p).isSymbolicLink() ? "link" : "entry";
+  } catch (e) {
+    return e?.code === "ENOENT" ? "absent" : "error";
+  }
+};
+
+// 対象の実体のパス。存在する最も深い祖先を realpath で解決し、残りの名前を足す。解決できないときは null
+const canonOrNull = (p) => {
+  let cur = resolve(p);
+  const rest = [];
+  for (;;) {
+    const kind = kindOf(cur);
+    if (kind === "error") return null;
+    if (kind !== "absent") break;
+    const parent = dirname(cur);
+    if (parent === cur) return null;
+    rest.unshift(basename(cur));
+    cur = parent;
+  }
+  try {
+    return join(realpathSync(cur), ...rest);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * worktree のルートの所属を 4 値で返す。
+ * - "placement": 配置先（`<本体の実体>/.worktree/<名前>`）
+ * - "legacy": 旧置き場（`<本体の実体>/.claude/worktrees/<名前>`。名前が `.brw` でない）
+ * - "other": 配置先でも旧置き場でもないと確認できた（内部のパス・配置先そのもの・名前の前方一致・`.brw` など）
+ * - "unknown": 判定できない。呼び出し側は必ず止める（許可・再利用・削除に使わない）
+ */
+export function placementZone(main, target) {
+  // 1) 入力の検査: 絶対パスの文字列で、生の `..` を含まない
+  if (typeof main !== "string" || typeof target !== "string") return "unknown";
+  if (!isAbsolute(main) || !isAbsolute(target)) return "unknown";
+  if (hasParentSegment(main) || hasParentSegment(target)) return "unknown";
+
+  // 本体の実体（存在しなければ判定できない）
+  let mainReal;
+  try {
+    mainReal = realpathSync(main);
+  } catch {
+    return "unknown";
+  }
+
+  // 2) 配置先・その親・旧置き場のいずれかがシンボリックリンク（または状態を判定できない）なら、対象によらず判定不能
+  const guarded = [PLACEMENT_DIR, ".claude", LEGACY_DIR].map((rel) => join(mainReal, rel));
+  if (!guarded.every((p) => ["absent", "entry"].includes(kindOf(p)))) return "unknown";
+
+  // 3) 対象の実体のパス
+  const real = canonOrNull(target);
+  if (real === null) return "unknown";
+
+  // 4) 親ディレクトリの一致
+  const parent = dirname(real);
+  if (parent === join(mainReal, PLACEMENT_DIR)) return "placement";
+  if (parent === join(mainReal, LEGACY_DIR) && basename(real) !== BRW_DIR) return "legacy";
+  return "other";
+}
+
+/** `placementZone(main, target) === "placement"`。判定不能・対象外は偽 */
+export function isUnderPlacement(main, target) {
+  return placementZone(main, target) === "placement";
+}
+
+/** `placementZone(main, target) === "legacy"`。判定不能・対象外は偽。偽を「許可してよい」の意味に使わない（`unknown` を区別するなら `placementZone` を使う） */
 export function isLegacyPlacement(main, target) {
-  return judge(main, target).legacy;
+  return placementZone(main, target) === "legacy";
 }
