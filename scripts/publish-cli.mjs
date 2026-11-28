@@ -143,7 +143,9 @@ function cmdStart(args, d) {
   if (c.error) return fail(d.io, c.error);
   const branch = currentBranch(d.cwd);
   const cls = branch ? classifyBranch(c.config, branch) : "undeclared";
-  if (cls !== "development") return fail(d.io, `'${branch ?? "（ブランチなし）"}' は${LABEL[cls]}のため、作業を始めません。開発ブランチで brw create または brw work resume を使ってください。`);
+  // 分岐元からは作業を始めないが、分岐元から保護ブランチへの PR は brw pr で作れる（brw-pr-handoff 6.2）
+  const prNote = cls === "base" ? " 分岐元から保護ブランチへの PR は brw pr で作れます（brw pr-template で本文を用意してから brw pr）。" : "";
+  if (cls !== "development") return fail(d.io, `'${branch ?? "（ブランチなし）"}' は${LABEL[cls]}のため、作業を始めません。開発ブランチで brw create または brw work resume を使ってください。${prNote}`);
   const cur = publish.currentWork(d.cwd);
   if (!cur.ok) return fail(d.io, cur.error.message);
   if (cur.work) d.io.err(`注意: 進行中の作業 ${cur.work.workId} を中断して、新しい作業を始めます。`);
@@ -272,7 +274,7 @@ async function cmdPlan(args, d) {
  *   - 作業ディレクトリ配下の相対パス
  *   - 本体の worktree 置き場（<本体>/.claude/worktrees/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）
  */
-function readBody(cwd, file) {
+export function readBody(cwd, file) {
   const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.claude/worktrees/.brw/）の配下の絶対パスで指定してください。" };
   if (file === "" || file.includes("\0") || file.split(/[\\/]/).includes("..")) return bad;
   try {

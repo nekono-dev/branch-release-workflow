@@ -1,15 +1,21 @@
 // `brw pr`（pr-flow）の統合試験。selftest.mjs から呼ばれる。偽の GitHub 接続と、実際の一時リポジトリ（本体・worktree・bare の遠隔）で確かめる。
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createGitHubSession } from "../scripts/github-client.mjs";
+import { BRW_RUN } from "../scripts/brw-cmd.mjs";
 import { runPr } from "../scripts/pr-flow.mjs";
 import { bodyPathOf, UNFILLED_MARK } from "../scripts/pr-template.mjs";
 import * as publish from "../scripts/publish.mjs";
+import { RESUME_LINE_HEAD, readRecords } from "../scripts/resume-record.mjs";
+import * as resumeRecordMod from "../scripts/resume-record.mjs";
 import { createFakeGitHub } from "./support/fake-github.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const CONFIG = { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" };
+// このリポジトリの scripts/（CLI の複製を作業場所・本体へ置くときの元）
+const REPO_SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
 const GH_SSH = "git@github.com:acme/app.git";
 const FAKE_SSH = `#!/bin/sh
 cmd=$(printf '%s' "$2" | sed "s#acme/app.git#$BRW_TEST_BARE#")
@@ -53,8 +59,38 @@ function setup({ config = CONFIG, body = "## 概要\n\n書き終えた本文\n",
   return { ...r, wt, bodyPath, fake, session };
 }
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 function require_mkdir(p) { mkdirSync(dirname(p), { recursive: true }); }
+
+// 分岐元 develop の試験（brw-pr-handoff 7.4）。main の先に develop（d1）を作り、origin へ push 済みにする。本体は develop のチェックアウト。
+const BASE_BODY = "分岐元からの本文\n";
+const BASE_PR = (head) => ({
+  number: 7, html_url: "https://github.com/acme/app/pull/7", state: "open", draft: false,
+  base: { ref: "main", repo: { id: 4242, full_name: "acme/app" } },
+  head: { ref: "develop", sha: head, repo: { id: 4242, full_name: "acme/app" } },
+});
+function setupBase() {
+  const r = mkRepoWithRemote({ branch: "main", config: CONFIG });
+  gitOut(r.dir, "remote", "set-url", "origin", GH_SSH);
+  process.env.BRW_TEST_BARE = r.remote;
+  gitOut(r.dir, "checkout", "-q", "-b", "develop");
+  writeFileSync(join(r.dir, "d1.txt"), "d1\n");
+  gitOut(r.dir, "add", "d1.txt");
+  gitOut(r.dir, "commit", "-q", "-m", "d1");
+  gitOut(r.dir, "push", "-q", "origin", "develop");
+  const bodyPath = bodyPathOf(r.dir, "develop");
+  require_mkdir(bodyPath);
+  writeFileSync(bodyPath, BASE_BODY);
+  const routes = {
+    "GET /repos/acme/app": { status: 200, body: { id: 4242, full_name: "acme/app" } },
+    "GET /repos/acme/app/pulls?state=open&head=acme:develop&per_page=100": { status: 200, body: [] },
+    "GET /repos/acme/app/pulls?state=open&head=acme:develop&base=main&per_page=100": { status: 200, body: [] },
+    "POST /repos/acme/app/pulls": { status: 201, get body() { return BASE_PR(gitOut(r.dir, "rev-parse", "HEAD")); } },
+  };
+  const fake = createFakeGitHub({ routes });
+  const transport = async ({ method, path, body: b, host }) => fake.request(method, path, b, { host });
+  const session = createGitHubSession({ host: "github.com", token: "test-token-flow-base", transport });
+  return { ...r, bodyPath, fake, session };
+}
 
 const run = async (t, args, extra = {}) => {
   const out = [];
@@ -161,6 +197,83 @@ export const runPrFlowChecks = async (eq) => {
       t.cleanup();
     }
 
+    // ---- 片付け後の再開の記録と案内（brw-pr-handoff 7.1・7.2・4.9） ----
+    {
+      const t = setup();
+      const x = await run(t, ARGS);
+      const rec = readRecords(t.dir);
+      eq("brw-pr-handoff/9.5 片付けは、切り出し元（brwBase）を再開の記録の base に入れる", rec[0]?.base, "main");
+      // 9.7: 実行前のメモ（同じ作業場所・10 分以内）の sessionId を、片付けの記録に入れる
+      {
+        const t2 = setup();
+        resumeRecordMod.writeSessionHint?.(t2.dir, { sessionId: "pre-s", dir: realpathSync(t2.wt), now: new Date() });
+        await run(t2, ARGS);
+        const r2 = readRecords(t2.dir);
+        eq("brw-pr-handoff/9.7 片付けは、同じ作業場所の実行前のメモの sessionId を記録に入れる", r2[0]?.sessionId ?? null, "pre-s");
+        eq("brw-pr-handoff/9.7 採用したメモは消費される（片付けの後、メモのファイルが無い）", existsSync(join(t2.dir, ".git", "brw", "session-hint.json")), false);
+        t2.cleanup();
+      }
+      {
+        const t3 = setup();
+        resumeRecordMod.writeSessionHint?.(t3.dir, { sessionId: "other-s", dir: join(t3.dir, "elsewhere"), now: new Date() });
+        await run(t3, ARGS);
+        eq("brw-pr-handoff/9.7 片付けは、別の作業場所のメモ（別のセッションの brw pr）を使わない", readRecords(t3.dir)[0]?.sessionId ?? null, null);
+        t3.cleanup();
+      }
+      eq("brw-pr-handoff/7.2 片付けの後に、公開した作業ブランチ・PR の URL・リポジトリ・時刻の再開の記録が残り、セッションは空", [rec.length, rec[0]?.branch, rec[0]?.prUrl, rec[0]?.repository, rec[0]?.sessionId, /\.\d{3}Z$/.test(rec[0]?.at ?? "")], [1, "dev/foo", "https://github.com/acme/app/pull/7", "acme/app", null, true]);
+      eq("brw-pr-handoff/7.1 片付けの案内は、続きの再開（brw resume）と新しい作業（brw create）を分け、本体のパスと cd を示す", [x.out.includes(`${BRW_RUN} resume dev/foo`), x.out.includes("brw create"), x.out.includes(`cd '${t.dir}'`), x.out.includes(t.dir)], [true, true, true, true]);
+      eq("brw-pr-handoff/4.9 本体でセッションを開始した場合は追加の操作が要らないことを示す", x.out.includes("ホストが本体へ戻す"), true);
+      t.cleanup();
+    }
+    {
+      // 記録の書き込みに失敗しても、片付けの結果は成功のまま、警告 1 行だけを出す
+      const t = setup();
+      mkdirSync(join(t.dir, ".git", "brw", "resume.json"), { recursive: true });
+      const x = await run(t, ARGS);
+      const warnings = x.out.split("\n").filter((l) => l.startsWith("注意: 再開の記録を書けませんでした"));
+      eq("brw-pr-handoff/7.2 再開の記録を書けなくても片付けは成功し、警告は 1 行だけ", [x.code, x.out.includes("片付けました"), warnings.length, existsSync(t.wt), branchExists(t)], [0, true, 1, false, false]);
+      t.cleanup();
+    }
+    {
+      // 分岐元からの PR は片付けないため、記録も案内も無い
+      const b = setupBase();
+      await run(b, ["--title", "分岐元からの PR"], { cwd: b.dir });
+      eq("brw-pr-handoff/7.2 分岐元からの PR は片付けないので、再開の記録を書かない", readRecords(b.dir).length, 0);
+      b.cleanup();
+    }
+    {
+      // 片付けが無効のときは何も削除せず、記録も案内も無い
+      const t = setup({ config: { ...CONFIG, afterPublish: { cleanup: false } } });
+      const x = await run(t, ARGS);
+      eq("brw-pr-handoff/7.2 片付けが無効のときは、再開の記録も続きの案内も出さない", [readRecords(t.dir).length, x.out.includes("resume dev/foo")], [0, false]);
+      t.cleanup();
+    }
+    {
+      // 片付けが止まったとき（未コミットの変更が残る）は、記録も続きの案内も無い
+      const t = setup({ mutate: ({ wt }) => writeFileSync(join(wt, "late.txt"), "PR 作成後の変更\n") });
+      const x = await run(t, ARGS);
+      eq("brw-pr-handoff/7.2 片付けが止まったときは、再開の記録を書かず、続きの案内も出さない", [x.code, readRecords(t.dir).length, x.out.includes("resume dev/foo")], [1, 0, false]);
+      t.cleanup();
+    }
+
+    // ---- 作業場所の中の CLI から brw pr を実行したとき、片付け後の案内の実行形は実在するパスになる（brw-pr-handoff 4.9・7.1） ----
+    for (const withMain of [true, false]) {
+      const t = setup();
+      // 作業場所（片付けで消える）の中に CLI の複製を置き、その複製の pr-flow を読み込んで実行する
+      cpSync(REPO_SCRIPTS, join(t.wt, "scripts"), { recursive: true });
+      if (withMain) cpSync(REPO_SCRIPTS, join(t.dir, "scripts"), { recursive: true });
+      const mod = await import(pathToFileURL(join(t.wt, "scripts", "pr-flow.mjs")).href);
+      const out = [];
+      const code = await mod.runPr(ARGS, { cwd: t.wt, session: () => t.session, stdinIsTTY: false, io: { out: (s) => out.push(String(s)), err: (s) => out.push(String(s)) } });
+      const text = out.join("\n");
+      const wtCli = join(t.wt, "scripts", "brw.mjs");
+      const mainCli = join(t.dir, "scripts", "brw.mjs");
+      eq(`brw-pr-handoff/9.4 片付けの実出力（本体の複製 ${withMain}）に、共有の案内の行の頭（RESUME_LINE_HEAD）で始まる行がある`, text.split("\n").some((l) => l.trimStart().startsWith(RESUME_LINE_HEAD)), true);
+      if (withMain) eq("brw-pr-handoff/4.9 作業場所の中の CLI で片付けたとき、本体に複製があれば、案内の実行形は実在する本体の brw.mjs を指す", [code, text.includes(`node '${mainCli}' resume dev/foo`), existsSync(mainCli), text.includes(wtCli), branchExists(t)], [0, true, true, false, false]);
+      else eq("brw-pr-handoff/4.9 作業場所の中の CLI で片付けたとき、本体に複製が無ければ、消えた作業場所のパスを示さず、利用している環境に従う手動の案内にする", [code, text.includes(wtCli), text.includes("利用している環境に従う"), text.includes("brw resume `dev/foo`"), branchExists(t)], [0, false, true, true, false]);
+      t.cleanup();
+    }
+
     // ---- 事前確認 ----
     {
       const t = setup();
@@ -169,6 +282,40 @@ export const runPrFlowChecks = async (eq) => {
       const y = await run(t, ["--bogus"]);
       eq("brw-pr-handoff/1.2 不明なオプションは使い方の誤り（終了コード 2）", y.code, 2);
       t.cleanup();
+    }
+
+    // ---- 分岐元のチェックアウトからの brw pr は、分岐元からの PR（7.3 の調整役）へ渡す（7.4） ----
+    {
+      const b = setupBase();
+      const x = await run(b, ["--title", "分岐元からの PR"], { cwd: b.dir });
+      const sent = b.fake.applied[0]?.body;
+      eq("brw-pr-handoff/7.4 分岐元のチェックアウトの brw pr は分岐元からの PR へ渡り、PR を作って終了コード 0 にする", [x.code, x.out.includes("PR を作成しました"), b.fake.writeCount], [0, true, 1]);
+      eq("brw-pr-handoff/7.4 分岐元からの PR の引数は head（分岐元）・base（保護ブランチ）・本文の実際の値", [sent?.head, sent?.base, sent?.body], ["develop", "main", BASE_BODY]);
+      eq("brw-pr-handoff/7.4 分岐元からの PR は作業の記録を作らず、分岐元のブランチが残る", [existsSync(publish.stateFileOf(b.dir)), gitOut(b.dir, "branch", "--show-current")], [false, "develop"]);
+      b.cleanup();
+    }
+
+    // ---- 分岐元でも開発ブランチでもない場所は、理由と手順を示して止まる（書き込み 0） ----
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "main");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 保護ブランチの上では、保護ブランチの理由と分岐元での実行の手順を示して止まり、書き込みは 0", [x.code, x.err.includes("保護ブランチ"), x.err.includes("分岐元"), x.err.includes("開発ブランチではないため"), p.fake.writeCount], [1, true, true, true, 0]);
+      p.cleanup();
+    }
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "-b", "feature/x");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 宣言の範囲外のブランチでは、宣言の確認と brw create を示して止まり、書き込みは 0", [x.code, x.err.includes("宣言"), x.err.includes("brw create"), p.fake.writeCount], [1, true, true, 0]);
+      p.cleanup();
+    }
+    {
+      const p = setupBase();
+      gitOut(p.dir, "checkout", "-q", "--detach");
+      const x = await run(p, ["--title", "t"], { cwd: p.dir });
+      eq("brw-pr-handoff/1.4 detached HEAD では、ブランチを確定できない理由と手順を示して止まり、書き込みは 0", [x.code, x.err.includes("detached HEAD"), x.err.includes("ブランチ"), p.fake.writeCount], [1, true, true, 0]);
+      p.cleanup();
     }
   } finally {
     for (const [k, v] of [["GIT_SSH_COMMAND", saved.cmd], ["GIT_SSH_VARIANT", saved.variant], ["BRW_TEST_BARE", saved.bare]]) {

@@ -90,22 +90,25 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 
 ## 作業ブランチ運用の操作の確認の省略（`autoApprove`）
 
-作業ブランチ運用では、作業ブランチへの push と、作業ブランチから切り出し元（`baseBranch`）への PR の作成は、利用者の許可なしで行ってよい。`autoApprove` を登録すると、これをエージェントへの指示ではなく設定として許可する。フックが `permissionDecision: "allow"` を返し、Claude Code は確認なしで実行する。settings.json の `permissions.deny` に書いた拒否ルールはこれより優先される。
+作業ブランチ運用では、作業ブランチへの commit と push、および作業ブランチから切り出し元（`baseBranch`）への PR の作成は、利用者の許可なしで行ってよい。`autoApprove` を登録すると、これをエージェントへの指示ではなく設定として許可する。フックが `permissionDecision: "allow"` を返し、Claude Code は確認なしで実行する。settings.json の `permissions.deny` に書いた拒否ルールはこれより優先される。
 
 ```json
-"autoApprove": { "push": true, "pullRequest": true }
+"autoApprove": { "push": true, "pullRequest": true, "commit": true }
 ```
 
-既定値は有効である。`autoApprove` を省くか、キーを省いた項目は確認を省く（上の例の `"autoApprove": { "push": true, "pullRequest": true }` は省略できる同じ既定値を明示したもの）。確認を求めたい項目だけ `false` を明示する（例: `"autoApprove": { "push": false }`）。無効化を取り消すには、その `false` を削除して commit する。旧版（旧パスの宣言）は未指定を確認が必要と扱っていたため、旧パスの宣言を移行するときは `brw setup --migrate` が変更点を表示する（[導入手順の移行](setup.md#6-旧パスの宣言を移行する)）。
+既定値は有効である。`autoApprove` を省くか、キーを省いた項目は確認を省く（上の例の `"autoApprove": { "push": true, "pullRequest": true, "commit": true }` は省略できる同じ既定値を明示したもの）。確認を求めたい項目だけ `false` を明示する（例: `"autoApprove": { "pullRequest": false }`）。無効化を取り消すには、その `false` を削除して commit する。旧版（旧パスの宣言）は未指定を確認が必要と扱っていたため、旧パスの宣言を移行するときは `brw setup --migrate` が変更点を表示する（[導入手順の移行](setup.md#6-旧パスの宣言を移行する)）。
 
 | キー | 対象 |
 | --- | --- |
 | `push` | 作業ブランチへの `git push` |
 | `pullRequest` | 作業ブランチから切り出し元への `gh pr create --base <baseBranch>` |
+| `commit` | 開発ブランチへの通常の `git commit`。既定は有効、明示的な `false` だけが無効 |
+
+`commit` の確認省略は、宣言が登録済みで、作業ツリーの宣言が `HEAD` と一致するときに効く。対象は、開発ブランチへの通常の commit と、`git add`・commit・push だけを `&&` で連ねた形（SKILL.md の「作業の区切りと終了前の確認」の手順）である。次は確認を省かず、通常の確認に回す。`--amend`・`--no-verify`、設定の上書き（`git -c`）、環境変数の前置、メッセージに展開（`$(…)`・バッククォートなど）を含む commit、`--fixup`・`--squash`・`-C`・`-t`・`-e` を伴うもの。
 
 許可はコマンド全体に効くため、次のどれかに当たるコマンドは確認を省かず、通常の確認に回す（拒否はしない）。
 
-- `git push`・`gh pr create` と `cd <dir>` を `&&` で連ねた以外の形（引用符の外の `;`・`||`・`&`・括弧、`tail`/`head` 以外へのパイプ、ファイルへのリダイレクト、引用符の外か二重引用符の中の `$`・`` ` ``・`\`）。PR の本文に展開が要るときは `--body-file` を使う
+- 確認を省く形（先頭の任意の `cd <dir>` に続く単独の `git push`・`gh pr create` などの操作、または先頭の任意の `cd <dir>`、`git add`（`-A`・`-u`・`--all`・`-N`・`-v` とパスだけ）、通常の commit、`git push` の区間だけを `&&` で連ねたもの。`gh pr create` は `&&` の連結に含めない）以外の形（`git add -f` などの他のオプション、引用符の外の `;`・`||`・`&`・括弧、`tail`/`head` 以外へのパイプ、ファイルへのリダイレクト、引用符の外か二重引用符の中の `$`・`` ` ``・`\`）。PR の本文に展開が要るときは `--body-file` を使う
 - 環境変数の前置や `git -c` を伴うもの
 - 強制（`-f`・`--force*`・`+refspec`）・削除（`--delete`・`:branch`）・タグ・`--all`・`--mirror`・`--no-verify`
 - 送り先に保護ブランチや宣言外のブランチを含む push
@@ -113,7 +116,11 @@ push は送り先の引数（`HEAD:main`、`refs/heads/...` など）から実�
 - `--base` が `baseBranch` でないか省いた PR、取り込み元が作業ブランチでない PR、`-R`（他のリポジトリ）・`--web` を伴う PR
 - 宣言が未登録か、作業ツリーで `HEAD` から書き換えたもの（作業中に自分で許可を足せないようにする）
 
-切り出し元・保護ブランチへのマージ（`gh pr merge` など）は対象外で、常に確認を求める。Codex の `brw guard` には影響しない。
+エージェントによる `gh pr merge`・GitHub の API・MCP のマージ・自動マージの予約は常に拒否される（確認ではなく拒否）。分岐元向けは利用者が自分の端末で `brw pr-merge` を実行する。`brw pr-merge` も `autoApprove` の対象外で、利用者が自分の端末で実行する。詳しくは SKILL.md の 4 章と `references/setup.md` の「PR のマージ（利用者の端末）」。
+
+`autoApprove.push: false` は、push の確認省略を無効にする設定である。push はフックの通常の承認に任せる。さらに、区切りの push の指示と応答の終了時の未 push の案内では、push の禁止として扱い、commit までにとどめて未 push を報告する（未コミットの変更の案内は残る）。
+
+分岐元（`baseBranch`）から保護ブランチへの PR は、`brw pr` で作る。`autoApprove.push: false` のときは、この PR も通常の承認に回る（`brw pr` が承認を求めたら、案内された `--confirmed` の全文を利用者が自分の端末で実行する）。手順は SKILL.md の 4 章の「分岐元から保護ブランチへの PR」。
 
 ### 基底の更新・取り込みの確認の省略
 

@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: commits-and-pushes-at-boundary
+expected_outcome: |
+  dev/design-note の worktree で、設計メモ docs/design-note.md だけを git add し、git commit し、git push して origin へ反映する。許可は求めない。応答を終える前に brw guard --finish を実行し、全 worktree に残りが無いことを確かめる。git add -A は使わない。
+context:
+  scaffold_script: place-files.sh

@@ -18,6 +18,7 @@ export const CODEX_HOOKS = [
   { event: "PermissionRequest", matcher: "mcp__.*" },
   { event: "PostToolUse", matcher: "Bash" },
   { event: "Stop", matcher: null },
+  { event: "UserPromptSubmit", matcher: null },
 ];
 
 /** Claude プラグインの hooks/hooks.json に必要な登録（プラグインのイベントを agent-hooks.mjs へ渡す）。 */
@@ -27,11 +28,12 @@ const CLAUDE_HOOKS = [
   { event: "PreToolUse", matcher: "mcp__.*" },
   { event: "PostToolUse", matcher: "Bash" },
   { event: "Stop", matcher: null },
+  { event: "UserPromptSubmit", matcher: null },
 ];
 
 // 自分の定義: コマンド全体が `node '<絶対パス>/scripts/agent-hooks.mjs' codex <イベント>` の形に一致するものだけ。
 // 前後に別の語があるもの（利用者の類似コマンド）は自分の定義とみなさない。
-const MANAGED_RE = /^node '(\/(?:[^']|'\\'')*\/scripts\/agent-hooks\.mjs)' codex (PreToolUse|PermissionRequest|PostToolUse|Stop)$/;
+const MANAGED_RE = /^node '(\/(?:[^']|'\\'')*\/scripts\/agent-hooks\.mjs)' codex (PreToolUse|PermissionRequest|PostToolUse|Stop|UserPromptSubmit)$/;
 // 旧 brw.mjs hook の定義（`node <パス>/brw.mjs hook` の全体一致）
 const LEGACY_RE = /^node (?:'(?:[^']|'\\'')*\/brw\.mjs'|"[^"]*\/brw\.mjs"|[^\s'"]*\/brw\.mjs) hook$/;
 const CLAUDE_CMD_RE = (event) => new RegExp(`^node "\\$\\{CLAUDE_PLUGIN_ROOT\\}/scripts/agent-hooks\\.mjs" claude ${event}$`);

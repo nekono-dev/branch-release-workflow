@@ -117,3 +117,359 @@ node tests/real-env/host-events.mjs --reset-counter      # 呼び出し回数の
 - **MCP の matcher（`mcp__.*`）**: MCP サーバーを用意していないため、正規表現としての解釈は実機で未観測（Bash の matcher は両ホストで届いた）。
 - **Codex の信頼承認の実操作**: `/hooks` での承認は自動化できないため未実施。信頼済みはバイパスフラグで、未承認はフラグなしで観測した。なお `codex app-server` の `hooks/list` が各フックの `trustStatus` と `currentHash` を返すため、信頼状態の読み取りは今後可能（診断の `codexTrust` は現状、呼び出し側の入力）。
 - **クラウド（管理対象フック）**: 本環境では確認できない。診断は `unsupported`（managed-hooks-required）のまま。
+
+# Stop の観測（brw-enforcement 14.1）
+
+Stop の block と再入（`stop_hook_active`）、worktree へ移った後の Stop の作業ディレクトリを、実際の Claude Code と Codex で 1 回ずつ観測する。BRW（scripts/）には依存せず、記録用の Stop フックだけを使う。`BRW_REAL_ENV=1` のときだけ動く。
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/stop-observe.mjs --dry-run            # 呼び出しなしで計画を表示
+node tests/real-env/stop-observe.mjs --host claude        # Claude を 1 回呼び出して判定
+node tests/real-env/stop-observe.mjs --host codex         # Codex を 1 回呼び出して判定
+```
+
+- 作業場所は `/tmp/brw-real-env/stop-observe/<ホスト>-*/`（本体と worktree は一時リポジトリ。作業の記録・状態ファイルは作らない）。登録ファイル（`.claude/`・`.codex/`）は本体の `.git/info/exclude` で未追跡の表示から外す。worktree は本体の `.claude/worktrees/wt` に作る（`poc/claude-stop-cwd.sh` で Stop の作業ディレクトリが worktree に追従した配置と同じ。本体の外に置くと、シェルの `cd` が引き継がれず本体で Stop が起きて観測できなかった）。
+- 判定は 2 項目: (a) 1 回目の Stop が未コミットの変更で block され、`stop_hook_active:true` の再入は block されずに通る、(b) すべての Stop の作業ディレクトリが worktree と一致する。
+- 結果は標準出力に、ホスト・版・日時つきの Markdown として出る。「観測結果の要約」へ追記する。記録が無い・想定と違う結果は「未観測」「不一致」と書き、成功として扱わない。
+- 呼び出し回数は host-events.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。Codex だけ `--dangerously-bypass-hook-trust` を 1 回の呼び出しに付ける。利用者の `~/.claude`・`~/.codex` の設定は書き換えない。
+
+## Stop の観測の結果（実行日 2026-11-26）
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| 応答の終了を 1 回止め、再入（`stop_hook_active:true`）で通る | 一致 | （未判定。Stop の cwd が worktree でなく、未コミットの変更を検出できなかったため block されなかった） |
+| worktree へ移った後の Stop の作業ディレクトリ | 一致（worktree） | **不一致**（起動時の本体のまま。エージェントは worktree でファイルを作っていた） |
+
+- Codex のフックの信頼は、一時の `CODEX_HOME`（`config.toml` にプロジェクトの信頼、`auth.json` は利用者のファイルの一時のコピー。権限 0600、実行の後は削除）で渡す。0.172 では `-c projects."<dir>".trust_level` が効かない（0.167 では効いた）。
+
+
+# 標準入出力の端末判定の観測（brw-enforcement 14.2）
+
+`brw pr-merge` は、対話の端末（人が操作する画面）から実行されたときだけマージを行う（要件 3.5）。その前提として、エージェントの Bash やシェルで実行したときに、標準入力・標準出力が「端末」として渡されないことを、実際の Claude Code と Codex で観測する。「端末」は、キーボード入力と画面表示を持つ入出力の先（Node では `isTTY` が `true`）を指す。
+
+`BRW_REAL_ENV=1` のときだけ動く。BRW（scripts/）には依存せず、記録用の 1 ファイルの Node スクリプトだけを使う。
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/tty-observe.mjs --dry-run            # 呼び出しなしで計画を表示
+node tests/real-env/tty-observe.mjs --host claude        # Claude を 1 回呼び出して判定
+node tests/real-env/tty-observe.mjs --host codex         # Codex を 1 回呼び出して判定
+```
+
+- 作業場所は `/tmp/brw-real-env/tty-observe/<ホスト>-*/`（リポジトリ外）。記録用スクリプト `probe.mjs` と記録 `tty.jsonl` を置く。ホストには、このスクリプトを次の 2 通りで実行させる。
+  - `direct`: 直接の実行（期待: 標準入力・標準出力の `isTTY` が `undefined` または `false`）
+  - `pty`: `script -qc '…' /dev/null` 経由の実行（疑似端末を作って子プロセスに渡す。期待: `isTTY` が `true`）
+- 判定は 4 項目。`direct` の記録はすべて両方が端末でないこと、`pty` の記録はすべて両方が端末に見えること（どちらも一致）。1 件でも想定と違えば「不一致」。記録が無い、ホストが非ゼロ終了・タイムアウトした場合、または解析できない行（壊れた JSON）が 1 件でもある場合は、記録が揃っていても総合を「未観測」とする（一致とは書かない）。
+- **確認の限界**: `pty` の結果は、エージェントが疑似端末を作れば端末判定を満たせることを示す。つまり端末判定は協調的なエージェントの誤用を防ぐもので、迂回を防ぐ強制ではない（設計の「確認の強さと限界」）。
+- Codex の信頼は使わない（フックを使わない）。Codex は一時の `CODEX_HOME`（作業場所の中。認証は利用者の `auth.json` の一時のコピーで、権限 0600。実行の後は削除する）を指して、`codex exec -s workspace-write` で実行する。利用者のファイルはコピー元として読むだけで、Codex が書き込んでも変わらない。利用者の `~/.claude`・`~/.codex` は書き換えない。
+- 呼び出し回数は stop-observe.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。
+
+## 観測結果
+
+（未追記。実行結果は親が本節へ追記する。出力の Markdown は `tty-observe.mjs` が標準出力に出す。）
+
+## 端末判定の観測の結果（実行日 2026-11-26、`BRW_REAL_ENV=1 node tests/real-env/tty-observe.mjs --host both`）
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| 直接の実行（Bash・パイプ）で標準入力・標準出力が端末として渡されない | 一致（どちらも `undefined`） | 一致（どちらも `undefined`） |
+| `script` 経由の実行で標準入力・標準出力が端末に見える（確認の限界） | 一致（どちらも `true`） | 一致（どちらも `true`） |
+| ホストの実行（終了コード 0・タイムアウトなし） | 一致 | 一致 |
+
+- 要件 3.5（`brw pr-merge` が、エージェントなど対話端末でない実行から呼ばれたときマージしない）の前提は両ホストで成り立つ。一方、エージェントが疑似端末を作れば端末判定は満たされるため、`brw pr-merge` の端末判定は協調的なエージェントの誤用を防ぐもので、悪意ある迂回を防ぐ強制ではない（design.md「PR のマージ（利用者の端末）」の「確認の強さと限界」）。
+- Codex は一時の `CODEX_HOME`（認証は一時のコピー。実行の後に削除）で実行した。生の出力は実行時の `/tmp/brw-real-env/tty-observe/<ホスト>-*/`。
+- Codex の再観測（2026-11-26、認証は一時のコピー・実行後に削除）: 端末判定・Stop の観測とも総合「一致」。利用者の `~/.codex/auth.json` のハッシュは実行の前後で同じだった。
+- 記録の検証（`tty-observe.mjs`・`stop-observe.mjs` 共通）: 記録の 1 行ごとに、必須項目と型・値（`mode` は `direct`/`pty`、`stdin`/`stdout` は `undefined`/`false`/`true` の文字列、Stop の記録は `stop_hook_active`・`block` が真偽値、など）を検査する。構文エラーも形式の不正も「不正な行」として数え、1 件でもあれば総合を「一致」にしない（想定外の正規の値があれば「不一致」、それ以外は「未観測」）。未知の追加項目と空行は許可する。
+
+## 追加した規則の実環境の確認（19.2）
+
+追加した規則（開発ブランチの確認省略・保護ブランチの拒否・Stop の block と再入・`brw pr-merge` の端末限定）を、実ホストと実 GitHub で観測する。`BRW_REAL_ENV=1` を付けたときだけ動く。
+
+### 実行の状態
+
+- 観測は実行済みで、結果は末尾の「追加した規則の実環境の確認の結果（19.2）」に記録した。この節の手順は、その結果を再現するためのもの。
+- 結果の判定に使わなかった項目（記録が無い・根拠が揃わないもの）は「未観測」として扱う。
+
+### 手順
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/enforce-observe.mjs --stage hosts --host claude --dry-run   # 呼び出しなしで計画を表示
+node tests/real-env/enforce-observe.mjs --stage hosts --host claude            # 本番（ホストを最大 4 回呼ぶ）
+node tests/real-env/enforce-observe.mjs --stage hosts --host codex             # 本番（最大 4 回）
+node tests/real-env/prepare.mjs                                                 # merge 段階の前に状態ファイルを作る
+node tests/real-env/enforce-observe.mjs --stage merge --dry-run                # 計画のみ（GitHub へ書き込まない）
+node tests/real-env/enforce-observe.mjs --stage merge                          # 本番（使い捨てブランチ 3 本と PR 2 件だけ）
+node tests/real-env/cleanup.mjs                                                 # 記録されたものだけを削除
+```
+
+- `hosts` 段階（H1・H2・H3・H3w の 4 シナリオ、ホストごと最大 4 回）: origin は GitHub 形式の URL だが、試験用 ssh でローカルの bare リポジトリへ向ける。`gh` は偽物で、呼ばれたら失敗する。フックは `hook-logger.mjs` を挟み、記録（`<作業場所>/hook-log/<ホスト>.jsonl`）と作業場所の Git の状態から判定する。作業場所は `/tmp/brw-real-env/enforce-observe/` 配下。Codex は一時の `CODEX_HOME` を使う（実行の後に削除）。
+- `merge` 段階: 使い捨てブランチ `verify/brw-base-<epoch>`・`verify/brw-prot-<epoch>`・`dev/verify-merge-<epoch>` を main の現在の commit から作り、PR-1（head → 分岐元）と PR-2（head → 保護扱い）を立てる。`brw pr-merge` を非端末（M1）・疑似端末で入力なし（M2）・`n`（M3n）・`y`（M3y）で実行し、エージェントのフック経路（M4a・M4b）を `scripts/agent-hooks.mjs` に実際の入力の形で渡す。疑似端末は `script` を使い、プロンプト `マージしますか [y/N]` の出力を待ってから答えを送る（60 秒で打ち切る）。
+
+### 安全制約
+
+- GitHub へ書き込むのは、上の使い捨てブランチ 3 本と PR 2 件だけ。main・既存のブランチ・既存の PR・Ruleset・リポジトリ設定には書き込まない。`hosts` 段階は GitHub へ書き込まない。
+- 使い捨てブランチと PR は `prepare.mjs --record` で状態ファイルに記録し、`cleanup.mjs` が記録されたものだけを削除する（`dev/verify-merge-<番号>` の名前も削除対象に含める。既に閉じた PR・マージ済みの PR は閉じ直さない）。
+- `brw pr-merge` の M1 は `GH_TOKEN` を無効な値にして実行する。`refs` が変わらないことで書き込みが無いことを確かめる。
+- 利用者の `~/.claude`・`~/.codex` は読み書きしない。Codex の認証は一時のコピーで、実行の後に消す。
+- 資格情報（トークン）は表示・記録しない。
+- 呼び出し回数は既存の共有カウンタ（`events/calls.json`。Claude 12 回・Codex 14 回の上限）に加算する。`hosts` 段階は 1 ホストあたり最大 4 回。
+
+### 記録の検証規則
+
+- フックの記録（`hook-log/<ホスト>.jsonl`）の 1 行ごとに、時刻 `ts`（日時の文字列）、`host`（想定のホスト）、`event`（空でない文字列）、`input`（オブジェクト）、`stdout`（空、または JSON のオブジェクト）、`exit`（整数）を検査する。構文エラーも形式の不正も「不正な行」として数え、1 件でもあればそのシナリオを「記録不正」とし、一致にしない。
+- ホストの終了コードが 0 以外、またはタイムアウトのときは一致にしない（「未観測」）。
+- merge 段階の観測（M1・M2・M3n・M3y・M4a・M4b）は、6 件すべてがそろい、形式が正しく、条件（終了コード・PR の状態の読み戻し・refs の不変・squash の親が 1 つ・マージ commit が分岐元の先頭と一致など）をすべて満たしたときだけ「一致」。欠けは「未観測」、条件外れは「不一致」、形式の不正や重複は「記録不正」。
+- 根拠の厳密さ: H1・H2 は、`git add … && git commit …` が同じ Bash 呼び出し（同じ command）に含まれる記録だけを根拠にする（分けて実行した記録は未観測）。H1 の allow・H2 の deny・H3 の block は、終了コード 0 で応答が期待どおりの JSON のときだけ一致とする。再入（stop_hook_active:true）の応答なしは、終了コード 0 で stdout が空（空白のみを含む）のときだけ一致とし、block・他の JSON・非 0 の終了コードは不一致とする。
+- M1 は「利用者が自分の端末」を含み、質問（`マージしますか`）を含まないこと。M2 は「保護ブランチ」「GitHub 上」を含み、質問を含まないこと（入力を送っていない）。M3n は PR の表示（番号・タイトル・取り込み・head の SHA）→ 質問 → 送った入力 `n` → `中止しました` の順で、終了コード 1・PR は open・refs 不変のときだけ一致。M3y は同じ表示・質問・入力 `y`・`マージしました` の順で、終了コード 0・PR は merged・squash（親が 1 つ）・head は残る、のときだけ一致。
+- 想定と異なる結果は「不一致」、記録が無いものは「未観測」と書き、成功扱いにしない。
+
+## 追加した規則の実環境の確認の結果（19.2、実行日 2026-11-27）
+
+Claude Code 2.1.329・codex-cli 0.172.0、実 GitHub（`nekono-dev/branch-release-workflow` の使い捨てブランチだけ）。判定は記録の検証（1 行ごとの必須項目の型・値、ホストの終了コード、フックの終了コードと応答、プロンプトの表示と送った入力の順序）を通した結果で、想定と異なるものは成功として記録していない。
+
+経緯: 最初の実行の後、レビューで判定の緩さ（M3n・M2 がプロンプトの有無を見ない、Stop の再入が JSON 応答を通す、H1 が `git add` と `git commit` の別呼び出しを通す）を指摘され、判定を厳密にして実環境をもう一度実行した。厳密化した判定の最初の merge 実行では、判定側が `brw pr-merge` の表示（タイトルとブランチ名をバッククォートで囲む）と合わず M3n・M3y が「不一致」になった（実際の動作は正しかった）。判定を直して再実行した結果が下の表（merge 段階の最終実行は PR #17・#18）。
+
+| 項目 | Claude Code 2.1.329 | Codex 0.172.0 |
+|---|---|---|
+| H1 開発ブランチの `git add … && git commit …`（複合）の確認省略 | **一致**: PreToolUse が allow（`登録済みの宣言に従う通常の commit`）で、確認なしに commit が作られた。続く Stop が「未 push の commit が残っている」と 1 回止め、モデルは push まで進めて終了コード 0（最初の実行は `--max-turns 4` の上限で終了コード 1 となり「未観測」と判定された。上限を 8 にして再実行し一致。bare に `記録` の commit が反映されていたことも確認） | **未観測**: PreToolUse は応答なし（Codex は allow を返せない）、`codex exec` では PermissionRequest が届かず、サンドボックス（workspace-write）が `.git` を書き込み禁止にするため commit も作られなかった。8.4 で記録した既存の制約と同じで、本件の変更の不具合ではない。承認方針 `on-request` の対話（TUI）での allow の実到達は、この環境では観測できていない |
+| H2 保護ブランチ main の commit の拒否 | **一致**: PreToolUse の deny、HEAD 不変、終了コード 0 | **一致**: 同じ |
+| H3 未コミットのまま終わる応答の Stop | **一致**: 1 回目が block（理由に「未コミット」と `new.txt`）、再入（`stop_hook_active:true`）は応答なしで通る、終了コード 0 | **一致**: 同じ |
+| H3w 別の worktree に残した未コミットの Stop | **一致**: block・再入の通過 | **一致**: block・再入の通過（Codex の Stop の cwd が本体のままでも、全 worktree の走査で検出） |
+| M1 非端末の `brw pr-merge` | 終了コード 1、「利用者が自分の端末」、PR は open のまま、`refs` は不変（`GH_TOKEN` を無効にしても同じ＝通信なし） | （ホスト非依存） |
+| M2 保護扱いの取り込み先への `brw pr-merge`（疑似端末） | 質問の前に拒否（「保護ブランチです…GitHub 上でマージしてください」）、終了コード 1、PR は open のまま | （同上） |
+| M3n 分岐元向けの `brw pr-merge` に `n`（疑似端末） | 「中止しました」、終了コード 1、PR は open のまま | （同上） |
+| M3y 同じく `y` | 終了コード 0、PR は merged、マージ commit が分岐元ブランチの先頭と一致、squash（親 1 つ）、head のブランチは削除されない | （同上） |
+| M4a エージェントの Bash の `node <brw> pr-merge <番号>` | PreToolUse の deny（`pr-merge-by-agent`、案内に「利用者が自分の端末で実行」） | （フック入力を直接渡して確認。Claude と Codex は同じ判定の経路） |
+| M4b エージェントの `gh pr merge` | PreToolUse の deny、案内に `brw pr-merge`（「分岐元向けは別の端末で、保護ブランチ向けは GitHub 上」） | 8.4 の再実行（X3）でも deny を確認（Codex の PreToolUse） |
+
+- 8.4 の `host-events.mjs` を、新しい案内文・Stop の統合のもとで再実行した（誤って `--reset-counter` に全シナリオが続いて走った）。Claude は C1〜C8 すべて OK。Codex は X1〜X7 のうち X3 だけが NG: `git push` のサンドボックス内での追跡参照の更新失敗（`.git` が読み取り専用）による既存の制約で、`gh pr merge`・`--auto`・`gh pr create` の deny と新しい案内（`brw pr-merge`）は届いていた。ほかは OK。
+- 後片付け: 使い捨てブランチ `verify/brw-base-*`（2 本）・`verify/brw-prot-*`・`dev/verify-merge-*`、PR #17（マージ済み）・#18（クローズ）、一時クローン・一時 HOME を削除した。`main` の commit は不変（`bd2c9b8`）。
+- 未確認のもの: Codex の対話（TUI）での PermissionRequest の allow の実到達、Claude Code の `!` での実行が端末判定を満たすか（SKILL.md は「可能性がある」と書き別の端末を案内）、Windows など他の環境。
+
+### 観測の道具の判定に残る制約（19.2 のレビューで指摘され、受け入れたもの）
+
+判定を変えるたびに実 GitHub・実ホストの再実行が要るため、次の緩さは直していない。結果の表は、これらに頼らず、実行ごとに観測の生の記録と GitHub の読み戻しを人が確認したものである（refs の不変・PR の状態・マージ commit の親の数・`main` の SHA を `gh api` で読み直した）。
+
+- H2: 複合コマンドの deny が 1 件あれば、同じ呼び出しの別の記録が非 0 終了や応答なしでも一致にする（該当する各記録の終了コード・応答を個別には確かめない）。
+- M1〜M3n の「refs 不変」: 読み取りに失敗した ref と存在しない ref をどちらも `null` として数えるため、前後とも読み取りに失敗すると不変と誤って判定しうる。
+- H1・H2 の複合コマンドの判定: `git add … && git commit …` が同一の Bash 呼び出しにあることは確かめるが、引用文字列の中の例（`echo 'git add x && git commit …'`）と区別しない。
+- M4b: deny と終了コードだけを確かめ、案内文（`brw pr-merge`・取り込み先別の案内）は判定に含めない（案内文の内容は単体試験と、host-events.mjs（C3・X3）が実機の応答を表示して確かめる）。
+
+## 分岐元からの PR の実環境の確認（brw-pr-handoff 5.2・8.2）
+
+分岐元（`develop` など）から保護ブランチへの PR を、GitHub の API（5.2）と実機の Claude Code（8.2）で観測する。`BRW_REAL_ENV=1` を付けたときだけ動く。スクリプトは `tests/real-env/base-pr-observe.mjs`、判定の単体試験は `tests/base-pr-observe.mjs`（selftest に登録）。
+
+### 手順
+
+```sh
+export BRW_REAL_ENV=1
+node tests/real-env/prepare.mjs                                              # 状態ファイルを作る（前提）
+node tests/real-env/base-pr-observe.mjs --stage api --dry-run               # 計画のみ（書き込みなし）
+node tests/real-env/base-pr-observe.mjs --stage api                         # 本番（使い捨てブランチ 3 本と PR 1 件まで）
+node tests/real-env/base-pr-observe.mjs --stage host --dry-run              # 計画のみ（claude を呼ばない）
+node tests/real-env/base-pr-observe.mjs --stage host                        # 本番（claude を 1 回呼ぶ）
+node tests/real-env/cleanup.mjs                                              # 記録されたものだけを削除
+```
+
+- `api` 段階（5.2）: main の commit から使い捨てブランチ `verify/brw-bpr-base-<epoch>`（分岐元役）・`verify/brw-bpr-prot-<epoch>`（保護役）・`verify/brw-bpr-same-<epoch>`（差なしの確認用）を作る。分岐元役に contents API で 1 commit を、`branch=` を指定して作る（main には書かない）。A1: head を分岐元役、base を保護役とする PR を作り、201・読み戻しの base・head・open を見る。A2: 同じ commit の組で PR を作り、422 と「No commits between」を見る。
+- `host` 段階（8.2）: 分岐元役に宣言 `.branch-release-workflow.json` を contents API で commit し（登録済みにして確認省略を効かせる）、実 GitHub を匿名で clone して分岐元役をチェックアウトする。宣言・本文・フックの設定は clone の中だけに置く（`.git/info/exclude` で除外）。順序は次のとおり。
+  - B3（承認が必要な宣言。編集中の宣言は未登録扱い）: 非端末で `brw pr` を直接実行し、`--confirmed` の案内で終了コード 1 になり、PR が作られないことを見る。PR が無い段階で行う必要がある（既存の PR があれば作成の判定より前に再利用されるため）。
+  - B3c: 非端末で `--confirmed` を付けた `brw pr` が、通信の前に拒否されることを見る。
+  - B1: 宣言を元に戻し、`claude -p`（Haiku・`--max-turns 10`・`--setting-sources project`・Bash のみ許可）に `brw pr-template` で本文を記入させ、`brw pr` を実行させる。PR が 1 件作られ、分岐元役のブランチ・clone の HEAD・リモートの先頭・`.git/brw` が変わらないことを見る。フックの記録（`hook-log/claude.jsonl`）で、両方の Bash が PostToolUse まで記録され、直接の `gh pr create` が無いことを確かめる。
+  - B2: 同じ `brw pr` を直接実行し、「PR を再利用しました」と同じ URL が出て、PR が 1 件のままであることを見る。
+
+### 安全制約
+
+- GitHub へ書き込むのは、使い捨てブランチ（`verify/brw-bpr-*`）3 本と、PR（`api` で 1 件、`host` で 1 件）だけ。PR はマージしない。main・既存のブランチ・既存の PR・Ruleset・リポジトリ設定には書かない。
+- 作ったブランチと PR は `prepare.mjs --record` で状態ファイルに記録し、`cleanup.mjs` が削除する（ブランチ名は `verify/` で始まり、削除対象の検査を通る）。
+- 後始末の順序: 記録された使い捨てブランチごとに、そのブランチを head とするオープンな PR を GitHub に問い合わせて閉じてから、ブランチを削除する。問い合わせや PR のクローズに失敗したブランチは削除せず、失敗として表示する。PR の番号が読めなかった作成は、head で PR を探して記録する（探せなければ中止）。`cleanup.mjs` は、この観測の一時クローンと出力の置き場（`base-pr-observe/`）も消す。
+- 生の出力は `/tmp/brw-real-env/base-pr-observe/` に残るが、`cleanup.mjs` で消える。そのため標準出力の末尾に観測の要点（コマンド・終了コード・出力の先頭 300 字・読み戻した PR の状態）を出す。
+- トークンは表示・記録しない。`brw pr` は既存の認証（GH_TOKEN・gh のログイン）をそのまま使い、観測のコードは資格情報を渡さない。
+- 利用者の `~/.claude` は読み書きしない。フックは `hook-logger.mjs` を挟み、記録先は `BRW_HOOK_LOG_DIR`（一時の場所）。
+- Claude の呼び出しは共有カウンタ（`events/calls.json`）に加算し、上限は 3 回（`host` 段階は 1 回）。
+
+### 記録の検証規則
+
+- 判定は観測ごとに、ID（`A1`・`A2`・`B1`・`B2`・`B3`・`B3c` のどれか）、日時、コマンド、終了コード（整数）、出力（文字列）、facts（必須の項目の型・値）を検査する。欠け・型の誤り・想定外の ID・重複・解析できないフックの記録の行は「記録不正」とし、一致にしない。
+- 読み取りの失敗（`null`）は「未観測」。ホスト（claude）の終了コードが 0 以外・タイムアウトも「未観測」（不一致にしない）。
+- 想定との違い（PR の状態・ref や HEAD の変化・`.git/brw` の存在・出力の書式・記録に無いコマンド・直接の `gh pr create` の使用）は「不一致」。
+- 出力の書式は `scripts/base-pr.mjs` の文言に合わせる（「PR を作成しました: <URL>」「PR を再利用しました: <URL>」「PR 作成には通常の承認が必要です」「--confirmed は、利用者が自分の端末で実行したときだけ有効です」）。
+- B1 の実行の根拠は、フックの記録の `PostToolUse` にある `brw.mjs pr-template` と `brw.mjs pr`（`pr-template` を `pr` と数えない）。`claude -p` の stream-json の tool_result で、brw pr の出力を取る。
+- 全体の判定は段階ごと。`api` は A1・A2、`host` は B1・B2・B3・B3c がすべてそろい、すべて一致のときだけ「一致」（終了コード 0）。
+
+### 結果
+
+- 実行の結果は下に記録した（実行日 2026-11-27）。
+
+#### 結果（brw-pr-handoff 5.2・8.2、実行日 2026-11-27）
+
+gh 2.45.0、Claude Code 2.1.329（Haiku）、実 GitHub（使い捨てブランチだけ。PR はマージしていない）。判定は記録の検証を通した結果で、観測ごとに生の記録と GitHub の読み戻し（`gh api`）を人が確認した。
+
+| 項目 | 結果 |
+|---|---|
+| A1（5.2）分岐元役を head、保護役を base とする PR を API で作成 | **一致**: 201 で作成、base・head・open を読み戻した |
+| A2（5.2）同じ commit の組（差なし）の PR | **一致**: 422「No commits between …」。PR は作られない |
+| B1（8.2）登録済みの宣言で、claude が `brw pr-template` → 本文を記入 → `brw pr --title … --target …` | **一致**: フックの PreToolUse が allow（確認省略）、PR が 1 件作成（head=分岐元役・base=保護役・open）、直接の `gh pr create` は使われず、`.git/brw` が無く、別コミット・push が無い（リモートの分岐元役の先頭が不変）、未コミットの変更が 1 件で「PR には含まれません」と表示 |
+| B2（8.2）同じ `brw pr` の再実行 | **一致**: 「PR を再利用しました」、同じ head・base のオープンな PR が 1 件のまま |
+| B3（8.2）承認が必要な宣言（未登録）の非端末の `brw pr` | **一致**: PR を作らず `--confirmed` の全文を案内して終了コード 1 |
+| B3c（8.2）非端末で `--confirmed` | **一致**: 「利用者が自分の端末で実行したときだけ有効」で拒否、取り込み・PR の作成を行わない |
+
+- 経緯: (1) 最初の API 段階の実行で、道具が `gh api -i` の出力（ヘッダーが CRLF）の本文を読めず A1 が「未観測」・A2 が「不一致」になった（実際は 201・422 で想定どおり）。判定を直して回帰テストを足し、再実行して一致した。この実行で作られた PR #19 は記録が漏れたため手で閉じた。(2) 最初の host 段階の実行は、呼び出し回数の共有カウンタの累計が上限に達して中止した（書き込み前）。カウンタを戻して再実行した。(3) 2 回目の host 段階の実行で、検証用の宣言が保護ブランチを 2 つ（`main` と保護役）にしたため、`brw pr` は作成先を決められず `--target` を求めて**書き込みなしで停止**した（PR 0 件）。道具のコマンドに `--target <保護役>` を付けて再実行し、全観測が一致した。保護ブランチが複数の宣言で `--target` が要る挙動（7.2 の `resolveTarget`）が実機で確認できた。
+- 最終確認: 後始末を「記録された使い捨てブランチを head とするオープンな PR を GitHub に問い合わせて閉じる」形に改めた後（記録漏れに依存しない）、API 段階と host 段階を再実行して全観測が一致し（PR #22・#23）、後始末が PR を閉じてブランチを削除した。
+- 後片付け: 使い捨てブランチ `verify/brw-bpr-*`・`verify/brw-base-*`、PR #19〜#23（いずれもマージなし・クローズ）、一時クローンを削除した。`main` の commit は不変（`bd2c9b8`）。
+- 未確認: Codex での分岐元からの PR、端末（TTY）での `brw pr --confirmed` の受理（単体試験は `stdinIsTTY` 注入）、保護ブランチが `main` だけの宣言での作成（`--target` 不要の経路は単体・統合試験で確認）。
+
+## 結果（brw-pr-handoff 9.6 の後半、実行日 2026-11-27）
+
+観測の道具は `tests/real-env/resume-observe.mjs`（`BRW_REAL_ENV=1 node tests/real-env/resume-observe.mjs --stage claude-main|claude-main-cdback|claude-inside`）。判定の純粋部分は `tests/resume-observe.mjs` が単体で試す（実機は呼ばない）。
+
+### 実行の条件
+
+- バージョン: Claude Code 2.1.329（`claude --version`）。Codex は観測していない（下の「未観測」）。
+- 一時の環境: 使い捨ての一時ディレクトリ（一時リポジトリ・bare remote・偽の gh・偽の ssh・宣言・本文・フック）だけを使い、終了時に消す。GitHub へは接続も書き込みもしない（偽の gh が PR の状態を一時ファイルに持つ）。
+- Claude: `-p --input-format stream-json` の同じセッションで 2 ターン（ターン 1: 公開、ターン 2: 続きの依頼）。`--setting-sources project` と一時プロジェクトの `.claude/settings.json`（`hooks/hooks.json` と同じ登録。観測用の記録を前置）。`~/.claude` の設定は、道具では読み書きしない（CLI が自分の認証を読むのは既定の動作）。`--no-session-persistence`。
+- Codex: 一時の `CODEX_HOME`（認証を置かない）で `codex exec` を試したところ、401（認証なし）。資格情報は使わない方針のため、Codex の項目はすべて未観測。
+
+### 項目ごとの結果（各ホスト・各構成で 3 回ずつ。再試行は各構成 2 回まで）
+
+| 構成 | (a) 片付け後の記録に sessionId | (b) ターン 2 で案内が届く | (c) brw resume で作り直す | (d) 新しい作業ブランチを作らない |
+|---|---|---|---|---|
+| Claude（本体で開始・通常の `brw pr`） | 不一致 ×3 | 不一致 ×3 | 一致 ×3 | 一致 ×3 |
+| Claude（本体で開始・`cd <wt> && brw pr ; cd <本体>`） | 不一致 ×3 | 不一致 ×3 | 一致 ×3 | 一致 ×3 |
+| Claude（作業場所の中で開始） | 不一致 ×3 | 一致 1・不一致 1・一致 1（下の注） | 未観測 ×3 | 一致 ×3 |
+| Codex | 未観測（認証なし） | 未観測 | 未観測 | 未観測 |
+
+判定の根拠（実行の記録から）:
+
+- (a) 不一致（本体で開始・通常）: `brw pr` の Bash 呼び出しは、作業場所を片付けた後に「Exit code 1」と報告された（シェルの作業ディレクトリが消えたため）。PostToolUse は成功した呼び出しだけに届くため、この呼び出しの関連付けは届かず、記録の sessionId は空のまま。
+- (a) 不一致（cd で戻す形）: `brw pr` の呼び出しは成功（exit 0 相当）で、PostToolUse は届いた。しかし、コマンドの末尾が `; cd <本体>` のため、関連付けの字句解析（`;` を解釈しない）が「pr の呼び出し」と認めず、記録に付かなかった。同じ形の文字列を `scanWords` に通すと null になる（解析できない）ことを、node で確かめた。
+- (b) 不一致: 同じセッションの UserPromptSubmit はターン 2 で動いた（ターン 1 と合わせて 2 回）。しかし案内の前提（同じセッションの記録に sessionId が付いていること）が無いため、案内は出ていない。答えの再開コマンドは、ターン 1 の `brw pr` の出力（「続きの再開:」の行）に由来する。
+- (c) 一致（本体で開始）: ターン 2 で `brw resume dev/obs-resume` が実行され、作業場所が作り直された。ただし案内は出ていないため、フックの効果とは言えない（依頼文の中で、作業の再開を依頼していることによる）。
+- (b)・(c)（作業場所の中で開始）: 削除後のシェルは作業ディレクトリが無く、Bash ツールが使えない（「シェルの作業ディレクトリが削除されている」と報告）。ターン 2 のフックは、3 回中 1 回だけ動いた（残る 2 回は動かず、既知の限界どおり）。動いた 1 回は、想定の「動かない」と異なる（不一致）。いずれも案内の前提が無く、案内は出ていない。(c) は resume を試みても作業場所が作られず（シェルが使えない）、未観測。
+- (d) 一致: どの構成でも、新しいブランチは作られなかった。
+
+### 実装について（報告。直していない）
+
+1. 片付けつきの `brw pr` を作業場所の中で実行すると、Claude Code の Bash ツールは「Exit code 1」と報告する（作業ディレクトリが消えるため）。PostToolUse は成功した呼び出しだけに届くので、続きの再開の関連付け（sessionId）が付かない。設計の前提（成功した `brw pr` で付く）が、実機では成り立たない。
+2. `cd <作業場所> && node <CLI> pr … ; cd <本体>` の形は、関連付けの字句解析が `;` を解釈せず、付かない（安全側）。
+3. 作業場所の中で開始したセッションでも、削除後の入力でフックが動くことがあった（3 回中 1 回）。設計の「動かない」は、この環境では再現が揺れる。案内の内容は、1 の不具合（記録に sessionId が付かない）のため、どちらにせよ出ない。
+
+### 限界
+
+- Codex は未観測（認証が無い一時 CODEX_HOME。資格情報は使わない）。
+- モデルの判断は揺れる（各構成 3 回のうち、同じ判定になったもの・ならなかったものを上の表に分けて記録した）。
+- 観測の道具は、ターン 2 の依頼文で「作業の再開方法を答える」よう求める（案内が届いたかを、答えで確かめるため）。依頼の文言は、再開のコマンドを指示しない（実行は観測対象のモデルの判断）。
+- 初回の探索（判定の前提や記録の仕組みを直す前）の実行は、判定の根拠に使っていない。
+
+## 結果（brw-pr-handoff 9.8、実行日 2026-11-27）
+
+9.7 の実装（実行前の PreToolUse のメモ）の後に、実機の Claude Code（2.1.329）で再観測した。道具は `tests/real-env/resume-observe.mjs`（`BRW_REAL_ENV=1 node tests/real-env/resume-observe.mjs --stage claude-main|claude-inside`）。構成ごとに 3 回（初回 1 回と、再試行 2 回。全項目が一致した時点で止める構成でも、今回は全 3 回を記録した）。観測の記録（原本）は `/tmp/brw-real-env-96b/observe-96b-claude-*.json`。
+
+### 実行の条件
+
+- Claude Code 2.1.329（Claude Code）。同じ一時の環境（bare remote・偽の gh・偽の ssh・宣言・本文）。`--setting-sources project`、一時プロジェクトの `.claude/settings.json`。観測用の記録（UserPromptSubmit・PreToolUse・PostToolUse の入力の形）を、BRW 本体のフックの前に置いた。BRW 本体のフックの登録は変えていない。
+- Codex: 未観測（認証が無い一時 CODEX_HOME。資格情報は使わない。`~/.codex` は触っていない）。
+
+### PreToolUse の入力の確認（全 6 回で確認）
+
+- 片付けつきの `brw pr` の PreToolUse は、各回ちょうど 1 件。入力に `session_id`・`cwd`・`tool_input.command` があり、`session_id` は Claude のセッション ID と同じ、かつ UserPromptSubmit の `session_id` と同じだった。
+
+### 項目ごとの結果
+
+| 構成 | (a) 片付け後の記録に sessionId | (b) ターン 2 で案内が届く | (c) brw resume で作り直す | (d) 新しい作業ブランチを作らない |
+|---|---|---|---|---|
+| Claude（本体で開始・通常の brw pr） | 一致 ×3 | 一致 2・不一致 1 | 不一致 2・一致 1 | 一致 ×3 |
+| Claude（作業場所の中で開始） | 一致 ×3 | 一致 1（削除後に UPS は 1 回だけ）・不一致 2（削除後に UPS が動いた） | 未観測 ×3 | 一致 ×3 |
+| Codex | 未観測（認証なし） | 未観測 | 未観測 | 未観測 |
+
+### 判定の根拠（実行の記録から）
+
+- (a) 一致: 片付けつきの `brw pr` の Bash 呼び出しは、Claude Code が「Exit code 1」と報告した（PostToolUse は届かない）が、9.7 の PreToolUse のメモが同じセッションの ID を残し、片付けの記録に sessionId が付いた。9.6 の不一致（PostToolUse だけに頼っていた）は、この改訂で解消した。
+- (b) 本体で開始: 一致は 2 回（#1・#2）。答えに、記録された再開コマンドが出た（案内の記録に sessionId が付いていたため、案内の前提は満たされていた）。不一致は 1 回（#3）。UserPromptSubmit は動いたが、答えに再開コマンドが出なかった。案内が届いたかは、この道具では確認できない（フックの出力は記録していない）。
+- (c) 本体で開始: #1・#2 では、答えに再開コマンドを書いたが、`brw resume` は実行しなかった（不一致）。#3 では実行して作業場所が作り直された（一致）。ただし、#3 の答えには案内の内容が出ていない。したがって、この 1 回を案内によるものと確認することはできない。案内によるかは、3 回の全体でも確認できなかった。
+- (b) 作業場所の中で開始: #1 は、削除後に UserPromptSubmit が 1 回だけ動き、想定どおり案内は届かなかった（一致）。#2・#3 では、削除後のターン 2 で UserPromptSubmit が動いた（想定と異なる）。動いたとき、案内が出たかは記録されていない（Bash は作業ディレクトリが無く使えず、答えにも案内の内容は出ていない）。(c) は、Bash が使えないため未観測。
+- (d) 一致: どの構成でも、新しいブランチは作られなかった。
+
+### 想定と異なった結果（成功として記録していない）
+
+1. 作業場所の中で開始した場合、削除後のターン 2 で UserPromptSubmit が動いた（3 回中 2 回）。設計の「削除後に動かない」（9.6 の観測）と、今回の 3 回のうち 2 回で異なる。案内が出たかは確認できていない。
+2. 本体で開始した場合、答えに再開コマンドが出ても、`brw resume` を実行しないことがあった（3 回中 2 回）。案内の内容を答えに出したことと、作業を再開したことは、別の判断として揺れる。
+3. 本体で開始した 3 回のうち 1 回は、案内が出たかを確認できない（b 不一致）。その回の (c) の作り直しを、案内によるものと判定できない。
+
+### 限界
+
+- この道具は UserPromptSubmit の出力（追加の文脈）を記録していない。案内が実際にモデルへ届いたかは、答えの内容からの推定に限られる。
+- 答えに出る再開コマンドは、ターン 1 の `brw pr` の出力（「続きの再開:」の行）に由来しうる。そのため、答えに出ただけでは案内の到達を確認できない。
+- Codex は未観測（認証なし）。
+- 判定の書式は、9.6 の結果と同じ。(c) の詳細文は、案内の前提が満たされたとき「案内に従った」と書く（そのため、答えに案内の内容が出ていない #3 の詳細文は、案内によるとする書き方になっている。上の判定の根拠では、それを訂正している）。
+
+### 追記（9.8 の再観測: UserPromptSubmit の記録用ラッパー導入後、実行日 2026-11-27）
+
+前節の結果は残す。この追記は、UserPromptSubmit を記録用のラッパー（`hook-wrapper-ups.mjs`。本番の `agent-hooks.mjs claude UserPromptSubmit` を子プロセスで実行し、同じ入力を渡して出力をそのまま返す。入力の session_id・cwd・prompt の先頭 40 文字・BRW の出力・終了コードを観測ログに残す）経由で登録し直して再観測した結果である。PreToolUse・PostToolUse・Stop は本番どおりの登録のまま。Claude Code 2.1.329。各構成 3 回（再試行 2 回まで）。原本は `/tmp/brw-real-env-96b/observe-96b-claude-main.json`・`observe-96b-claude-inside.json`。
+
+ターン 2 の依頼は、再開コマンドを指示しない。案内の文言（「新しい作業なら無視してかまいません」）の有無を「あり」か「なし」で答えさせ、作業の再開はモデルの判断に任せた。
+
+#### 判定の規則（この追記の時点）
+
+- (b) 一致: ラッパーの記録で、ターン 2 の UserPromptSubmit が BRW の案内（`brw resume <ブランチ>` を含む additionalContext）を返し、かつ答えが「あり」と答えた。どちらかが欠ければ不一致。作業場所の中で開始した構成は、削除後に UserPromptSubmit が動かないことを想定し、動けば不一致（想定と異なる）。
+- (c): 答えに案内の文言があり（(b) 一致）、かつ brw resume を実行した回だけ「案内によるとみてよい」。それ以外は、resume の実行が案内によるとは確認できない（道具の詳細文も、この規則に直した）。
+
+#### 結果
+
+| 構成 | (a) 記録に sessionId | (b) ターン 2 で BRW が案内を返す（記録） | (b) 答えが案内の文言を示す | (c) brw resume で作り直す | (d) 新しいブランチを作らない |
+|---|---|---|---|---|---|
+| Claude（本体で開始） | 一致 ×3 | 返した ×3（ターン 2 の UserPromptSubmit は各回 1 回。ターン 1 は案内なし） | 示さず ×3（#1 は「なし」と答えた。#2・#3 は問いに答えなかった） | 一致 ×3（案内によるとは確認できない。答えに案内の文言が無いため） | 一致 ×3 |
+| Claude（作業場所の中で開始） | 一致 ×3 | 返した ×3（削除後のターン 2 でも UserPromptSubmit が動き、cwd は削除済みの作業場所） | 示さず ×3（Bash が使えず、問いに答えていない） | 未観測 ×3（削除後のシェルでは resume を実行できず） | 一致 ×3 |
+| Codex | 未観測（認証なし） | 未観測 | 未観測 | 未観測 | 未観測 |
+
+#### 判定の根拠
+
+- (a): 片付けつきの brw pr の PostToolUse は届かない（前節と同じ）が、PreToolUse のメモで同じセッションの ID が記録に付いた（6 回とも）。
+- (b) 本体で開始: BRW は各回のターン 2 で案内を返した（記録から確認。ターン 1 の入力では返していない。案内の内容は「作業ブランチ dev/obs-resume の作業場所は削除済みです」で始まる）。しかし、モデルの答えは「あり」の形で案内の文言を示さなかった（#1 は「なし」、#2・#3 は問いに答えなかった）。モデルへ到達したとは確認できない。
+- (c) 本体で開始: 3 回とも brw resume を実行し、作業場所が作り直された。答えに案内の文言が無いため、案内によるとは確認できない（前節の (c) の詳細文の誤りは、この追記で直した）。
+- (b) 作業場所の中で開始: 3 回とも、削除後のターン 2 で UserPromptSubmit が動き、BRW は案内（`brw resume dev/obs-resume` を含む文脈）を返した。cwd は削除済みの作業場所のままだった。BRW の案内は、記録の sessionId と dir・10 分の条件の下で作られた。モデルはシェルが使えず、問いに答えなかった。
+- (d): 6 回すべて、新しいブランチは作られなかった。
+
+#### 想定と異なる結果（成功として記録していない）
+
+1. 作業場所の中で開始した場合、削除後のターン 2 で UserPromptSubmit が動き、BRW は案内を返した（3 回とも）。設計の「削除後にフックが動かない」（9.6 の観測に基づく記述）は、この環境の 9.8 の観測（ラッパーの記録）と食い違う。前節の「動いた 2 回」は、ラッパーの記録が無く、案内が返ったかは未確認だった。今回は、案内が返ったことまで確認できた。
+2. 本体で開始した場合、BRW が案内を返しても、モデルの答えは案内の文言を示さなかった（3 回とも）。モデルへの到達は確認できていない。
+3. (c) の resume の実行は、案内によるとは確認できない（答えに案内の文言が無い）。
+
+#### 限界
+
+- ラッパーの記録は、BRW が案内を返したことを示す。モデルが受け取ったことは、答えの文言でしか確かめられず、この観測では示されなかった。
+- ターン 2 の問い（「あり」か「なし」）は、モデルが答えない回があった。答えの形式を固定する指示は、今回の規則の判定の対象外（問いの答えの形式は、再試行の判定に影響する）。
+- BRW の実装の不具合は直していない（報告）: 作業場所の中で開始したセッションで、削除後に案内が返ることは、設計「削除後にフックが動かないため案内できない」と異なる。設計の見直しの要否は、報告にとどめる。
+
+## Codex の再開案内の実機観測（9.9）
+
+```sh
+BRW_REAL_ENV=1 node tests/real-env/resume-observe.mjs --stage codex
+```
+
+- 実行には `codex` CLI と読み取り可能な `~/.codex/auth.json` が必要。認証ファイルが無い場合は Codex を起動せず、5 項目を「未観測」として記録する。認証切れなどで実行が失敗した場合も、結果は成功にせず観測記録に残す。
+- 1 回の観測で `codex exec` と `codex exec resume <thread_id>` を各 1 回呼ぶ。Codex API の利用料金は選択中のモデルと実際の入出力に依存するため固定額は示せない。既定の試行回数は 1 回（Claude の既定 3 回とは別）で、コード上の reasoning effort は low。
+- `~/.codex/auth.json` は一時の `CODEX_HOME/auth.json` へコピーし、コピーを mode 0600、一時ホームを mode 0700 にする。利用者の認証ファイルや設定は変更しない。一時ホームは観測後に削除する。認証値を表示・記録しない。
+- 一時 repo の `.codex/hooks.json` に観測ラッパー経由で BRW の Codex フックを登録する。ラッパーは UserPromptSubmit の返答、各 hook の session ID・tool_use_id・cwd、および Pre/PostToolUse ごとの worktree 状態を一時ログへ記録し、BRW の応答を Codex に返す。Codex の初回・再開の両 `thread.started` ID、両 UserPromptSubmit、PreToolUse を個別に照合する。プロジェクト信頼とフック信頼の設定は一時環境だけに適用する。
+- 一時 repo はローカル bare remote を使う。`gh` は偽物、SSH は bare remote に向けた shim であり、GitHub へ接続・書き込みしない。Codex は workspace-write sandbox で動かし、Git 共通ディレクトリだけを `--add-dir` で一時 repo 内の書き込み先に加える。
+- (c) の再開成功は、単独の `brw resume` tool call に対して同じ `tool_use_id` の PreToolUse/PostToolUse があり、Pre時点で対象 worktree が無く、Post時点で作成済み、かつ Codex の `exit_code=0`（Claude は `is_error=false`）を確認できた場合だけ一致とする。複合コマンド、前後状態の欠落、tool ID の不一致など証拠が揃わない場合は「未観測」とする。
+- 観測結果は `/tmp/brw-real-env/observe-96b-codex.json` に保存され、認証情報を含まない。一時 repo・bare remote・認証コピーは終了時に削除する。
+
+### 9.9 の実行結果（2026-11-28、Codex CLI 0.172.0）
+
+1 attempt（`codex exec` と同一 thread の `codex exec resume`、完了ターン 2）を実行した。記録は `/tmp/brw-real-env/observe-96b-codex.json`。
+
+| 項目 | 判定 | 観測 |
+|---|---|---|
+| (a) 片付け後の記録に sessionId | 未観測 | `brw pr` が tidy で停止し、再開記録を作らなかった。Codex の PreToolUse に `session_id` と `cwd` があり、`session_id` は `thread.started` の ID および UserPromptSubmit と一致した。PreToolUse の cwd は実行対象 worktree と一致した（UserPromptSubmit の cwd は main）。 |
+| (b) ターン 2 の案内 | 不一致 | UserPromptSubmit は同じ session_id で2ターンとも動いたが、BRW の追加文脈は返らなかった。モデルの答えは「なし」。記録が無いため案内の条件を満たさなかった。 |
+| (c) `brw resume` による再作成 | 不一致 | ターン 2 に `brw resume` のコマンドは無く、作業場所を作り直さなかった。 |
+| (d) 新しい作業ブランチを作らない | 一致 | 新しいブランチは作られなかった。 |
+| (e) PreToolUse の session/thread ID と cwd | 一致 | session ID は Codex thread ID と UserPromptSubmit の ID に一致し、cwd は対象 worktree と一致した（UserPromptSubmit の cwd は main）。 |
+
+`brw pr` は一時 worktree で状態確認を行う `git` の子プロセス起動が `EPERM` となり、`tidy` 段階で終了コード 1 になった。シェルから直接行った `git status` は成功した。Codex は workspace-write sandbox で実行し、既存の実機検証の制約に合わせて一時リポジトリの Git 共通ディレクトリを `--add-dir` に追加したが、この環境では Node.js からの `spawnSync("git", …)` は許可されなかった。これは再開機能の成功確認ではなく、実行環境の制限を記録した結果である。`.git` への書き込みだけでなく、Codex が起動した Node.js から Git を実行できる sandbox 条件が必要。
+
+偽 `gh` の PR 作成は 0 件、偽 SSH の receive-pack は 0 件。GitHub への接続・書き込みは無かった。Codex の一時 CODEX_HOME と一時 repo は観測後に削除された。認証情報の値は出力・変更していない。

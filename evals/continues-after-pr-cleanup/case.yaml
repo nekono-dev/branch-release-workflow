@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: continues-after-pr-cleanup
+# 評価環境の制約: fixture（_fixture/setup-repo.sh）の origin はローカルの bare リポジトリで、GitHub に接続しない。
+# そのため続きの brw pr は、送り先の確定で止まってよい。本ケースの判定は、実行の trace（呼び出しの順・ブランチの扱い）で行う。
+# 実際の評価は未実行である（この定義は、構成と文面の試験だけを通している）。
+expected_outcome: |
+  PR を作って片付けた dev/login-form の続きを頼まれたので、新しい作業ブランチを作らず、brw resume dev/login-form で作業場所をリモートから作り直す（片付け後の再開の記録と、次の入力の案内を使ってよい）。その中で login.html の email 入力を type="email" required にして commit する。続きの公開は brw pr で行い、直接の gh pr create は使わない（評価環境では送り先の確定で止まってよい）。main と develop には触れない。
+context:
+  scaffold_script: place-files.sh

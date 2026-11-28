@@ -4,7 +4,7 @@
   "baseBranch": "develop",
   "namePattern": "^dev/[a-z0-9]+(-[a-z0-9]+)*$",
   "maxNameLength": 54,
-  "autoApprove": { "push": true, "pullRequest": true },
+  "autoApprove": { "push": true, "pullRequest": true, "commit": true },
   "afterPublish": { "cleanup": true },
   "pullRequest": { "language": "ja" },
   "preview": {

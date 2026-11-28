@@ -141,6 +141,9 @@ export const runPublishCliChecks = async (eq) => {
       const id2 = b.stdout.trim();
       eq("enforcement/7.2 2 件目の start は別の作業 ID を発行し、1 件目を中断扱いにする", [b.status, id2 !== id, workOf(r.dir, id)?.pausedReason !== undefined, publish.currentWork(r.dir).work?.workId], [0, true, true, id2]);
       eq("enforcement/7.2 保護ブランチでは work start を拒否し、作業を作らない", [brwRun(mkRepoWithRemote({ branch: "main", config: CONFIG }).dir, ["work", "start"]).status], [1]);
+      // brw-pr-handoff 6.2: 分岐元からの work start の拒否は、分岐元から保護ブランチへの PR を brw pr で作れることを示す
+      eq("brw-pr-handoff/6.2 分岐元での work start の拒否は、分岐元→保護ブランチの PR を brw pr で作れることを示す", (() => { const x = brwRun(mkRepoWithRemote({ branch: "develop", config: CONFIG }).dir, ["work", "start"]); return [x.status, x.stderr.includes("恒常的な分岐元のため、作業を始めません"), x.stderr.includes("分岐元から保護ブランチへの PR は brw pr で作れます")]; })(), [1, true, true]);
+      eq("brw-pr-handoff/6.2 保護ブランチでの work start の拒否には、brw pr の案内を足さない", (() => { const x = brwRun(mkRepoWithRemote({ branch: "main", config: CONFIG }).dir, ["work", "start"]); return x.stderr.includes("brw pr"); })(), false);
       eq("enforcement/7.2 work の不明なオプションは使い方の誤りとして終了コード 2", [brwRun(r.dir, ["work", "start", "--bogus"]).status, brwRun(r.dir, ["work", "unknown"]).status], [2, 2]);
 
       publish.attachSession(r.dir, id2, "claude-P");

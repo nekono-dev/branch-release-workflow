@@ -102,3 +102,141 @@
   - 本文の下書きの生成から PR 作成・片付けまでの一連の手順、片付けの設定、直接の PR 作成が拒否されること、現行の手順書の本文ファイルの置き場所の案内の訂正を、手順書と資料に記載し、評価ケースを 1 つ追加する。
   - 資料から一連の手順が読み取れ、評価ケースが定義の検証を通る。
   - _Requirements: 6.5_
+
+- [x] 5. 実機の前提を、実際の git と GitHub で再現できる検証にする
+- [x] 5.1 分岐元の取り込みと差の判定を、実際の git で再現する検証を用意する
+  - bare remote の一時リポジトリで、分岐元が最新・リモートが先行・ローカルが先行・分岐・保護ブランチと差なし・未コミットの変更あり（衝突する場合としない場合）の各状態を作り、`fetch`・`merge --ff-only`・先行の数・保護ブランチとの差の数の結果を観測する（`poc/base-sync.sh` を検証基盤に取り込む）。
+  - ローカルが先行していても `ff-only` が成功することを含め、各状態の観測結果が再実行できる形で残る。BRW 本体の実装には依存しない。
+  - _Boundary: 検証基盤_
+  - _Requirements: 1.8, 1.10_
+- [x] 5.2 (P) 使い捨ての GitHub リポジトリで、分岐元を head とする PR を作れることを確かめる準備をする
+  - 実環境検証の基盤（使い捨てのブランチ・認証・片付け）を使い、分岐元に当たる使い捨てのブランチと保護ブランチに当たるブランチの組を用意し、head を分岐元とする PR が GitHub の API で作成でき、差が無いときは作成できないことを観測する手順と後始末を用意する。
+  - 手順が再実行でき、作った PR・ブランチが後始末で消える。通常運用のブランチを使わない。
+  - _Boundary: 実環境検証_
+  - _Requirements: 1.8, 1.10_
+
+- [x] 6. 判定と案内を分岐元からの PR に対応させる
+- [x] 6.1 分岐元から保護ブランチへの PR を、規則に適合する PR 作成として判定する
+  - 共通の判定の PR 作成の規則で、取り込み元が恒常的な分岐元、取り込み先が保護ブランチの組を、規則に適合する作成として扱う。ほかの組（開発ブランチ間・宣言外・保護ブランチを取り込み元にする組など）の拒否は変えない。エージェント起点の直接の作成は、適合する場合も拒否のまま。
+  - 各組の判定結果を判定の契約テストで確認できる。内部の公開（計画と実行）が従来どおり通る。
+  - _Boundary: 判定層_
+  - _Requirements: 1.4, 1.8_
+- [x] 6.2 拒否の案内を、その状況で受け付けられる手順だけにする
+  - 拒否の案内を組ごとに選ぶ関数にし、`brw pr` で作れる組（開発ブランチ→保護ブランチ・分岐元、分岐元→保護ブランチ）だけに `brw pr` を示す。作れない組には、作れない理由と、利用者が GitHub 上で PR を作成する手順（通信なしで作る作成画面の URL を含む）を示す。
+  - `brw work start` が分岐元を拒否するときの案内は、分岐元から保護ブランチへの PR は `brw pr` で作れることを示す。案内はフック経路の文字数の制限に収める。
+  - 各組の案内に、受け付けられない `brw` の手順が含まれないことと、作成画面の URL が含まれることを単体テストで確認できる。
+  - _Boundary: 判定層、公開の入口_
+  - _Depends: 6.1_
+  - _Requirements: 1.11_
+
+- [x] 7. 分岐元から保護ブランチへの PR を作る
+- [x] 7.1 (P) PR の再利用・作成を、作業の記録に依存しない関数として切り出す
+  - 公開の PR 処理から、同じ取り込み元・取り込み先のオープンな PR の探索、再利用、作成、作成後の照合を、リポジトリ・head・base・タイトル・本文・head の OID を受け取る関数として切り出して公開する。既存の公開の処理もこれを使い、挙動を変えない。
+  - 既存の公開の試験が変わらず通り、切り出した関数を作業の記録なしで呼んで、再利用・作成・食い違いの停止を確認できる。
+  - _Boundary: 公開（PR）_
+  - _Requirements: 1.8_
+- [x] 7.2 (P) 分岐元の取り込みと差の確認を作る
+  - 分岐元の push 先のリモート名（`pushRemote` などを考慮し、`origin` 固定にしない）で、取得、先行の確認、`ff-only` による取り込み、保護ブランチとの差の数を求める部品を作る。先行は `ff-only` に任せず別に数える。先行・分岐・取得失敗・取り込み失敗・差なしは更新せず理由つきで止まる。
+  - 作成先の決定（`--target` か、保護ブランチが 1 つのときそれ）も含め、5.1 の各状態と、`pushRemote` が `origin` 以外の場合を、一時リポジトリの単体テストで確認できる。
+  - _Boundary: 分岐元からの PR_
+  - _Depends: 5.1_
+  - _Requirements: 1.9, 1.10_
+- [x] 7.3 分岐元からの PR の調整役を作る
+  - 本文の確認 → 取り込みと差の確認 → 既存 PR の探索 → 承認の判定 → PR の作成または再利用 → URL の報告の順に行う。作業の記録・別コミット・push・片付けを呼ばず、未コミットの変更があっても commit せず、含まれない旨を件数つきで表示する。
+  - 承認が必要なときは PR を作らず、利用者の端末で実行する `--confirmed` つきの全文を案内して終了コード 1 で終わる。`--confirmed` は標準入力が端末のときだけ受け付け、端末でなければ何もせず拒否する。PR の作成には head の OID を渡して作成後の照合を働かせる。
+  - 偽の GitHub 接続で、PR の作成・既存 PR の再利用・承認待ち・`--confirmed` の端末判定・再実行で PR が重複しないこと・作業の記録の状態ファイルが作られないこと・分岐元のブランチと作業場所が残ることを確認できる。
+  - _Boundary: 分岐元からの PR_
+  - _Depends: 6.1, 7.1, 7.2_
+  - _Requirements: 1.8, 1.9, 1.10, 2.8, 4.12_
+- [x] 7.4 `brw pr` の振り分けと `brw pr-template` を分岐元に対応させる
+  - `brw pr` の事前確認で、現在のブランチが開発ブランチなら従来の流れ、恒常的な分岐元なら分岐元からの PR へ渡し、どちらでもなければ理由と取るべき手順を表示して止まる。
+  - `brw pr-template` が分岐元でも雛形と記入指示を出し、作成元と作成先を示し、「作業外の変更」の節を該当なしとして扱う。
+  - 開発ブランチでの `brw pr`・`brw pr-template` の既存の試験が変わらず通り、分岐元での振り分けと雛形の出力を試験で確認できる。
+  - _Boundary: 調整、本文_
+  - _Depends: 7.3_
+  - _Requirements: 1.4, 1.8, 3.10_
+
+- [x] 8. 検証と資料
+- [x] 8.1 分岐元からの PR の統合試験を書く
+  - 一時リポジトリ・bare remote・偽の GitHub 接続で、分岐元が最新・リモート先行（取り込んで進む）・ローカル先行（止まる）・分岐（止まる）・差なし（止まる）の各状態から `brw pr` を実行し、PR の作成・再利用・URL の報告、別コミットも push も片付けも行わないこと、未コミットの変更が残り件数が表示されること、分岐元の worktree とブランチが残ることを確認する。
+  - 直接の `gh pr create` の拒否の案内が、作れる組には `brw pr` を、作れない組には作成画面の URL を示すことを確認する。
+  - _Boundary: 統合テスト_
+  - _Depends: 6.2, 7.4_
+  - _Requirements: 1.8, 1.9, 1.10, 1.11, 2.8, 4.12_
+- [x] 8.2 実機で分岐元からの PR を確かめる
+  - `claude -p` と使い捨ての GitHub リポジトリで、分岐元のチェックアウトから本文の記入 → `brw pr` を実行し、分岐元のブランチと作業場所が残ったまま PR が作成され、再実行で重複しないことを確認する。承認が必要な宣言では、`--confirmed` の案内が出ることを確認する。
+  - 観測結果を記録し、想定と異なる結果は成功として記録しない。
+  - _Boundary: 実環境検証_
+  - _Depends: 5.2, 8.1_
+  - _Requirements: 1.8, 1.9, 1.10, 1.11_
+- [x] 8.3 (P) 手順書・資料・評価ケースを更新する
+  - SKILL.md と資料に、分岐元から保護ブランチへの PR の作り方（分岐元のチェックアウトで本文を記入し `brw pr`）、取り込み → 作成 → 報告の 3 段だけを行うこと、受け付けられない組の手作業の手順を書き、評価ケースを 1 つ追加する。cc-sdd・`.kiro` の語を含めない。
+  - 資料から手順が読み取れ、評価ケースが定義の検証を通る。
+  - _Boundary: 利用者向け手順_
+  - _Depends: 7.4_
+  - _Requirements: 1.8, 1.11, 3.10_
+- [x] 9. 公開後の続きの作業を、削除済みの作業場所から再開できるようにする
+- [x] 9.1 実機の前提を、実際のホストで再現できる検証にする
+  - 使い捨てのリポジトリで、Claude Code と Codex に `UserPromptSubmit` のフックを登録し、`additionalContext` がモデルへ届くこと、入力に `session_id` と `cwd` が含まれること、作業場所の削除後の同じセッションのフックの発火（本体で開始した場合と作業場所の中で開始した場合）を観測し、再実行できる PoC（`poc/user-prompt-submit.mjs`・`poc/user-prompt-submit-after-remove.mjs`）と結果を残す。結果で feasibility.md の設計の確認・タスク計画の確認を更新する。
+  - 2026-11-27 に実施済み（Claude Code 2.1.329・Codex 0.172.0）。到達・入力の項目は両ホストで確認、本体開始は削除後もフックが動き、作業場所内の開始は削除後にフックが動かない。
+  - _Boundary: 検証基盤_
+  - _Requirements: 7.4, 7.5_
+- [x] 9.2 (P) 再開の記録を書き読みする部品を作る
+  - `resume-record.mjs` に `writeRecord`・`readRecords`・`resumableFor`・`attachSession`（直近 2 分以内の `sessionId` が空の記録の最新 1 件にセッションを付ける）を作る。記録は `<git 共通ディレクトリ>/brw/resume.json`（先頭が最新・最大 10 件・同じブランチは置き換え・ロック＋一時ファイル置換）。読めない・不正な形は空配列。`resumableFor` は同じセッション・24 時間以内・作業場所が無い・追跡ブランチがある・開発ブランチのときだけ見つける。
+  - 各状態（見つかる・別セッション・古い・作業場所あり・追跡ブランチ無し・宣言無し・記録の破損・セッション不明、`attachSession` の対象（2 分以内・空の記録・最新 1 件）と対象外）を単体試験で確認できる。
+  - _Boundary: 再開の記録_
+  - _Requirements: 7.2, 7.4, 7.6_
+- [x] 9.3 片付けの案内と記録、`brw resume` の一覧を作る
+  - 片付けが完了したとき、「続きの作業は `brw resume <ブランチ>`」を表示し、再開の記録を書く（書けなくても片付けの結果は変えず警告だけ）。要件 4.9 の表示（本体のパスと、`cd` が要る場合の案内）に改める。`brw resume` が引数なしのとき、再開できる作業ブランチの一覧と使い方を表示する（従来の引数ありの動作は変えない）。
+  - 片付けの試験で記録が書かれ案内が出ること、引数なしの `brw resume` の各状態（候補あり・無し・作業場所のあるものを除く・公開記録のあるものを先頭）を確認できる。
+  - _Boundary: 片付け、CLI_
+  - _Depends: 9.2_
+  - _Requirements: 4.9, 7.1, 7.2, 7.3_
+- [x] 9.4 `UserPromptSubmit` の案内フックと登録・診断を作る
+  - `agent-hooks.mjs` に `UserPromptSubmit` を加え、`PostToolUse`（信頼済みの `brw pr` の成功）で記録に `sessionId` を付け、`resumableFor` が見つけたときだけ文脈（`brw resume <ブランチ>` と `brw create <名前>` の使い分け。500 文字以内・無害化）を返す。副作用なし。Claude の `hooks/hooks.json`、Codex の登録（`hook-install.mjs`）、`HOST_EVENTS`、診断（`hook-diagnose.mjs`）に追加する。
+  - 見つかる場合と、見つからない各場合（7.6）の応答、副作用が無いこと（作業場所・記録・通信が変わらない）、登録と診断が通ることを、両ホストの模擬イベントで確認できる。
+  - _Boundary: フック変換、診断_
+  - _Depends: 9.1, 9.2_
+  - _Requirements: 7.4, 7.5, 7.6_
+- [x] 9.5 (P) 手順書・資料・評価ケースに、続きの作業の再開を加える
+  - SKILL.md と資料に、公開後の続きの依頼（検証のやり直し・レビューの指摘など）は新しい作業ブランチを作らず `brw resume <ブランチ>` で再開すること、`brw resume`（引数なし）の一覧、続きを公開すると既存の PR が再利用されることを書き、評価ケースを 1 つ追加する。cc-sdd・`.kiro` の語を含めない。
+  - 資料から手順が読み取れ、評価ケースが定義の検証を通る。
+  - _Boundary: 利用者向け手順_
+  - _Depends: 9.3_
+  - _Requirements: 7.1, 7.3, 7.7_
+- [x] 9.6 続きの再開を統合・実環境で確かめる
+  - _(解消: 9.7・9.8 で設計を改訂し再観測。下の実装メモ)_ _Blocked: 実機の観測で、PostToolUse が届かず記録に sessionId が付かないため UserPromptSubmit の案内（要件 7.4）が届かない。設計の見直しが必要（feasibility.md の追記）。前半の統合試験は完了_
+  - 一時リポジトリ・bare remote・偽の GitHub 接続で、`brw pr` の片付け → 記録 → `brw resume`（作業場所が push 済みの状態から作り直される）→ 続きの変更 → `brw pr` で既存の PR が再利用され重複しないことを確認する。実機の Claude Code と Codex（使い捨てのリポジトリ・偽の GitHub）で、片付けの後の同じセッションの次の入力で、`UserPromptSubmit` の案内が届き、エージェントが `brw resume` で作業場所を作り直せることを観測する。観測結果を記録し、想定と異なる結果は成功として記録しない。
+  - _Boundary: 統合テスト、実環境検証_
+  - _Depends: 9.3, 9.4, 9.5_
+  - _Requirements: 4.9, 7.1, 7.4, 7.7_
+- [x] 9.7 セッションの手がかりを実行前に記録し、片付けの記録に使う
+  - `agent-hooks.mjs` の `PreToolUse`（Bash。Claude・Codex）で、信頼済みの `node <brw.mjs> pr …` の呼び出しを見たとき、`resume-record.mjs` に追加する `writeSessionHint(main, {sessionId, dir, now})` で `<git 共通ディレクトリ>/brw/session-hint.json`（最新 1 件、0600・一時ファイル→rename・通常ファイルのみ・サイズ上限）を書く。許可・拒否の判定は変えず、失敗してもフックを止めない。`readSessionHint(main, worktreePath, now)`（10 分以内かつ `dir` が一致するときだけ `sessionId` を返す）を `pr-flow.mjs` の `finishUp` が使い、再開の記録の `sessionId` に入れる。`PostToolUse` の `attachSession` は補完として残す。
+  - 片付け後の記録に、同じ呼び出しのセッションの `sessionId` が入る（`dir` が違う・古い・不正なメモでは null のまま）。実行前後で作業場所・refs・通信が変わらない（メモ以外）。統合試験（tests/integration-resume.mjs）で、`PostToolUse` が届かない場合（Claude の「Exit code 1」相当）でも UserPromptSubmit の案内が出ることを確かめる。
+  - _Boundary: フック変換、再開の記録_
+  - _Depends: 9.2, 9.4_
+  - _Requirements: 7.2, 7.4_
+- [x] 9.8 実機で案内の到達を再観測する
+  - 9.6 後半の観測の道具（`tests/real-env/resume-observe.mjs`）で、実機の Claude Code（本体で開始）の同じセッションの次の入力に案内が届くこと（記録の `sessionId` が付き、`UserPromptSubmit` の案内が届く）を再観測し、結果を README に追記する。Codex は認証が無ければ「未観測」のまま記録する。想定と異なる結果は成功として記録せず、一致したら `feasibility.md` の設計の確認を `通過` に戻す。
+  - _Boundary: 実環境検証_
+  - _Depends: 9.7_
+  - _Requirements: 4.9, 7.4_
+- 5.1（2026-11-27、完了）: 実 git の検証は `tests/base-sync-git.mjs`（19 件。一時リポジトリ＋bare remote、HOME・Git 設定を隔離）。観測を固定した: 最新・リモート先行（`merge --ff-only` で取り込める）・**ローカル先行でも `ff-only` が成功する**（先行は `rev-list --count <remote>/<base>..<base>` で別に数える必要がある根拠）・分岐（`ff-only` が失敗、先行・遅れとも 1 以上）・保護ブランチと差なし（差 0）・未追跡ファイルだけなら取り込めて内容が残る・同じ追跡ファイルを変更していると衝突で失敗して内容が残る・`pushRemote`/`remote.pushDefault` が `origin` 以外のとき origin 固定だと遅れを見逃す（解決したリモート名で比べる）。7.2 の部品はこの観測を前提にする。
+- 6.1・6.2（2026-11-27、完了。レビュー 5 回。6 群はこれで完了）: 判定は `evalPrCreateRules`（scripts/operation-decision.mjs）。**取り込み元が恒常的な分岐元（`base`）、取り込み先が保護ブランチ**の組が新しく適合（`pr-create-base-protected`）。ほかの組（開発間・宣言外・保護が取り込み元・分岐元→分岐元/開発/宣言外・別リポジトリ head）の拒否は不変、エージェント起点の直接の作成は適合でも `pr-create-use-brw` で拒否、`origin: "brw-publish"` だけが通る。案内は組ごとに選ぶ `prAlternative`・`prFlowAlternative`: `brw pr` で作れる組（開発→保護・分岐元、分岐元→保護）だけに `brw pr-template`→`brw pr` を示し、作れない組には「作れない理由→GitHub 上での作成手順→作成画面の URL（`/compare/<base>...<head>?expand=1`。ref は Git の規則で検証し Unicode は許し、各区間を `encodeURIComponent`。不正・長すぎる ref は URL を出さず Web 画面の手順だけ）」、開発ブランチ間は URL を出さず `brw merge`、同名（head と base が同じ）は「取り込みは不要」。長さは**最終的な reason と alternative の連結が 500 文字**に収まるよう管理し（結論を先頭、ref の表示は 60 文字（エスケープ後）で省略、URL は残りの文字数に全体が収まるときだけ、パスを含む実行の形は末尾）、`brw work start` の分岐元の拒否文に「分岐元から保護ブランチへの PR は `brw pr` で作れる」を追加（publish-cli.mjs）。副産物: 過去のタスクで commit 済みのテストにあった生の制御文字（U+202E・U+200B・U+FEFF・U+2028。tests/decision.mjs・work-remainder.mjs・pr-merge.mjs）を `\uXXXX` 表記に改めた（ソースで表示順が偽装されるのを防ぐ）。**7.x の注意**: 案内は `brw pr` を分岐元でも示すが、実体（調整役）は 7.3・7.4 で作る。
+- 7.1（2026-11-27、完了）: `scripts/publish-pr.mjs` に `createOrReusePr(session, target, {branch, base, headOid, title?, body?, beforeCreate?})`（`target` は `{id, owner, name}`）を切り出し、`runPublishPr` はこれを使う（挙動不変）。作業の記録・状態・計画に依存しない。成功は `{ok:true, reused, created, reconciled, pull}`、止まる場合は `{ok:false, kind:"failed"|"invalidInput"|"prohibited"|"needsApproval", code, message, ...}`（`base-conflict`・`pr-draft`・`pr-ambiguous`・`pr-mismatch`（`createdUrl`・`differences` つき）・`pr-unconfirmed`・`pr-title-required` など）。`beforeCreate` は作成の直前（既存 PR が無いときだけ）に呼ばれ、止める結果（承認待ち・禁止）を返せる（7.3 が承認の判定に使う）。
+- 7.2（2026-11-27、完了。レビュー 2 回）: `scripts/base-sync.mjs` の `syncBase(cwd, base, target?)`・`countDiff(cwd, target, base)`・`resolveTarget(config, explicit)`。リモートは `remoteNameOf`（`pushRemote` → `remote.pushDefault` → `branch.<>.remote` → `origin`）。fetch は **明示した refspec** `+refs/heads/<名前>:refs/remotes/<リモート>/<名前>`（`remote.<>.fetch` の設定に依存しない）、比較・merge は完全参照 `refs/remotes/…`・`refs/heads/…`（同名ブランチの曖昧さを避ける）。先行は `rev-list --count` で別に数え（`ff-only` は先行でも成功するため）、先行のみ `ahead`・先行と遅れの両方 `diverged`・取得失敗 `fetch-failed`・取り込み失敗 `ff-failed`（現在のブランチが分岐元でないときも merge せず `ff-failed`）。`countDiff` は取得失敗・不正な名前で `-1`（0 と区別する。**7.3 は `-1` を止める判定にする**）。`resolveTarget` は宣言の `protectedBranches` の要素が 1 つで固定名のときだけ自動選択（パターンを含む複数・0 件は `--target` を要求）。git は引数配列で呼び（シェルを介さない）、`-` で始まる名前は拒否する。
+- 7.3（2026-11-27、完了。レビュー 2 回）: 調整役は `scripts/base-pr.mjs` の `runBasePr(args, deps, ctx)`（`brw pr` への配線は 7.4）。順序: 引数の検査（`--work` は使い方の誤り 2、`--completion`・`--verification`・`--failed` は無視して標準エラーに出す）→ `--confirmed` は標準入力が端末でなければ通信・fetch の前に拒否 → 作成先 `resolveTarget` → 本文の確認（`readBody`＝publish-cli.mjs の既存の検査を export して再利用。作業ディレクトリ配下・本体の worktree 置き場だけ、`..`・外部を指すシンボリックリンク・ディレクトリを拒否。副作用の前に止まる）→ `syncBase`（`ahead`・`diverged`・`fetch-failed`・`ff-failed` で理由を表示して止まる）→ `countDiff`（`-1`・`0` で止まる）→ head の OID（`refs/remotes/<リモート>/<分岐元>`）→ `createOrReusePr`。承認は `createOrReusePr` の `beforeCreate`（既存 PR の再利用時は呼ばれない）で `publish-pr.mjs` の `decidePr` と同じ作り（`gh pr create` を `classifyCommand` → `evaluateAll(…, {origin:"brw-publish"})`）。承認が必要なら PR を作らず `brw pr … --confirmed` の全文を案内して 1。作成後に head の OID が食い違えば作成済みの URL を案内しつつ成功扱いにしない。作業の記録・別コミット・push・片付けは行わず、未コミットの変更は件数を表示して含めない。**既知の性質**: `gh pr create` は head を push しうるため（`mayPush`）、宣言の `autoApprove.push:false` では `autoApprove.pullRequest` が有効でも通常の承認になる（既存の `brw pr` と同じ）。作業の制限 `noPr` は作業の記録が前提のため、この経路では適用されない（宣言の不備による deny は有効）。`confirmTarget` は 2 回走る（読み取りのみ）。
+- 7.4（2026-11-27、完了。レビュー 3 回。7 群はこれで完了）: `brw pr`（`pr-flow.mjs` の `runPr`）の事前確認が、開発ブランチは従来の流れ、恒常的な分岐元は `runBasePr`（循環 import は無い: pr-flow → base-pr → pr-template・base-sync）、それ以外（保護・宣言外・detached）は分類に応じた理由と手順で止まる。停止時の案内は `basePrGuidance(config)`（`pr-template.mjs`）: 「保護でない恒常的な分岐元」が宣言に 1 つ以上あるときだけ「分岐元（<一覧>）のチェックアウトで `brw pr`」を案内し、無い（`main` が唯一の分岐元かつ保護）ときは「`brw pr` では作れない。GitHub 上で作成するか宣言（baseBranch・baseBranches・protectedBranches）を見直す」。`brw pr-template`（`brw.mjs` の `prTemplateFromBase`）は分岐元でも雛形と記入指示を出し、作成元・作成先（保護ブランチが 1 つのときそれ。決められなければ `brw pr --target` の注記）を示し、「作業外の変更」の節は「該当なし」（`buildTemplate` の `noTidy`。別コミットの予定・過去の別コミットを読まない）。分岐元向けの記入指示は、**比較の前に毎回**明示した refspec の `git fetch <リモート> +refs/heads/<保護>:refs/remotes/<リモート>/<保護> +refs/heads/<分岐元>:refs/remotes/<リモート>/<分岐元>` を案内し、`git log refs/remotes/<リモート>/<保護>..refs/remotes/<リモート>/<分岐元>`・`git diff --stat …...…` で比べる（ローカルの保護ブランチは古いことがあるので比べない。未コミットの変更は PR に含まれない旨を注記）。限定した fetch 設定の実 git で、案内の fetch で両参照が最新になることを確認している。分岐元の `brw pr-template` は作業の記録を読まないので「検証」の節は未記入のまま（書き手が書く）。
+- 8.1（2026-11-27、完了。レビュー 2 回）: 統合試験は `tests/integration-base-pr.mjs`（56 件。実際の `brw.mjs`・`agent-hooks.mjs` を spawn、一時リポジトリ＋bare remote＋偽 gh、実行中の `process.env` を隔離）。各 `brw pr` の前後で `snapshotOf`（HEAD・commit 数・ローカルの全ブランチ・bare remote の全 ref・git-receive-pack の回数・`.git/brw` の有無・`git worktree list --porcelain` の登録）を完全一致で比べ、分岐元が最新・リモート先行（取り込みで進む develop・HEAD・commit 数以外は不変）・既存 PR の再利用・再実行（POST が増えない）では別コミット・push・片付けなし、ローカル先行・分岐・差なし・承認待ち・`--confirmed` の非端末拒否・保護/宣言外/detached・`main` が唯一の分岐元かつ保護では書き込み 0 で止まることを確認。直接の `gh pr create` の拒否の案内（作れる組は `brw pr`、作れない組は作成画面の URL、開発間は `brw merge`、500 文字以内）。実行前後で `brw-fx-*`・`brw-int-bpr-*` が増えない確認つき。端末での `--confirmed` の受理は単体（`stdinIsTTY` 注入）。既存の他の試験が残す `/tmp/brw-fx-*`（約 29 件）は範囲外・未調査。
+- 8.3（2026-11-27、完了。レビュー 2 回）: SKILL.md の 4 章の冒頭に、手順 1〜4 と各項目は開発ブランチ向けであり分岐元から保護ブランチへの PR は専用の項目（作業ブランチを作らず、別コミット・push・片付けを行わない）を使う、という分岐を置き、**分岐元から保護ブランチへの PR**（分岐元のチェックアウトで `brw pr-template` → 本文を記入（取り込む内容は記入指示の明示した refspec の `git fetch` 後に `git log`・`git diff --stat`）→ `brw pr --title …`。3 段＝取り込み → 作成 → 報告だけ。止まる場合と承認が必要な宣言の `--confirmed`）と、`brw pr` で作れない組の手作業（開発ブランチ間は `brw merge`・同名は取り込み不要・その他は GitHub 上で作成画面の URL、URL が出ないときは Web 画面）を書いた。`references/setup.md` に小節「分岐元から保護ブランチへの PR（分岐元のチェックアウト）」、`references/config.md` の `autoApprove` の節に、`push:false` のとき分岐元からの PR も通常の承認になる旨を追加。評価ケース `evals/opens-pr-from-base`（fixture のバリアント `base-ahead`）。既存の評価ケースと同じく origin はローカルの bare で GitHub への接続は再現しない（`case.yaml` に制約を明記。判定は実行の trace）。追従の確認は `tests/instructions.mjs`（文単位・項目内の成立・4 章全体の矛盾語句の不在・変異 17 件）。評価ケースは未実行。
+- 5.2・8.2（2026-11-27、完了。観測の道具のレビューは 2 回。5・8 群はこれで完了）: 観測の道具は `tests/real-env/base-pr-observe.mjs`（段階 `api`・`host`。単体試験 `tests/base-pr-observe.mjs`、後始末の規則 `tests/real-env/cleanup-rules.mjs`・`tests/real-env-cleanup.mjs`）。実 GitHub の使い捨てブランチだけに書き込み（main・既存ブランチ・既存 PR に触れない。PR はマージしない）、結果は `tests/real-env/README.md` の「結果（brw-pr-handoff 5.2・8.2）」。**一致**: A1（分岐元役を head、保護役を base とする PR を API で作成できる）、A2（差なしは 422「No commits between」）、B1（実機の Claude Code が登録済みの宣言で `brw pr-template` → 本文の記入 → `brw pr --title … --target …` を実行し、PreToolUse の allow で PR が 1 件作成。直接の `gh pr create`・別コミット・push・`.git/brw` なし、リモートの分岐元役の先頭は不変）、B2（再実行で「PR を再利用しました」、重複なし）、B3（承認が必要な宣言の非端末は `--confirmed` の全文を案内して終了コード 1）、B3c（非端末の `--confirmed` は拒否、通信なし）。**実機で分かったこと**: 検証用の宣言が保護ブランチを 2 つにすると `brw pr` は作成先を決められず `--target` を求めて**書き込みなしで停止**する（7.2 の `resolveTarget` の挙動）。**経緯**: 最初の API 段階で道具が `gh api -i` の CRLF の本文を読めず A1 が「未観測」・A2 が「不一致」（実際は 201・422）→ 判定を直して回帰テスト。その実行で作られた PR #19 は記録漏れ→手で閉じ、再発防止として後始末を「記録された使い捨てブランチを head とするオープンな PR を GitHub に問い合わせて閉じる」形にし、`createdPrNumber`（番号が読めない 201 は head で探し、探せなければ中止）・PR 一覧の読み取り失敗は未観測にした。host 段階の最初の実行はカウンタの累計で中止（書き込み前）、2 回目は `--target` 不足で停止（PR 0 件）→ コマンドに `--target` を付けて全一致。PR #19〜#23 はすべてクローズ、`main` は不変（`bd2c9b8`）。未確認: Codex での分岐元からの PR、TTY での `brw pr --confirmed` の受理（単体は `stdinIsTTY` 注入）。
+- 最終検証（2026-11-27、`/kiro-validate-impl`。**判定は GO ではなく「利用者の判断待ち」**）: 全体試験 2564 件成功・失敗 0。独立した検証は NO-GO とし、次の 2 件を要件との差として挙げた。**(1) 要件 4.9（片付け後に続く操作を本体で実行できる状態にする）**: 実 Claude Code では、作業場所が消えると次のツール呼び出しの作業ディレクトリがホームに戻り（その呼び出しが「終了コード 1」と表示される）、自動では本体に戻らない。BRW は「`cd <本体>` してから続ける」案内を出すだけ（tasks.md の 4.x の記録・research.md の実エージェントの観測）。これは本機能の追加前の仕様段階で受け入れた運用上の制約で、要件の文面との差が残る。**要件を「案内で足りる」に改めるか、ホスト連携による復帰を設計し直すか、利用者の判断が要る。(2) 要件 1.11**: 長すぎる・不正な ref のとき作成画面の URL を省く実装だったため、要件に例外（安全な URL を作れないときは Web 画面の手順を示す、開発ブランチ間は `brw merge`、同名は取り込み不要）を追記した（要件の文面を変えたので、承認の更新が要る）。**対処したもの**: 設計書のファイル構成に `base-sync.mjs` を加え、`createOrReusePr` の実際の署名を記録した。**未確認**: Codex での分岐元からの PR、TTY での `brw pr --confirmed`、保護ブランチが `main` だけの実 GitHub での作成、評価ケース（`opens-pr-from-base`）の実行。
+- 9.2（2026-11-27、完了。レビュー 3 回）: `scripts/resume-record.mjs` の `writeRecord(main, entry, {lockWaitMs})`・`readRecords(main)`・`resumableFor(cwd, sessionId, now)`・`attachSession(main, sessionId, now, {lockWaitMs})`・`MAX_RECORDS=10`。記録は `<git 共通ディレクトリ>/brw/resume.json`（`{version:1, entries}`。先頭が最新・同じ branch は置き換え。ロックは `publish.mjs` の `acquire`、一時ファイル（0600）→ rename）。**記録の内容は後で案内文（モデルへ渡る）に使うので信頼できない入力として厳密に検証する（書き込みは `{ok:false}`、読み込みは該当 entry を捨てる）**: `branch` は `^[\p{L}\p{N}._/-]+$`（シェルで特別な意味を持つ文字を許さない）・255 文字以内・既存の禁止形、`prUrl` は null か `https`（2048 文字以内・空白/制御/書式/バッククォート/資格情報なし）、`repository` は `owner/name` の形、`sessionId` は null か 1〜200 文字（空文字・空白だけは null に正規化）、`at` は UTC の ISO 形式のみで暦日の補正（2026-02-30 など）を拒否。`resume.json` は `lstat` で通常ファイルのみ・256 KiB 超は読まない・`brw` ディレクトリや置き換え先・ロックがリンクなら書かない。`resumableFor` は同じ `sessionId`（null の記録は対象外）・24 時間以内（ちょうどは可・1 ミリ秒超は不可）・worktree が無い・追跡ブランチ `refs/remotes/<リモート>/<ブランチ>` がある・開発ブランチのときだけ最新 1 件を返す（副作用なし・通信なし）。`attachSession` は直近 2 分以内で `sessionId` が null の最新 1 件だけに付ける（9.4 の `PostToolUse` が `brw pr` の成功で呼ぶ）。`work-remainder.mjs` の `worktreeList` を export した。
+- 9.3（2026-11-27、完了。レビュー 2 回）: `finishUp`（`scripts/pr-flow.mjs`）が片付け後に再開の記録（9.2 の `writeRecord`）を書き、`brw resume <ブランチ>`・`brw create`・要件 4.9 の `cd <本体>` を案内する。再開コマンドの CLI パスが削除した作業場所の配下なら本体の同じ相対パスに置換し、本体に無ければ手動の案内（`cliPathFor`・`resumeLine`）。`brw resume`（引数なし）は `origin` の追跡ブランチだけを一覧にし（上限 20 件）、`origin` が無ければ案内して終了コード 0。引数ありの動作は不変。本体の複製の有無は存在確認のみ（版の一致は見ない）。
+- 9.4（2026-11-27、完了。レビュー 6 回）: `agent-hooks.mjs` の `UserPromptSubmit`（`resumeGuidanceOf`。Claude・Codex 共通、500 文字以内、`harmlessText` で無害化、見つからない各場合は無応答、副作用なし）と、`PostToolUse` の `attachResumeSession`（信頼済み `node <brw.mjs> pr` の成功だけ。`resume-record.mjs` の `attachSession(main, sessionId, now, {branch})` でそのブランチの記録に限って付ける）。登録は hooks/hooks.json・hook-install.mjs・`HOST_EVENTS`・hook-diagnose.mjs の `ROUTE_EVENTS`。**関連付けの信頼境界（レビューで 5 回締めた）**: 出力は信頼できない入力なので、(1) ブランチ名は出力の「続きの再開:」行（`pr-flow.mjs` が生成する 2 形式の行全体に一致するものだけ。文言は `RESUME_LINE_HEAD`・`RESUME_MANUAL_NOTE` を共有）から取り、見出しがあるのに取り出せない行が 1 つでもある・2 種類以上のブランチがあるときは付けない、(2) 本体は出力の内容では決めず、実行先のリポジトリ、または消えた実行先が `CLAUDE_PROJECT_DIR` の導出先（`<本体>/.claude/worktrees/<別名>`）の配下のときだけ（PostToolUse は strict。存在する Git 外の実行先では付けない。UserPromptSubmit は cwd が Git 外でも導出を使う）。**限界**: 実行先が消えていて導出先の配下にない・cwd が削除済みで `CLAUDE_PROJECT_DIR` も無い、削除された作業場所の中の CLI、cd 以外の `&&` 連結は付かない（案内されない側）。Codex の実機の `tool_response`（文字列）と cwd が本体のままの観測の再確認は 9.6 で行う。`attachSession` は publish.mjs と同名のため `attachResumeRecord` として import。
+- 9.5（2026-11-27、完了。レビュー 5 回）: SKILL.md の 3 章（公開後の続き・一覧・フックの案内・記録・既存 PR の再利用）と 4 章（片付け後の続き）、references/setup.md の小節「公開後の続きの作業（再開）」、評価ケース `evals/continues-after-pr-cleanup`（fixture のバリアント `published-cleaned`）。**文書は実装の事実に合わせ、断定を避ける**: 一覧は取得済みの `origin` の追跡ブランチから作業場所が無い開発ブランチを最大 20 件（公開の記録つきを先頭、無いものは後ろに名前順）、記録は書けたときに残る（失敗は警告のみで、記録が無い・古いとフックの案内の対象にならないことがある）、既存の PR の再利用は「同じ head のオープンな PR が 1 件・取り込み先が同じ・draft でない」ときだけ（それ以外は止まる、閉じた PR は再利用されない）。追従試験 `tests/instructions.mjs` は文単位で必須語句と許可した否定語（それ以外の否定を含まない）を確かめ、変異版 28 件。評価ケースは未実行。
+- 9.6 前半（2026-11-27、統合試験。レビュー 2 回＋後始末の追加修正は親が確認）: `tests/integration-resume.mjs`（22 件。実際の `brw.mjs`・`agent-hooks.mjs` を spawn、一時リポジトリ・bare remote・偽の gh・試験用 ssh）で、`brw pr`（片付け）→ 記録 → PostToolUse の関連付け → UserPromptSubmit（副作用なし）→ `brw resume`（作り直し）→ 続きの `brw pr`（既存の PR を再利用、POST が増えない・PR 1 件・記録 1 件）→ Codex 形式、を確認。**不具合を発見して修正**: 片付けで `branch.<名>.brwBase`（切り出し元の記録）が消え、再開後の続きの `brw pr` が既定の取り込み先で既存の PR と食い違って止まった（書き込み無しの安全側の停止）→ 再開の記録に任意の `base` を追加（片付けの前に `branchBase` を読んで保存。後方互換、不正値は null）、`brw resume` が作り直したとき brwBase が未設定・記録に有効な base・宣言で認められた名前のときだけ復元（設定後に読み直して確認し、失敗は警告）。設計書（`ResumeEntry`・復元）を更新。要件は変えていない。後半（実機の Claude Code・Codex での観測）は未実施。
+- 9.6 後半（2026-11-27、**差し戻し**）: 実機（Claude Code 2.1.329、Codex は認証なしで未観測）の観測の道具 `tests/real-env/resume-observe.mjs`（単体試験 `tests/resume-observe.mjs`）。結果は `tests/real-env/README.md`。**想定と異なる結果**: 本体で開始したセッションでは、`brw pr`（片付けつき）の Bash 呼び出しが「Exit code 1」と報告され（作業ディレクトリが消えるため）`PostToolUse` が届かず、記録の `sessionId` が空のまま → ターン 2 の `UserPromptSubmit` の案内は 3 回とも出ない（作業場所の再作成はモデルが依頼文から行ったもので、フックの効果ではない）。`; cd <本体>` で戻す形は `PostToolUse` が届くが字句解析が `;` を解釈せず付かない。作業場所の中で開始しても削除後にフックが動くことがあった（3 回中 1 回）。設計（9.4 の `attachSession` が前提）と現実の食い違いのため、`feasibility.md` の設計の確認を `未通過` に戻し、9.6 を Blocked にした。
+- 9.7（2026-11-27、完了。レビュー 3 回で、残る指摘 1 件は**受け入れた限界**として記録）: `resume-record.mjs` の `writeSessionHint`・`readSessionHint`（`<git 共通ディレクトリ>/brw/session-hint.json`、`{version:1, sessionId, dir, at}`。0600・一時ファイル→rename・ロック下で検証→採用→消費を一体化・削除できなければ返さない・読み取りは `O_NOFOLLOW|O_NONBLOCK` で開いた fd を `fstat`（通常ファイル・4 KiB 以内）し上限つきで読む＝FIFO で止まらない。`resume.json` の読み取りも同じ `readCapped`）、`agent-hooks.mjs` の `PreToolUse`（信頼済み `brw pr`・session_id あり・本体が決まるときだけメモを書く。許可・拒否の判定は不変）、`finishUp` が削除前に読んで記録の `sessionId` に入れる（作業場所と同じ・配下の `dir`・10 分以内）。統合試験で `PostToolUse` を一切送らなくても案内が出る。**受け入れた限界（レビューの未解決の指摘）**: 同じ作業場所で複数のセッションの `brw pr` が重なり、後続の呼び出しが拒否・失敗して（または書き込みに失敗して）メモが残ると、別のセッションのメモを採用しうる。呼び出しを識別する手段（ホストの入力・環境）が無く、プロセスの親子を辿る方式は移植性・複雑さの割に得るものが小さいと判断した。**影響は、別セッションへの `brw resume` を勧める文脈の注入だけ（副作用なし。「新しい作業なら無視してよい」を添える。要件 7.5）**。要件 7.6 の「別のセッションなら何も渡さない」の例外的な誤作動になるため、最終検証で利用者へ報告する。
+- 9.8（2026-11-27、完了）: 実機の Claude Code 2.1.329 で再観測（`tests/real-env/README.md` の 9.8 と追記）。**関連付けは解消**（PreToolUse のメモで記録に `sessionId` が付く 6/6、PreToolUse の `session_id` は UserPromptSubmit と同じ 6/6）。ラッパーの記録で、ターン 2 の UserPromptSubmit に BRW が案内を返したのは 6/6。**未確認として残る**: モデルが案内の文言を答えに示した確認（Haiku が問いに答えない回があり確認できず。到達は 9.1 の PoC で確認済み）、Codex の実機（認証なし）。**想定と異なる結果**: 作業場所の中で開始したセッションでも削除後に UserPromptSubmit が動き案内が返った（3/3）ため、設計の「動かない」は保証ではなく最低限の限界とした。`feasibility.md` の設計の確認を `通過` にした（根拠の無い前提なし）。
+- 最終検証 2 回目（2026-11-28、`/kiro-validate-impl`）: 全体試験 2965 件成功・失敗 0。独立した検証の指摘は 4 件。**対処**: (1) 要件 7.3 の一覧が 21 件目以降を件数だけにしていた → `brw resume --all` で全件を表示できるようにした（SKILL.md・setup.md・試験を追従）。(2) 設計書の古い記述（`syncBase` の契約、作業場所の中で開始した場合にフックが動かないという断定）を実装・観測に合わせた。(3) 文書（SKILL.md・setup.md）の「動かない」の断定も観測に合わせた。**受け入れて記録する事項（要件の文面との差、利用者へ報告）**: 要件 7.6（別セッションには何も渡さない）に対し、同じ作業場所で複数セッションの `brw pr` が重なったときの誤採用の限界（9.7）。要件 7.2 は記録の書き込みが失敗しうる（警告のみで片付けは完了、案内は出ない）。**未確認として残る**: Codex の実機の案内の通し確認（認証なしで未観測）、モデルが案内の文言を答えに示した確認（案内が返ることはラッパーで 6/6、到達は 9.1 の PoC）、評価ケース（`opens-pr-from-base`・`continues-after-pr-cleanup`）の実行。

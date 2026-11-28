@@ -8,6 +8,7 @@
 //   pr --completion <申告> --verification <要約> [--title <タイトル>] [--body-file <ファイル>] [--failed] [--target <取り込み先>]
 //                              PR 作成の入口。作業外の変更の別コミット・準備・計画・公開・片付け（宣言で有効なとき）を順に行う
 //   resume <ブランチ>          作業ブランチの続きを始める（無ければリモートかローカルのブランチから worktree を作る）
+//   resume                     再開できる作業ブランチの一覧を表示する（ネットワークは使わない）
 //   merge <取り込み元>         開発ブランチ同士の取り込みをローカルでマージする（PR は作らない。取り込み先は現在の worktree のブランチ）
 //   work start                 変更作業を始め、作業 ID を 1 つ出力する（調査だけの依頼では使わない）
 //   work resume --work <id>    中断した作業を明示して再開する（作業 ID を 1 つ出力する）
@@ -16,6 +17,7 @@
 //   work plan --work <id>      公開の計画を作り、計画 ID を出力する（読み取りと記録だけ。遠隔は書き換えない）
 //   publish --work <id> --plan <計画 ID> [--title <t> --body-file <path>]   計画どおりに push し、保護対象は PR を作成・再利用する（--confirmed は利用者が自分の端末で実行するときだけ有効）
 //   pause --work <id> --reason <理由>   作業の次の公開を保留する（再開は work resume）
+//   pr-merge <PR 番号>         取り込み先が恒常的な分岐元の PR を、利用者の端末で確認してから squash でマージする（エージェントからは実行できない）。終了コード: 0 マージ済み、1 実行せず・失敗、2 使い方
 //   url [ブランチ]             プレビューURLを表示
 //   check [--branches-only] [--ruleset]  宣言・workflow・provider 設定の整合検査。続けてフックの稼働を経路ごとに表示し、--ruleset で Ruleset の状態を読み取りで検査する
 //                              終了コード: 0 問題なし、1 宣言・整合の誤りや Ruleset のずれ、3 Ruleset の確認不能・過去の選択が読めない保留（見送り・未選択は 0）（フックの状態は終了コードに含めない）
@@ -35,7 +37,9 @@ import {
   scanWorkflows, shortRef, undeclaredCiBranches, aliasOf, worktrees, deliveryOf,
 } from "./lib.mjs";
 import { getProvider, previewUrl, previewUrlInfo } from "./providers/index.mjs";
-import { denyOfCommand } from "./agent-hooks.mjs";
+import { denyOfCommand, remainderGuidanceForCwd } from "./agent-hooks.mjs";
+import { mainWorktreeOf, visible } from "./work-remainder.mjs";
+import { readRecords } from "./resume-record.mjs";
 import * as deployCf from "./deploy/cloudflare-workers.mjs";
 import { applyWorkersDev } from "./providers/cloudflare-previews.mjs";
 import { carryChanges } from "./carry.mjs";
@@ -43,8 +47,10 @@ import { finishBlocker, recordedState, removeBranch } from "./cleanup.mjs";
 import { removeWorkRecordAt } from "./publish.mjs";
 import { installWorktreeHooks } from "./hook-install.mjs";
 import { runPause, runPublish, runWork } from "./publish-cli.mjs";
+import { runPrMerge } from "./pr-merge.mjs";
 import { runPr } from "./pr-flow.mjs";
-import { bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { basePrGuidance, bodyPathOf, instruction, prepareBody } from "./pr-template.mjs";
+import { resolveTarget } from "./base-sync.mjs";
 import { previewTidy } from "./tidy.mjs";
 import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
@@ -580,13 +586,58 @@ function merge(args) {
   fail(`取り込みに失敗しました（${source} → ${target}）。取り込みは行われていません。`);
 }
 
+// 引数なしの resume の一覧（brw-pr-handoff 7.3・9.3）の上限
+const RESUME_LIST_LIMIT = 20;
+
+// 再開できる作業ブランチの一覧。取得済みの遠隔の追跡ブランチと再開の記録から作る（ネットワークは使わない）。
+// 対象: 宣言の開発ブランチで、作業場所（worktree）が無いもの。公開の記録があるものを先頭（記録の新しい順）、続けて名前順。
+function resumeList(main, others, config, all = false) {
+  console.log("使い方: brw resume <ブランチ>（一覧: brw resume、全件: brw resume --all）");
+  // 引数ありの resume は origin からだけ取得するため、一覧の候補も origin の追跡ブランチだけにする
+  if (!(git(main.path, "remote") ?? "").split("\n").includes("origin")) {
+    console.log("origin が無いので一覧を出せません。ブランチ名を指定して brw resume <ブランチ> で再開してください。");
+    return;
+  }
+  const prefix = "refs/remotes/origin/";
+  const names = new Set();
+  for (const ref of (git(main.path, "for-each-ref", "--format=%(refname)", prefix) ?? "").split("\n").filter(Boolean)) {
+    const b = ref.slice(prefix.length);
+    if (b !== "HEAD") names.add(b);
+  }
+  const checkedOut = new Set([main, ...others].map((w) => w.branch));
+  const candidates = [...names].filter((b) => classifyBranch(config, b) === "development" && !checkedOut.has(b));
+  const records = new Map(readRecords(main.path).map((r, rank) => [r.branch, { ...r, rank }]));
+  const list = [
+    ...candidates.filter((b) => records.has(b)).sort((a, b) => records.get(a).rank - records.get(b).rank),
+    ...candidates.filter((b) => !records.has(b)).sort(),
+  ];
+  if (list.length === 0) console.log("再開できる作業ブランチはありません。新しい作業は brw create <名前> で始めてください。");
+  else {
+    console.log("再開できる作業ブランチ（公開の記録があるものを先頭に、新しい順）:");
+    // 既定は上限 RESUME_LIST_LIMIT 件まで。--all のときは全件を出す（要件 7.3）
+    for (const b of all ? list : list.slice(0, RESUME_LIST_LIMIT)) {
+      const rec = records.get(b);
+      console.log(`  - ${visible(b)}${rec ? `（PR: ${visible(rec.prUrl ?? "なし")}、公開: ${visible(rec.at)}）` : ""}`);
+    }
+    if (!all && list.length > RESUME_LIST_LIMIT) console.log(`ほか ${list.length - RESUME_LIST_LIMIT} 件（brw resume --all で全件を表示できます）`);
+  }
+  console.log("注意: この一覧は取得済みの追跡ブランチに基づきます。最新でなければ git fetch を実行してから、もう一度確かめてください。");
+}
+
 // 作業ブランチの続きを始める。ローカルに無ければリモートから取得し直して worktree を作り、
-// 残っていればリモートの更新（別の環境からの push など）を取り込んでから使う
+// 残っていればリモートの更新（別の環境からの push など）を取り込んでから使う。引数が無いときは再開できる作業ブランチの一覧を出す
 function resume(args) {
   const cwd = process.cwd();
   repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
   const [main, ...others] = worktrees(cwd);
   const config = need(main.path);
+  // --all は引数なしの一覧だけに使える（ブランチ名と同時に指定すると使い方の誤り）
+  const all = args.includes("--all");
+  if (all && args.some((a) => a !== "--all" && !a.startsWith("--"))) fail("--all は引数なしの一覧にだけ使えます（ブランチ名と同時には指定できません）。", 2);
+  if (args.length === 0 || (all && args.length === 1)) {
+    resumeList(main, others, config, all);
+    return;
+  }
   const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: resume <ブランチ>", 2);
   // 共通判定: 再開できるのは開発ブランチだけ（保護・分岐元・宣言外は拒否）
   const cls = classifyBranch(config, branch);
@@ -621,10 +672,53 @@ function resume(args) {
   const wt = join(main.path, ".claude/worktrees", aliasOf(branch));
   mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
   execFileSync("git", ["worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`], { cwd: main.path, stdio: "inherit" });
+  restoreBase(main.path, config, branch);
   console.log(`リモートから取得し直して worktree を作りました: ${branch}\n  worktree: ${wt}`);
   hooksForWorktree(main.path, wt);
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
+}
+
+/**
+ * 作業場所をリモートから作り直したとき、片付けで消えた切り出し元（brwBase）を再開の記録の base から戻す（brw-pr-handoff 9.5）。
+ * brwBase が既にあれば上書きしない。記録が無い・base が無い・宣言で認められない（undeclared）なら何もしない（従来どおり）。
+ */
+function restoreBase(mainPath, config, branch) {
+  const key = `branch.${branch}.brwBase`;
+  if (git(mainPath, "config", key) !== null) return;
+  const base = readRecords(mainPath).find((r) => r.branch === branch)?.base;
+  if (!base || classifyBranch(config, base) === "undeclared") return;
+  git(mainPath, "config", key, base);
+  // 書き込みの結果を読み直して確かめてから成功を表示する。失敗は警告（終了コードは変えない）
+  if (git(mainPath, "config", "--get", key) === base) console.log(`切り出し元（${base}）を再開の記録から復元しました: ${branch}`);
+  else console.error(`警告: 切り出し元の復元に失敗しました（${branch} の brwBase を ${base} に設定できませんでした）。続きの公開で取り込み先が既存の PR と食い違うときは \`brw pr --target <取り込み先>\` を指定してください。`);
+}
+
+// 分岐元の worktree での pr-template（brw-pr-handoff 7.4）。作成元（分岐元）と作成先（保護ブランチ）を示し、作業外の変更の節は該当なしとする。
+// 別コミットの予定や過去の一覧は読まない。記入指示の取り込み先は作成先にする。作成先が 1 つに決まらないときは、--target の指定を注記する。
+function prTemplateFromBase(cwd, config, branch) {
+  const main = worktrees(cwd)[0]?.path ?? repoRoot(cwd);
+  const language = config.pullRequest.language;
+  const resolved = resolveTarget(config, undefined);
+  const target = resolved.ok ? resolved.target : undefined;
+  console.log(`作成元（分岐元）: ${branch}`);
+  console.log(target !== undefined
+    ? `作成先（保護ブランチ）: ${target}`
+    : "作成先を決められない（宣言の保護ブランチが 1 つに決まらない）。brw pr --target <保護ブランチ> で指定してください。");
+  const fromBase = { remote: publishState.remoteNameOf(cwd, branch), base: branch, target };
+  emitBody(bodyPathOf(main, branch), { worktree: cwd, language, base: target, noTidy: true }, language, fromBase);
+}
+
+// 本文ファイルを用意して、状態と記入指示を出力する（書き終えた本文・記入途中の本文は上書きしない）
+function emitBody(path, ctx, language, fromBase) {
+  const r = prepareBody(path, ctx);
+  if (r.filled) {
+    console.log(`本文は記入済みです（上書きしません）: ${path}`);
+    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
+    return;
+  }
+  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
+  console.log(instruction({ bodyPath: path, base: ctx.base, language, fromBase }));
 }
 
 // PR 本文の雛形を本文置き場に書き出し、記入指示を出力する（記入そのものは書き手が行う。書き終えた本文は上書きしない）
@@ -633,8 +727,11 @@ function prTemplate(args) {
   const cwd = process.cwd();
   const root = repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
-  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチの worktree で実行してください。");
-  if (classifyBranch(config, branch) !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。`);
+  const branch = currentBranch(cwd) ?? fail("ブランチを確定できません（detached HEAD）。開発ブランチ、または恒常的な分岐元の worktree で実行してください。");
+  const cls = classifyBranch(config, branch);
+  if (cls === "base") return prTemplateFromBase(cwd, config, branch);
+  if (cls === "protected") fail(`'${branch}' は保護ブランチで、開発ブランチではないため、本文を用意しません。${basePrGuidance(config)}`);
+  if (cls !== "development") fail(`'${branch}' は開発ブランチではないため、本文を用意しません。開発ブランチは brw create で作ったブランチの worktree で実行してください。`);
   const main = worktrees(cwd)[0]?.path ?? root;
   const base = branchBase(cwd, config, branch);
   const language = config.pullRequest.language;
@@ -643,15 +740,7 @@ function prTemplate(args) {
   const ver = cur.ok ? cur.work?.ready?.verification : null;
   const planned = previewTidy(cwd);
   if (planned?.secretLike.length) fail(`秘密情報らしい名前のファイルが未コミットの変更に含まれます: ${planned.secretLike.join(", ")}。コミットしないなら .gitignore に追加するか削除してください（含まれたままでは brw pr が止まります）。`);
-  const path = bodyPathOf(main, branch);
-  const r = prepareBody(path, { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false });
-  if (r.filled) {
-    console.log(`本文は記入済みです（上書きしません）: ${path}`);
-    console.log("書き直すときは、そのファイルを直接編集します。書き終えていれば、brw pr を実行してください。");
-    return;
-  }
-  console.log(r.written ? `本文の雛形を書き出しました: ${path}` : `本文ファイルは既にあります（上書きしません）: ${path}`);
-  console.log(instruction({ bodyPath: path, base, language }));
+  emitBody(bodyPathOf(main, branch), { worktree: cwd, language, base, planned: planned?.files ?? [], verification: ver?.summary ?? null, failed: ver ? ver.passed === false : false }, language);
 }
 
 function url(args) {
@@ -754,9 +843,23 @@ function renderWrangler(args) {
 // 手順書の経路で、共通の判定の拒否を必ず止める操作の種類: ブランチの作成・再開（create）と PR 作成（pr-create）
 const GUARD_OP_KINDS = ["create", "pr-create"];
 
+// 終了前の残りの確認（16.4）。コマンドを渡さず、全 worktree の残りを Stop と同じ判定で見る（フックが使えない環境向け）。
+// 基準は本体の worktree にそろえ、どの worktree から実行しても同じ出力になるようにする。判定できなければ残り無しとして扱う。
+function guardFinish() {
+  const main = mainWorktreeOf(process.cwd());
+  const guidance = main ? remainderGuidanceForCwd(main) : null;
+  if (guidance === null) {
+    console.log("[allow] 未コミットの変更も未 push の commit も残っていません。");
+    return;
+  }
+  console.log(`[block] ${guidance}`);
+  process.exit(1);
+}
+
 // Codex などフックが自動適用されない環境向け。判定のみ行い、コマンドは実行しない。
 function guard(args) {
-  if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド"', 2);
+  if (args.length === 1 && args[0] === "--finish") return guardFinish();
+  if (args.length !== 1) fail('使い方: guard "git commit / git push のコマンド" または guard --finish', 2);
   // 作成・再開・PR 作成を含むコマンドは、共通の判定（フックと同じ）が拒否したら、拒否の code によらず止める。
   // それ以外（commit・push だけ）は従来の判定へ進み、出力と終了コードを変えない
   const denial = denyOfCommand(args[0], process.cwd());
@@ -783,6 +886,8 @@ if (isMain) {
     work: async (a) => { process.exitCode = await runWork(a); },
     publish: async (a) => { process.exitCode = await runPublish(a); },
     pause: async (a) => { process.exitCode = await runPause(a); },
+    // PR のマージ（18.3）。利用者の端末でだけ実行できる（端末判定は pr-merge.mjs が行う）
+    "pr-merge": async (a) => { process.exitCode = await runPrMerge(a); },
   };
   if (!cmds[sub]) fail(`サブコマンドは ${Object.keys(cmds).join(" / ")} のいずれかです。`, 2);
   await cmds[sub](rest);

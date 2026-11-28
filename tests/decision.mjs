@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyCommand, classifyMcpCall } from "../scripts/operation-policy.mjs";
-import { contextFor, decisionSignature, evaluate, evaluateAll } from "../scripts/operation-decision.mjs";
+import { contextFor, decisionSignature, evaluate, evaluateAll, prAlternative, shownRef } from "../scripts/operation-decision.mjs";
 import { gitOut, mkRepoWithRemote, mkWorktree } from "./support/git-fixture.mjs";
 
 const CONFIG = { workBranches: ["dev/*"], protectedBranches: ["main"], baseBranch: "develop" };
@@ -36,7 +36,7 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/1.2 保護対象・恒常的な分岐元への切り替えは適合（通常のホスト承認に委ねる）", ["git switch main", "git switch develop"].map((x) => sig(ev(x))), Array(2).fill(["pass", "compliant", "normal", "branch-resume-protected"]));
 
   // ---- 1.3 直接の変更 ----
-  eq("enforcement/1.3 開発ブランチへの commit は適合", sig(ev("git commit -m x")), ["pass", "compliant", "notApplicable", "commit-development"]);
+  eq("enforcement/1.3 開発ブランチへの commit は適合（登録済みの宣言なら確認を省略できる）", sig(ev("git commit -m x")), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
   eq("enforcement/1.3 保護・分岐元・宣言外への commit は拒否", ["main", "develop", "other/z"].map((b) => on(b, () => sig(ev("git commit -m x")))), ["main", "develop", "other/z"].map(() => ["deny", "violation", "notApplicable", "direct-update"]));
   eq("enforcement/1.3 保護・分岐元・宣言外への push は拒否", ["git push origin main", "git push origin develop", "git push origin other/z", "git push origin dev/foo:main", "git push origin dev/foo dev/foo:develop"].map((x) => [ev(x).verdict, ev(x).code]), Array(5).fill(["deny", "direct-update"]));
   eq("enforcement/1.3 拒否理由に対象のブランチ名と分類を含める", (() => { const x = ev("git push origin main"); return [x.targets, x.facts.branchClass, /main/.test(x.reason)]; })(), [["main"], { main: "protected" }, true]);
@@ -89,7 +89,20 @@ export const runDecisionChecks = async (eq) => {
     all("git push origin dev/foo && git push origin dev/other").verdict, all("git push origin dev/foo && git commit -m x").verdict,
     all("git push origin dev/foo && git push -f origin dev/other").verdict, all("git push origin dev/foo && git push origin main").verdict,
     all("git status").verdict,
-  ], ["eligibleForApproval", "pass", "pass", "deny", "pass"]);
+  ], ["eligibleForApproval", "eligibleForApproval", "pass", "deny", "pass"]);
+
+  // ---- 2.9・2.10 開発ブランチの通常の commit の確認省略（タスク 15.3） ----
+  const commitOf = (cmd, dir = d) => { const o = classifyCommand(cmd, dir).operations[0]; return evaluate(o, contextFor(o)); };
+  const cfgRepo = (autoApprove, opts = {}) => mkRepoWithRemote({ branch: "dev/foo", config: autoApprove === undefined ? CONFIG : { ...CONFIG, autoApprove }, ...opts });
+  eq("enforcement/2.9 登録済みで通常の commit は確認を省略できる", sig(commitOf("git commit -m x")), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
+  eq("enforcement/2.9 commit 単体の全体判定も確認を省略できる", all("git commit -m x").verdict, "eligibleForApproval");
+  eq("enforcement/2.9 autoApprove.commit が明示の true でも確認を省略できる", (() => { const r = cfgRepo({ commit: true }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return sig(x); })(), ["eligibleForApproval", "compliant", "skip", "commit-development"]);
+  eq("enforcement/2.9 未登録の宣言の commit は適合でも確認を省略しない", (() => { const r = cfgRepo(undefined, { register: false }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "unregistered"]);
+  eq("enforcement/2.9 編集中の宣言の commit は確認を省略しない", (() => { const r = cfgRepo(undefined); writeFileSync(join(r.dir, ".branch-release-workflow.json"), JSON.stringify({ ...CONFIG, autoApprove: { commit: true } })); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "unregistered"]);
+  eq("enforcement/2.9 登録済みで autoApprove.commit=false の commit は確認を省略しない", (() => { const r = cfgRepo({ commit: false }); const x = commitOf("git commit -m x", r.dir); r.cleanup(); return [...sig(x), x.approvalWhy]; })(), ["pass", "compliant", "normal", "commit-development", "opt-out"]);
+  eq("enforcement/2.10 通常でない commit は確認を省略しない（--amend・--no-verify・設定の上書き・環境変数の前置・展開を含むメッセージ）", ["git commit --amend -m x", "git commit --no-verify -m x", "git -c user.name=x commit -m x", "FOO=bar git commit -m x", "git commit -m \"$VAR\""].map((x) => { const v = commitOf(x); return [...sig(v).slice(0, 3), v.approvalWhy]; }), Array(5).fill(["pass", "compliant", "normal", "not-normal"]));
+  eq("enforcement/2.10 commit 以外の経路（rebase）は確認を省略しない", (() => { const v = commitOf("git rebase main"); return [...sig(v).slice(0, 3), v.approvalWhy]; })(), ["pass", "compliant", "normal", "not-commit-path"]);
+  eq("enforcement/2.9 保護・分岐元・宣言外への commit は登録済みでも拒否のまま", ["main", "develop", "other/z"].map((b) => on(b, () => sig(commitOf("git commit -m x")))), ["main", "develop", "other/z"].map(() => ["deny", "violation", "notApplicable", "direct-update"]));
 
   // ---- 2.6 作業で記録された禁止 ----
   eq("enforcement/2.6 作業で push を禁止した場合は適合でも拒否（禁止は既定の動作より優先）", (() => { const x = ev("git push origin dev/foo", { noPush: true }); return [...sig(x), x.approvalWhy]; })(), ["deny", "compliant", "prohibited", "push-development", "work-restriction"]);
@@ -132,6 +145,11 @@ export const runDecisionChecks = async (eq) => {
     return out.map((x) => [x.verdict, x.code]);
   })(), [["deny", "github-merge"]]);
   eq("enforcement/3.2 GitHub マージの拒否は対象が確定できなくても同じ理由にする", [ev("gh pr merge").verdict, ev("gh pr merge $N").verdict], ["deny", "deny"]);
+  eq("brw-enforcement/18.4 GitHub マージの拒否の案内は brw pr-merge を別の端末で実行する旨と、保護ブランチは GitHub 上でマージする旨を含む", (() => {
+    const g = ev("gh pr merge 5").alternative ?? "";
+    return [g.includes("pr-merge <番号>"), g.includes("別の端末"), g.includes("保護ブランチ向けは GitHub 上でマージしてください。")];
+  })(), [true, true, true]);
+  eq("brw-enforcement/18.4 ローカルマージの拒否の案内は従来の文面のまま（brw pr-merge を含まない）", on("main", () => (ev("git merge dev/other").alternative ?? "").includes("pr-merge")), false);
 
   // ---- sync-base-branch 1.1 取り込みの fast-forward 指定・リベースの実効値と由来 ----
   {
@@ -530,7 +548,165 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/3.3 MCP の PR 作成も同じ判定", (() => { const op = classifyMcpCall("mcp__github__create_pull_request", { owner: "acme", repo: "app", title: "t", head: "dev/foo", base: "main" }, d).operations[0]; return sig(evaluate(op, { ...contextFor(op), origin: "brw-publish" })); })(), ["eligibleForApproval", "compliant", "skip", "pr-create-protected"]);
   eq("enforcement/3.3 開発ブランチ間の PR 作成は拒否し、ローカルマージを案内する", (() => { const x = pr("dev/foo", "dev/other"); return [x.verdict, x.code, /brw\.mjs.? merge/.test(x.alternative)]; })(), ["deny", "pr-create-development", true]);
   eq("enforcement/3.3 宣言外への PR 作成は拒否する", [pr("dev/foo", "other/z"), pr("dev/foo", "feature/q")].map((x) => [x.verdict, x.code]), Array(2).fill(["deny", "pr-create-undeclared"]));
-  eq("enforcement/3.3 取り込み元が開発ブランチでない PR 作成は拒否する", [pr("main", "develop"), pr("other/z", "main"), pr("develop", "main")].map((x) => [x.verdict, x.code]), Array(3).fill(["deny", "pr-create-head"]));
+  eq("enforcement/3.3 取り込み元が開発ブランチでない PR 作成は拒否する（分岐元→保護ブランチを除く）", [pr("main", "develop"), pr("other/z", "main"), pr("develop", "dev/foo")].map((x) => [x.verdict, x.code]), Array(3).fill(["deny", "pr-create-head"]));
+
+  // ---- brw-pr-handoff 6.1: 分岐元から保護ブランチへの PR を、規則に適合する作成として判定する（brw-publish 起点） ----
+  const stageRepo = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, baseBranches: ["stage"] } });
+  gitOut(stageRepo.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
+  gitOut(stageRepo.dir, "remote", "set-url", "--push", "origin", stageRepo.remote);
+  // 組（取り込み元・取り込み先）ごとに、起点つきで判定する。dir は作業ディレクトリ（stageRepo は分岐元に stage を宣言したリポジトリ）
+  const prIn = (dir, head, base, origin = "brw-publish") => {
+    const op = classifyCommand(`gh pr create --head ${head} --base ${base} --title t --body b`, dir).operations[0];
+    return evaluate(op, { ...contextFor(op), origin });
+  };
+  const pairs = [
+    // [取り込み元, 取り込み先, 判定に使うリポジトリ, 期待の verdict, 期待の code]
+    ["dev/foo", "main", d, "eligibleForApproval", "pr-create-protected"],
+    ["dev/foo", "develop", d, "eligibleForApproval", "pr-create-protected"],
+    ["develop", "main", d, "eligibleForApproval", "pr-create-base-protected"],
+    ["develop", "develop", d, "deny", "pr-create-head"],
+    ["develop", "stage", stageRepo.dir, "deny", "pr-create-head"],
+    ["develop", "dev/other", d, "deny", "pr-create-head"],
+    ["develop", "other/z", d, "deny", "pr-create-head"],
+    ["main", "main", d, "deny", "pr-create-head"],
+    ["main", "develop", d, "deny", "pr-create-head"],
+    ["main", "dev/other", d, "deny", "pr-create-head"],
+    ["dev/foo", "dev/other", d, "deny", "pr-create-development"],
+    ["other/z", "main", d, "deny", "pr-create-head"],
+    ["other/z", "develop", d, "deny", "pr-create-head"],
+  ];
+  eq("brw-pr-handoff/6.1 組ごとの判定（brw-publish 起点）。分岐元→保護ブランチだけが新たに適合する", pairs.map(([h, b, repo]) => { const x = prIn(repo, h, b); return [x.verdict, x.code]; }), pairs.map(([, , , v, c]) => [v, c]));
+  eq("brw-pr-handoff/6.1 分岐元→保護ブランチの適合も、確認省略の条件（autoApprove.pullRequest）を従来どおり見る", (() => {
+    const x = prIn(d, "develop", "main");
+    const op = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: { pullRequest: false } } });
+    gitOut(op.dir, "remote", "set-url", "origin", "https://github.com/acme/app.git");
+    const o = classifyCommand("gh pr create --head develop --base main --title t --body b", op.dir).operations[0];
+    const y = evaluate(o, { ...contextFor(o), origin: "brw-publish" });
+    op.cleanup();
+    return [sig(x), y.verdict, y.approvalWhy];
+  })(), [["eligibleForApproval", "compliant", "skip", "pr-create-base-protected"], "pass", "opt-out"]);
+  eq("brw-pr-handoff/6.1 分岐元→保護ブランチも、作業の禁止（noPr）では拒否する", (() => { const o = classifyCommand("gh pr create --head develop --base main --title t --body b", d).operations[0]; const x = evaluate(o, { ...contextFor(o, { noPr: true }), origin: "brw-publish" }); return sig(x); })(), ["deny", "compliant", "prohibited", "pr-create-base-protected"]);
+  eq("brw-pr-handoff/6.1 エージェント起点は、分岐元→保護ブランチの PR も pr-create-use-brw で拒否する", ["develop", "dev/foo"].map((h) => prIn(d, h, "main", "agent")).map((x) => [x.verdict, x.code]), [["deny", "pr-create-use-brw"], ["deny", "pr-create-use-brw"]]);
+  stageRepo.cleanup();
+
+  // ---- brw-pr-handoff 6.2: 組ごとの拒否の案内（brw pr で作れる組だけ brw pr を示し、作れない組は作成画面の URL を示す） ----
+  const CREATABLE = [["development", "protected"], ["development", "base"], ["base", "protected"]];
+  const REPO = "acme/app";
+  const NOT_CREATABLE = [
+    // [取り込み元の分類, 取り込み先の分類, 取り込み元のオーナー（別リポジトリのときだけ）, 取り込み元, 取り込み先, 期待の作成画面の URL]
+    // 開発ブランチ間（dev→dev）は PR を作らない運用のため、URL を出さず brw merge を示す（下のテストで確かめる）
+    ["undeclared", "protected", null, "other/z", "main", "https://github.com/acme/app/compare/main...other/z?expand=1"],
+    ["protected", "base", null, "main", "develop", "https://github.com/acme/app/compare/develop...main?expand=1"],
+    ["base", "development", null, "develop", "dev/other", "https://github.com/acme/app/compare/dev/other...develop?expand=1"],
+    ["base", "undeclared", null, "develop", "other/z", "https://github.com/acme/app/compare/other/z...develop?expand=1"],
+    ["development", "undeclared", null, "dev/foo", "other/z", "https://github.com/acme/app/compare/other/z...dev/foo?expand=1"],
+    ["development", "protected", "fork", "dev/foo", "main", "https://github.com/acme/app/compare/main...fork:dev/foo?expand=1"],
+  ];
+  const altOf = ([hc, bc, owner, head, base], extra = {}) => prAlternative(hc, bc, { repository: REPO, headOwner: owner, head, base, ...extra });
+  eq("brw-pr-handoff/6.2 brw pr で作れる組の案内は brw pr-template と brw pr を示し、作成画面の URL を出さない", CREATABLE.map(([hc, bc]) => { const t = altOf([hc, bc, null, "dev/foo", "main"]); return [/brw\.mjs.? pr-template/.test(t), /brw\.mjs.? pr[`\s]/.test(t), t.includes("compare/")]; }), Array(3).fill([true, true, false]));
+  eq("brw-pr-handoff/6.2 作れない組の案内は brw pr を含まず、作成画面の URL を含む", NOT_CREATABLE.map((c) => { const t = altOf(c.slice(0, 5)); return [/brw\.mjs.? pr-template/.test(t), /brw\.mjs.? pr[`\s]/.test(t), t.includes(c[5])]; }), Array(NOT_CREATABLE.length).fill([false, false, true]));
+  // 同名（取り込み元と取り込み先が同じブランチ）は、取り込みが要らないと案内する。brw merge も作成画面の URL も示さない（判定の verdict・code は変えない）
+  eq("brw-pr-handoff/6.2 同名の組（dev/foo→dev/foo・develop→develop・main→main）の案内は、同じブランチで取り込み不要と示し、brw merge と URL を含まない", (() => {
+    const cases = [["development", "development", "dev/foo"], ["base", "base", "develop"], ["protected", "protected", "main"]];
+    return cases.map(([hc, bc, name]) => {
+      const t = prAlternative(hc, bc, { repository: REPO, head: name, base: name });
+      return [t.includes("同じブランチ"), t.includes("brw merge"), t.includes("/compare/"), t.includes("brw.mjs")];
+    });
+  })(), Array(3).fill([true, false, false, false]));
+  eq("brw-pr-handoff/6.2 同名の判定は従来の verdict・code のまま（dev/foo→dev/foo は開発ブランチ間の拒否、develop→develop・main→main は別の分岐の拒否）", [prIn(d, "dev/foo", "dev/foo"), prIn(d, "develop", "develop"), prIn(d, "main", "main")].map((x) => [x.verdict, x.code]), [["deny", "pr-create-development"], ["deny", "pr-create-head"], ["deny", "pr-create-head"]]);
+  eq("brw-pr-handoff/6.2 別リポジトリの同名（fork:dev/foo→dev/foo）は同じブランチではないので、同名の案内にしない", (() => { const t = prAlternative("development", "development", { repository: REPO, headOwner: "fork", head: "dev/foo", base: "dev/foo" }); return [t.includes("同じブランチ"), t.includes("brw merge")]; })(), [false, false]);
+  eq("brw-pr-handoff/6.2 開発ブランチ間の案内は URL を含まず、brw merge をローカルの取り込みとして示す（brw pr は含まない）", (() => { const t = altOf(["development", "development", null, "dev/foo", "dev/other"]); return [t.includes("compare/"), t.includes("brw merge"), /brw\.mjs.? merge/.test(t), /brw\.mjs.? pr[`\s]/.test(t), /brw\.mjs.? pr-template/.test(t)]; })(), [false, true, true, false, false]);
+  // Git の ref 名の規則（空白・制御文字・~^:?*[\ ・.. ・@{ ・先頭末尾の / や . ・.lock 終わり ・連続 //）と、書式制御・空白類・私用・未割当・代理の符号位置を除く
+  eq("brw-pr-handoff/6.2 作成画面の URL は、Git の ref 名として不正な名前（不可視文字を含む名前を含む）では出さず、Web 画面の手順だけを示す", [
+    "dev/a b", "dev/a..b", "dev/\u0001x", "dev/x?y", "/dev/x", "dev/x/", "dev//x", "dev/.x", "dev/x.lock", "dev/x.", "dev/a~b", "dev/a^b", "dev/a:b", "dev/a*b", "dev/a[b", "dev/a\\b", "dev/a@{b",
+    "dev/a\u200bb", "dev/a\u202eb", "dev/ x", "dev/a\u2028b", "dev/x", "dev/͸x", "dev/\uD800x", "dev/a\u007Fb",
+  ].map((h) => { const t = prAlternative("protected", "main", { repository: REPO, head: h, base: "main" }); return [t.includes("compare/"), t.includes("GitHub の Web 画面（Pull requests の New）")]; }), Array(25).fill([false, true]));
+  eq("brw-pr-handoff/6.2 Unicode の文字を含む有効な ref 名は URL に入り、区間ごとに UTF-8 のパーセントエンコードされる", [
+    prAlternative("protected", "main", { repository: REPO, head: "feature/日本語", base: "main" }).includes("https://github.com/acme/app/compare/main...feature/%E6%97%A5%E6%9C%AC%E8%AA%9E?expand=1"),
+    prAlternative("protected", "main", { repository: REPO, head: "dev/a#x", base: "main" }).includes("compare/main...dev/a%23x?expand=1"),
+    prAlternative("protected", "main", { repository: REPO, head: "dev/a%20", base: "main" }).includes("compare/main...dev/a%2520?expand=1"),
+  ], [true, true, true]);
+  eq("brw-pr-handoff/6.2 表示用の名前は、制御・書式・空白類を \\u{…} の形に変え、60 字を超える部分は … で省く", [
+    shownRef("dev/a\u202eb"), shownRef("feature/日本語"), Array.from(shownRef("a".repeat(100))).length, shownRef("a".repeat(100)).endsWith("…"),
+  ], ["dev/a\\u{202E}b", "feature/日本語", 61, true]);
+  eq("brw-pr-handoff/6.2 長い ref（URL が 300 字を超える）は URL を出さず、Web 画面の手順だけを示す", (() => {
+    const longHead = Array(4).fill("a".repeat(150)).join("/");
+    const t = prAlternative("protected", "main", { repository: REPO, head: longHead, base: "main" });
+    const ok = prAlternative("protected", "main", { repository: REPO, head: `dev/${"b".repeat(100)}`, base: "main" });
+    return [t.includes("compare/"), t.includes("GitHub の Web 画面（Pull requests の New）"), ok.includes("compare/")];
+  })(), [false, true, true]);
+  eq("brw-pr-handoff/6.2 案内は、作れない理由・手順・URL の順に並ぶ（作れない理由を先頭に置く）", (() => { const t = prAlternative("protected", "main", { repository: REPO, head: "dev/foo", base: "main" }); return [t.startsWith("この組は BRW の PR の手順では作れません。"), t.indexOf("Pull requests") < t.indexOf("https://"), t.includes("compare/")]; })(), [true, true, true]);
+  eq("brw-pr-handoff/6.2 拒否の理由は結論を先頭に置く（取り込み元・先の名前の前に、拒否すると書く）", [prIn(d, "dev/foo", "dev/other"), prIn(d, "develop", "dev/foo"), prIn(d, "other/z", "main"), prIn(d, "main", "develop"), prIn(d, "dev/foo", "other/z")].map((x) => x.reason.startsWith("PR 作成を拒否します")), Array(5).fill(true));
+  eq("brw-pr-handoff/6.2 長い取り込み元の名前は理由の中で省略し、理由と案内の連結（フック経路）は 500 字以内、結論と手順が残る", (() => {
+    const longHead = Array(4).fill("a".repeat(150)).join("/");
+    const x = prIn(d, longHead, "main");
+    const text = `${x.reason} ${x.alternative}`;
+    return [x.reason.length < 200, text.length > 500 ? text.slice(0, 500).includes("PR 作成を拒否します") && text.slice(0, 500).includes("Pull requests の New") : text.includes("Pull requests の New"), x.reason.includes("…")];
+  })(), [true, true, true]);
+  eq("brw-pr-handoff/6.2 長い取り込み元の名前と長い実行パスが両方あっても、500 字の切り詰めの内側に結論と開発ブランチ間の brw merge が残る", (() => {
+    const LONG_RUN = `node '/${"x".repeat(290)}/scripts/brw.mjs'`;
+    const longDev = `dev/${"a".repeat(300)}`;
+    const x = prIn(d, longDev, "dev/other");
+    const alt = prAlternative("development", "development", { repository: REPO, head: longDev, base: "dev/other", run: LONG_RUN });
+    const text = `${x.reason} ${alt}`.slice(0, 500);
+    return [text.includes("PR 作成を拒否します"), text.includes("brw merge"), x.reason.length < 200];
+  })(), [true, true, true]);
+  // 表示長はエスケープ後の文字数で数える（60 字を超えたら手前で切り、エスケープ列の途中では切らない）
+  eq("brw-pr-handoff/6.2 表示用の名前は、エスケープ後の長さで 60 字に収め、エスケープ列の途中で切らない", [shownRef("\u{10FFFF}".repeat(60)), shownRef("a".repeat(60)).endsWith("…"), shownRef("日本語".repeat(30)).length], ["\\u{10FFFF}".repeat(6) + "…", false, 61]);
+  eq("brw-pr-handoff/6.2 U+10FFFF を 60 字含む取り込み元でも、理由と案内の連結を 500 字に切ると結論と手順が残り、理由は短い", (() => {
+    const x = prIn(d, `feature/${"\u{10FFFF}".repeat(60)}`, "main");
+    const cut = `${x.reason} ${x.alternative}`.slice(0, 500);
+    return [x.reason.startsWith("PR 作成を拒否します"), cut.includes("PR 作成を拒否します"), cut.includes("Pull requests の New"), x.reason.length < 250];
+  })(), [true, true, true, true]);
+  // URL の付与は、理由と案内の連結（500 字）の残りに収まるときだけ。収まらなければ URL を省き、手順だけにする
+  eq("brw-pr-handoff/6.2 240 字の ref では、連結を 500 字に切ったときに URL の断片が残らず、連結は 500 字以内に収まる", (() => {
+    const head = `feature/${"b".repeat(232)}`;
+    const full = `https://github.com/acme/app/compare/main...${head}?expand=1`;
+    const x = prIn(d, head, "main");
+    const cut = `${x.reason} ${x.alternative}`.slice(0, 500);
+    return [cut.includes("https://github.com/acme/app/compare/"), cut.includes(full), x.reason.length + 1 + x.alternative.length <= 500];
+  })(), [false, false, true]);
+  eq("brw-pr-handoff/6.2 短めの ref では、URL を付けても連結を 500 字に切っても URL は末尾まで残る", (() => {
+    const head = `feature/${"b".repeat(60)}`;
+    const full = `https://github.com/acme/app/compare/main...${head}?expand=1`;
+    const x = prIn(d, head, "main");
+    const cut = `${x.reason} ${x.alternative}`.slice(0, 500);
+    return [x.alternative.includes(full), cut.includes(full), x.reason.length + 1 + x.alternative.length <= 500];
+  })(), [true, true, true]);
+  eq("brw-pr-handoff/6.2 長いインストール先パスと 240 字の ref を両方入れても、URL を付けないなら URL の断片は残らない", (() => {
+    const LONG_RUN = `node '/${"x".repeat(290)}/scripts/brw.mjs'`;
+    const head = `feature/${"b".repeat(232)}`;
+    const full = `https://github.com/acme/app/compare/main...${head}?expand=1`;
+    const reason = prIn(d, head, "main").reason;
+    const alt = prAlternative("protected", "main", { repository: REPO, head, base: "main", run: LONG_RUN, limit: 500 - reason.length - 1 });
+    const cut = `${reason} ${alt}`.slice(0, 500);
+    return [cut.includes("https://github.com/acme/app/compare/"), cut.includes(full)];
+  })(), [false, false]);
+  eq("brw-pr-handoff/6.2 長い ref の拒否理由に生の制御文字・書式文字を含まない", (() => { const x = prIn(d, "dev/foo", "dev/other"); return [x.reason.includes("\u202e"), x.reason.includes("\u200b")]; })(), [false, false]);
+  eq("brw-pr-handoff/6.2 リポジトリ名・取り込み元のオーナーが安全でなければ URL を出さない", [
+    prAlternative("protected", "main", { repository: "acme/app name", head: "dev/foo", base: "main" }),
+    prAlternative("protected", "main", { repository: "acme/app#1", head: "dev/foo", base: "main" }),
+    prAlternative("development", "protected", { repository: REPO, headOwner: "fo rk", head: "dev/foo", base: "main" }),
+    prAlternative("protected", "main", { repository: null, head: "dev/foo", base: "main" }),
+  ].map((t) => [t.includes("compare/"), t.includes("GitHub の Web 画面（Pull requests の New）")]), Array(4).fill([false, true]));
+  eq("brw-pr-handoff/6.2 安全な ref 名の区間（/ の両側）は URL に残る", prAlternative("protected", "main", { repository: REPO, head: "dev/a-b_c.d", base: "release/1.0" }).includes("https://github.com/acme/app/compare/release/1.0...dev/a-b_c.d?expand=1"), true);
+  eq("brw-pr-handoff/6.2 エージェント起点の直接の作成の案内も、brw pr-template と brw pr を示す（従来の文面）", (() => { const x = prIn(d, "dev/foo", "main", "agent"); return [/brw\.mjs.? pr-template/.test(x.alternative), /brw\.mjs.? pr[`\s]/.test(x.alternative)]; })(), [true, true]);
+  eq("brw-pr-handoff/6.2 開発ブランチ間の拒否の案内は URL を含まず、brw merge を示す", (() => { const x = prIn(d, "dev/foo", "dev/other"); return [x.alternative.includes("compare/"), x.alternative.includes("brw merge"), /brw\.mjs.? pr[`\s]/.test(x.alternative)]; })(), [false, true, false]);
+  eq("brw-pr-handoff/6.2 宣言外・保護の取り込み元の拒否も、作れない組の案内（URL）を示す", [prIn(d, "other/z", "main"), prIn(d, "main", "develop")].map((x) => x.alternative.includes("compare/") && !/brw\.mjs.? pr[`\s]/.test(x.alternative)), [true, true]);
+  // 500 字の切り詰め（フック経路の reason と alternative の連結）でも、作れる・作れないの区別・手順・URL が残る。実行する形（長いパス）は末尾
+  {
+    const LONG_RUN = `node '/${"x".repeat(290)}/scripts/brw.mjs'`;
+    const creatable = prAlternative("development", "protected", { run: LONG_RUN });
+    const notCreatable = prAlternative("protected", "main", { repository: REPO, head: "dev/foo", base: "main", run: LONG_RUN });
+    const devDev = prAlternative("development", "development", { repository: REPO, head: "dev/foo", base: "dev/other", run: LONG_RUN });
+    const reason = "エージェントによる PR の直接の作成は行えません。";
+    const head500 = (text) => text.slice(0, 500);
+    eq("brw-pr-handoff/6.2 長いパスでも、作れる組の手順（brw pr-template・brw pr）は 500 字の切り詰めの内側に残る", [head500(`${reason} ${creatable}`).includes("brw pr-template"), head500(`${reason} ${creatable}`).includes("brw pr`")], [true, true]);
+    eq("brw-pr-handoff/6.2 長いパスでも、作れない組の URL は 500 字の切り詰めの内側に残る", [head500(`${reason} ${notCreatable}`).includes("https://github.com/acme/app/compare/main...dev/foo?expand=1")], [true]);
+    eq("brw-pr-handoff/6.2 長いパスでも、開発ブランチ間の brw merge の案内は 500 字の切り詰めの内側に残る", [head500(`${reason} ${devDev}`).includes("brw merge"), devDev.includes("compare/")], [true, false]);
+    eq("brw-pr-handoff/6.2 長いパスの実行する形は案内の末尾に置く", [creatable.endsWith("を実行）") && creatable.includes(`（実行する形: ${LONG_RUN} pr-template`), creatable.indexOf(LONG_RUN) > creatable.indexOf("brw pr-template")], [true, true]);
+  }
+  eq("brw-pr-handoff/6.2 通常の長さの拒否の理由と案内の連結は 500 字以内", [prIn(d, "dev/foo", "dev/other"), prIn(d, "other/z", "main"), prIn(d, "main", "develop")].map((x) => `${x.reason} ${x.alternative}`.length <= 500), [true, true, true]);
   eq("enforcement/3.3 別のリポジトリ・fork の head・対象を確定できない PR 作成は拒否する", ["gh pr create --head dev/foo --base main -R other/repo -t t -b b", "gh pr create --head fork:dev/foo --base main -t t -b b", "gh pr create --head dev/foo -t t -b b", "gh api graphql -f query='mutation { createPullRequest(input:{repositoryId:\"R\", headRefName:\"dev/foo\", baseRefName:\"main\", title:\"t\"}) { pullRequest { url } } }'"].map((x) => ev(x).verdict), Array(4).fill("deny"));
   eq("enforcement/3.3 PR の拒否にも作成可否と承認の別が付く", (() => { const x = pr("dev/foo", "dev/other"); return [x.compliance, x.approval]; })(), ["violation", "notApplicable"]);
 
@@ -538,6 +714,67 @@ export const runDecisionChecks = async (eq) => {
   eq("enforcement/1.4 ブランチの先を直接動かしうる書き込みは拒否する", ["gh api repos/acme/app/git/refs/heads/main -X PATCH -f sha=abc", "gh api repos/acme/app/contents/a.txt -X PUT -f message=m -f content=Yg== -f branch=main", "gh api repos/acme/app/pulls/5/update-branch -X PUT"].map((x) => [ev(x).verdict, ev(x).code]), Array(3).fill(["deny", "unsupported-ref-write"]));
   eq("enforcement/1.4 ブランチの先を動かさない対応外の書き込みは強制範囲外として通常のホスト承認に委ねる", ["gh pr comment 5 -b x", "gh pr ready 5", "gh api repos/acme/app/issues -f title=x"].map((x) => sig(ev(x))), Array(3).fill(["pass", "outOfScope", "normal", "unsupported-write"]));
   eq("enforcement/1.4 対応外の書き込みも未導入のリポジトリでは通す", (() => { const o = classifyCommand("gh pr comment 5 -b x", tmpdir()).operations[0]; return sig(evaluate(o, contextFor(o))); })(), ["pass", "notApplicable", "notApplicable", "not-managed"]);
+
+  // ---- brw-enforcement 18.5 開発ブランチから分岐元・保護ブランチへの直接の取り込み・push の拒否（確認の状態によらず） ----
+  {
+    // 宣言の状態ごとに、登録済み（全 true・全 false）と未登録の 3 通りを用意する
+    const STATES = [
+      { auto: { push: true, pullRequest: true, commit: true }, register: true },
+      { auto: { push: false, pullRequest: false, commit: false }, register: true },
+      { auto: { push: true, pullRequest: true, commit: true }, register: false },
+    ];
+    // 開発ブランチ dev/foo（作業ツリー）と、分岐元 develop の worktree を作る
+    const stateRepo = ({ auto, register }) => {
+      const s = mkRepoWithRemote({ branch: "dev/foo", config: { ...CONFIG, autoApprove: auto }, register });
+      gitOut(s.dir, "branch", "dev/other");
+      const wt = mkWorktree(s.dir, "develop");
+      gitOut(s.dir, "update-ref", "refs/remotes/origin/develop", "dev/foo");
+      // 未登録の宣言は commit されていないため、分岐元の worktree には無い。同じ内容を編集中の宣言として置く
+      if (!register) writeFileSync(join(wt, ".branch-release-workflow.json"), JSON.stringify({ ...CONFIG, autoApprove: auto }));
+      return { ...s, wt };
+    };
+    const judge = (cmd, cwd) => { const op = classifyCommand(cmd, cwd).operations[0]; return evaluate(op, { ...contextFor(op), origin: "agent" }); };
+    const pick = (x) => [x.verdict, x.code];
+    const PUSH_DENY = ["git push origin dev/foo:develop", "git push origin dev/foo:main", "git push origin HEAD:main", "git push origin main", "git push origin +dev/foo:main", "git push --force origin dev/foo:develop", "git push origin dev/foo:refs/heads/main"];
+    // 形を変えた取り込み・push（既存のテストにないもの）
+    const MERGE_FORMS = ["git merge --squash dev/foo", "git merge --no-ff dev/foo", "git pull origin dev/foo"];
+    const PUSH_FORMS = ["git push origin dev/foo:refs/heads/develop", "git push origin HEAD:develop", "git push --delete origin main", "git push --mirror"];
+    const rows = STATES.map((st) => {
+      const s = stateRepo(st);
+      try {
+        // 分岐元 develop の worktree からの取り込み（cwd は develop の worktree）
+        const mergeDevelop = pick(judge("git merge dev/foo", s.wt));
+        // 形を変えた取り込み（--squash・--no-ff・pull）も分岐元の上では拒否する
+        const mergeFormsDevelop = MERGE_FORMS.map((c) => pick(judge(c, s.wt)));
+        // 保護 main の上での取り込み（main の作業ツリーに切り替えて判定し、dev/foo に戻す）
+        gitOut(s.dir, "checkout", "-q", "main");
+        const mergeMain = pick(judge("git merge dev/foo", s.dir));
+        const mergeFormsMain = MERGE_FORMS.map((c) => pick(judge(c, s.dir)));
+        gitOut(s.dir, "checkout", "-q", "dev/foo");
+        const push = PUSH_DENY.map((c) => pick(judge(c, s.dir)));
+        const pushForms = PUSH_FORMS.map((c) => pick(judge(c, s.dir)));
+        // 対比: 開発ブランチへの取り込み・開発ブランチ同士・開発ブランチへの push は拒否されない（verdict・承認の順）
+        const allowed = ["git merge origin/develop", "git merge dev/other", "git push origin dev/foo", "git push origin dev/foo:dev/other"]
+          .map((c) => { const x = judge(c, s.dir); return [x.verdict, x.approval]; });
+        return { mergeDevelop, mergeMain, push, allowed, mergeFormsDevelop, mergeFormsMain, pushForms };
+      } finally {
+        s.cleanup();
+      }
+    });
+    eq("brw-enforcement/18.5 分岐元 develop の上での dev/foo のローカルマージは、確認の状態によらず拒否する", rows.map((r) => r.mergeDevelop), STATES.map(() => ["deny", "merge-non-development"]));
+    eq("brw-enforcement/18.5 保護 main の上での dev/foo のローカルマージは、確認の状態によらず拒否する", rows.map((r) => r.mergeMain), STATES.map(() => ["deny", "merge-non-development"]));
+    eq("brw-enforcement/18.5 分岐元・保護への dev/foo の push（<元>:<先>・HEAD・強制・refs/heads の形を含む）は、確認の状態によらず拒否する", rows.map((r) => r.push), STATES.map(() => PUSH_DENY.map(() => ["deny", "direct-update"])));
+    // 形を変えた取り込み（--squash・--no-ff・pull）は、分岐元・保護の上ではどちらも merge-non-development で拒否する
+    eq("brw-enforcement/18.5 分岐元 develop・保護 main の上での --squash・--no-ff・pull による dev/foo の取り込みは、確認の状態によらず拒否する", rows.map((r) => [r.mergeFormsDevelop, r.mergeFormsMain]), STATES.map(() => [MERGE_FORMS.map(() => ["deny", "merge-non-development"]), MERGE_FORMS.map(() => ["deny", "merge-non-development"])]));
+    // 形を変えた push（<元>:refs/heads/先・HEAD・--delete・--mirror）。--mirror は取り込み先を確定できないため unresolved で拒否する
+    eq("brw-enforcement/18.5 形を変えた push（refs/heads の形・HEAD・--delete・--mirror）は、確認の状態によらず拒否する", rows.map((r) => r.pushForms), STATES.map(() => [["deny", "direct-update"], ["deny", "direct-update"], ["deny", "direct-update"], ["deny", "unresolved"]]));
+    // 対比の期待: 登録済み全 true は確認省略、登録済み全 false は push の確認省略が無効（merge は確認省略の対象）、未登録は通常の承認
+    eq("brw-enforcement/18.5 対比: 開発ブランチへの取り込み・開発ブランチ同士のマージ・開発ブランチへの push は拒否されない", rows.map((r) => r.allowed), [
+      [["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"]],
+      [["eligibleForApproval", "skip"], ["eligibleForApproval", "skip"], ["pass", "normal"], ["pass", "normal"]],
+      [["pass", "normal"], ["pass", "normal"], ["pass", "normal"], ["pass", "normal"]],
+    ]);
+  }
 
   // ---- ホスト間の比較 ----
   eq("enforcement/1.1 同じ操作の判定は呼び出し元のホストに依らず同じ判定理由になる", (() => {

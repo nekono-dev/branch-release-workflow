@@ -13,25 +13,58 @@
 // Stop は読み取りだけで、準備済みで未公開の作業があるときに、同じ作業 ID での再試行か中断を block の応答で案内する。
 //
 // 実行ファイルとしても使える: `node scripts/agent-hooks.mjs <claude|codex> <イベント名>` が標準入力の JSON を読み、応答を標準出力へ書く。
-import { realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BRW_RUN } from "./brw-cmd.mjs";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
 import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoRoot, sanitize } from "./lib.mjs";
-import { classifyCommand, classifyMcpCall } from "./operation-policy.mjs";
+import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
 import { evaluateAll } from "./operation-decision.mjs";
 import { attachSession, checkPlan, githubRepoOf, load, restrictionsOf, stateFileOf } from "./publish.mjs";
+import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, attachSession as attachResumeRecord, resumableFor, writeSessionHint } from "./resume-record.mjs";
+import { declaredNoPushOf, mainWorktreeOf, remainderGuidance, remaindersOf } from "./work-remainder.mjs";
 
 const PREFIX = "[branch-release-workflow] ";
 /** ホストごとに扱うイベント。PostToolUse（関連付け）と Stop（案内）は 6.2 で扱う。 */
-export const HOST_EVENTS = { claude: ["PreToolUse", "PostToolUse", "Stop"], codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop"] };
+export const HOST_EVENTS = {
+  claude: ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"],
+  codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"],
+};
 const BRW_CLI = join(dirname(fileURLToPath(import.meta.url)), "brw.mjs");
 // 信頼済み BRW の CLI の実体（シンボリックリンクを解決した絶対パス）。読めなければ信頼できる呼び出しは無い
 const BRW_CLI_REAL = (() => { try { return realpathSync(BRW_CLI); } catch { return null; } })();
 const TOOLS_RE = /\b(git|gh)\b/;
 const PASS = { verdict: "pass", reason: "", code: "" };
 const PUBLISH_OPTS = ["--work", "--plan", "--title", "--body-file"];
+// ---- 信頼済み BRW の pr-merge の検出（エージェントの実行を実行前に拒否する） ----
+// 字句解析（lex）の語・連結・コマンド置換・heredoc を追い、ラッパー（env・timeout・sudo など）と node のオプションを読み飛ばして、
+// 実行ファイルが信頼済みの BRW で次の語が pr-merge のものを探す。入れ子（bash -c・eval・$(…)・heredoc）は深さ上限まで再帰する。
+const PM_MAX_DEPTH = 4;
+const PM_KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
+const PM_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const PM_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish"]);
+const PM_WRAPPERS = new Set(["env", "command", "exec", "nice", "time", "nohup", "timeout", "sudo", "stdbuf", "ionice", "setsid", "xargs"]);
+// 次の語を値として取るオプション（値の語を読み飛ばす）。env の -C と -S は個別に扱う
+const PM_VALUE_OPTS = {
+  env: ["-u", "--unset"],
+  exec: ["-a"],
+  nice: ["-n", "--adjustment"],
+  timeout: ["-s", "--signal", "-k", "--kill-after"],
+  sudo: ["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"],
+  stdbuf: ["-i", "-o", "-e"],
+  ionice: ["-c", "-n", "-p", "-P", "-u"],
+  xargs: ["-I", "-n", "-P", "-L", "-d", "-s", "-a", "-E"],
+  time: ["-f", "-o"],
+};
+// node の値を取るオプション（次の語を読み飛ばす）。-e・-p（コードを直接実行）は実行ファイルではないため対象外
+const NODE_VALUE_OPTS = ["-r", "--require", "--import", "--loader", "--experimental-loader", "--conditions", "-C", "--input-type", "--env-file"];
+const NODE_CODE_OPTS = ["-e", "--eval", "-p", "--print"];
+// エージェントが brw pr-merge を実行しようとしたときの拒否（利用者の端末で実行するコマンドのため）。実行する形は末尾に置く
+export function prMergeReason(run = BRW_RUN) {
+  return `brw pr-merge は利用者が自分の端末で実行するコマンドです。エージェントは実行できません。分岐元向けの PR のマージは、利用者に別の端末で brw pr-merge <番号> の実行を依頼してください（保護ブランチ向けは GitHub 上でマージ）。（実行する形: ${run} pr-merge <番号>）`;
+}
+const PR_MERGE_REASON = prMergeReason();
 const REF_LIST_FLAGS = ["-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"];
 const SHELL_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`", "$", "\\", "\n", "\r", "*", "?", "[", "]", "{", "}", "~", "#"]);
 
@@ -201,6 +234,218 @@ function prCall(command, cwd) {
 }
 
 /**
+ * コマンドが信頼済み BRW の pr-merge を実行する形を含むか（引数の有無・内容を問わない）。
+ * 引用符の内側の区切り（; や &&）は区切りにしない。コマンド置換・バッククォート・heredoc の中身は、同じ作業ディレクトリで再帰して見る。
+ */
+function prMergeCall(command, cwd) {
+  return prMergeIn(command, cwd ?? null, 0);
+}
+
+/** 1 つのスクリプトを、コマンドごとに見る。cd は後続のコマンドの作業ディレクトリに反映する（括弧の中は括弧の後で戻す）。 */
+function prMergeIn(script, dir, depth) {
+  // 深すぎる入れ子は解釈しない。pr-merge の語を含むなら、実行されうるとみなして止める
+  if (depth > PM_MAX_DEPTH) return /pr-merge/.test(script);
+  const { items, broken } = lex(script);
+  // 構文として閉じていない形はシェルが実行しない
+  if (broken) return false;
+  let cur = dir;
+  const stack = [];
+  for (let n = 0; n < items.length; n++) {
+    const it = items[n];
+    if (it.type === "open") { stack.push(cur); continue; }
+    if (it.type === "close") { if (stack.length) cur = stack.pop(); continue; }
+    for (const sub of it.subs) if (prMergeIn(sub, cur, depth + 1)) return true;
+    const ws = it.words.filter((w) => !w.redir);
+    // heredoc の本文は、シェルへ渡る場合（そのコマンドがシェル、またはパイプの先がシェル）だけコマンドとして見る
+    if (it.heredoc && pmFeedsShell(items, n, ws)) {
+      if (prMergeIn(it.heredoc, cur, depth + 1)) return true;
+    } else if (it.heredoc && it.heredocQuoted.includes(false)) {
+      // 引用符なしの本文は、受け取るコマンドが何であっても $(…) とバッククォートが実行される
+      for (const s of pmHeredocSubs(it.heredoc)) if (prMergeIn(s, cur, depth + 1)) return true;
+    }
+    const j = pmCommandStart(ws);
+    if (j >= 0 && !ws[j].dyn && ws[j].v === "cd") { cur = pmCdTarget(ws.slice(j + 1), cur); continue; }
+    if (pmRun(ws, cur, depth)) return true;
+  }
+  return false;
+}
+
+/**
+ * 引用符なし heredoc の本文から、コマンド置換（$(…) とバッククォート）の中身を取り出す。本文全体は解析しない（文字列として読むだけ）。
+ * $(…) は括弧の入れ子を数えて閉じを探し、中身の入れ子は中身を再帰して見るときに取り出される。\ で始まる字は読み飛ばす。
+ */
+function pmHeredocSubs(body) {
+  const out = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "$" && body[i + 1] === "(") {
+      let d = 1;
+      let j = i + 2;
+      for (; j < body.length && d > 0; j++) {
+        if (body[j] === "\\") { j++; continue; }
+        if (body[j] === "(") d++;
+        else if (body[j] === ")") d--;
+      }
+      // 閉じが無ければ、残りを中身とみなす（解釈できない形は通さないように、中身を再帰して見る）
+      out.push(d === 0 ? body.slice(i + 2, j - 1) : body.slice(i + 2));
+      i = j - 1;
+      continue;
+    }
+    if (c === "`") {
+      const j = body.indexOf("`", i + 1);
+      if (j < 0) break;
+      out.push(body.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return out;
+}
+
+/**
+ * heredoc を持つコマンド（items[n]・語 ws）の入力がシェルに渡るか。
+ * 自身がシェル（bash <<EOF・sh -s <<EOF）、または後続のパイプの先がシェル（cat <<EOF | bash）なら真。
+ * operation-policy.mjs の classifyScript と同じ条件（シェル・eval・xargs・source・.）。
+ */
+function pmFeedsShell(items, n, ws) {
+  const consumer = (w) => w !== undefined && !w.dyn && ["eval", "xargs", "source", "."].concat([...PM_SHELLS]).includes(basename(w.v));
+  const j = pmCommandStart(ws);
+  if (j >= 0 && consumer(ws[j])) return true;
+  for (let k = n; items[k]?.type === "cmd" && items[k].sep === "|" && items[k + 1]?.type === "cmd"; k++) {
+    const ws2 = items[k + 1].words.filter((w) => !w.redir);
+    const s = pmCommandStart(ws2);
+    if (s >= 0 && consumer(ws2[s])) return true;
+  }
+  return false;
+}
+
+/** 予約語と代入（FOO=値）を読み飛ばした、コマンド名の位置。無ければ -1。代入は値が展開でも代入として読む。 */
+function pmCommandStart(ws) {
+  let j = 0;
+  while (j < ws.length && ((!ws[j].dyn && PM_KEYWORDS.has(ws[j].v)) || PM_ASSIGN.test(ws[j].v))) j++;
+  return j < ws.length ? j : -1;
+}
+
+/** cd の引数から、移動先の作業ディレクトリを得る。解釈できなければ null（以降の相対パスは信頼できない扱い）。 */
+function pmCdTarget(args, dir) {
+  if (args.length === 0) return process.env.HOME ?? null;
+  if (args.length !== 1 || args[0].dyn || args[0].glob || args[0].v.startsWith("-")) return null;
+  return pmJoinDir(dir, args[0].v);
+}
+
+/** 作業ディレクトリに相対パスを足す。基準が不明（null）なら絶対パス以外は解決できない。 */
+function pmJoinDir(dir, p) {
+  if (isAbsolute(p)) return resolve(p);
+  return dir === null ? null : resolve(dir, p);
+}
+
+/** 1 つのコマンド（予約語・代入を除いた語）を見る。信頼済みの pr-merge なら true。 */
+function pmRun(ws, dir, depth) {
+  let i = pmCommandStart(ws);
+  if (i < 0) return false;
+  while (i < ws.length) {
+    const w = ws[i];
+    if (w.dyn) return false; // コマンド名が展開で決まる形は確かめられない
+    const name = basename(w.v);
+    if (PM_WRAPPERS.has(name)) {
+      const r = pmWrapper(name, ws, i + 1, dir, depth);
+      if (r.hit) return true;
+      if (r.at < 0) return false;
+      i = r.at;
+      dir = r.dir;
+      continue;
+    }
+    if (PM_SHELLS.has(name)) return pmShellScript(ws, i, dir, depth);
+    if (name === "eval") {
+      const args = ws.slice(i + 1);
+      if (args.some((x) => x.dyn)) return false;
+      return prMergeIn(args.map((x) => x.v).join(" "), dir, depth + 1);
+    }
+    if (name === "node") return pmNode(ws, i, dir);
+    return false;
+  }
+  return false;
+}
+
+/**
+ * シェルの -c のスクリプトを再帰して見る。-c は最初のスクリプト名（- で始まらない位置引数）より前のオプションに限る。
+ * それより後の -c は、そのスクリプトの引数（bash script.sh -c … は -c を読まない）。ファイルや標準入力の内容は読まない。
+ */
+function pmShellScript(ws, i, dir, depth) {
+  let k = i + 1;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return false;
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(x.v)) {
+      const s = ws[k + 1];
+      return s !== undefined && !s.dyn && prMergeIn(s.v, dir, depth + 1);
+    }
+    // 値を取るシェルのオプション（-o pipefail・+o・--rcfile ファイル など）は値を読み飛ばす
+    if (["-o", "+o", "--rcfile", "--init-file"].includes(x.v)) { k += 2; continue; }
+    if (x.v.startsWith("-") || x.v.startsWith("+")) { k++; continue; }
+    return false;
+  }
+  return false;
+}
+
+/** node の実行。オプションを読み飛ばして最初の語を実行ファイルとし、その次の語が pr-merge で、実行ファイルが信頼済みの BRW なら true。 */
+function pmNode(ws, i, dir) {
+  let k = i + 1;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return false;
+    if (NODE_CODE_OPTS.includes(x.v) || /^--(eval|print)=/.test(x.v)) return false;
+    if (NODE_VALUE_OPTS.includes(x.v)) { k += 2; continue; }
+    if (x.v.startsWith("-") && x.v !== "-") { k++; continue; }
+    break;
+  }
+  const s = ws[k];
+  if (!s || s.dyn || ws[k + 1] === undefined || ws[k + 1].dyn || ws[k + 1].v !== "pr-merge") return false;
+  const abs = pmJoinDir(dir, s.v);
+  return abs !== null && isTrustedCli(abs);
+}
+
+/**
+ * ラッパー（env・timeout・sudo など）の後ろを読み飛ばし、実際に実行されるコマンドの位置を得る。
+ * 戻り値: { hit: 真なら信頼済みの pr-merge を見つけた, at: 次のコマンドの位置（-1 は無し）, dir: 作業ディレクトリ（env -C で変わる） }
+ */
+function pmWrapper(name, ws, i, dir, depth) {
+  const vals = PM_VALUE_OPTS[name] ?? [];
+  let duration = name === "timeout"; // timeout の最初の位置の語は時間
+  let k = i;
+  while (k < ws.length) {
+    const x = ws[k];
+    if (x.dyn) return { hit: false, at: -1, dir };
+    const v = x.v;
+    if (name === "env") {
+      // env -S（文字列を分割して実行）は、その文字列をスクリプトとして見る
+      const sm = /^-S(.+)$/.exec(v) ?? /^--split-string=(.*)$/.exec(v);
+      if (sm) return { hit: prMergeIn(sm[1], dir, depth + 1), at: -1, dir };
+      if (v === "-S" || v === "--split-string") {
+        const t = ws[k + 1];
+        if (t === undefined || t.dyn) return { hit: false, at: -1, dir };
+        return { hit: prMergeIn(t.v, dir, depth + 1), at: -1, dir };
+      }
+      // env -C（作業ディレクトリを変える）は、後続の実行の作業ディレクトリになる
+      const cm = /^-C(.+)$/.exec(v) ?? /^--chdir=(.*)$/.exec(v);
+      if (cm || v === "-C" || v === "--chdir") {
+        const t = cm ? undefined : ws[k + 1];
+        if (!cm && (t === undefined || t.dyn)) return { hit: false, at: -1, dir: null };
+        dir = pmJoinDir(dir, cm ? cm[1] : t.v);
+        k += cm ? 1 : 2;
+        continue;
+      }
+    }
+    if (PM_ASSIGN.test(v)) { k++; continue; }
+    if (vals.includes(v)) { k += 2; continue; }
+    if (v.startsWith("-") && v !== "-") { k++; continue; }
+    if (duration) { duration = false; k++; continue; }
+    return { hit: false, at: k, dir };
+  }
+  return { hit: false, at: -1, dir };
+}
+
+/**
  * 信頼済みの `brw pr` の確認を省略するか。宣言（登録済み）が push と PR 作成の確認省略をともに有効にしているときだけ。
  * 承認の要否・禁止は `brw pr` の内部の公開（計画・状態）が改めて判定するため、ここではホストの確認を省くだけ。それ以外は応答を返さない。
  */
@@ -272,11 +517,80 @@ function refMovingIn(command) {
 
 // ---- 単独の操作であることの確認 ----
 
+// git add で確認省略してよいオプション（強制・対話・パッチのオプションは含めない）
+const ADD_PLAIN_OPTS = new Set(["-A", "-u", "--all", "-N", "-v"]);
+// 確認省略してよい commit の -m に入る、クォートした heredoc の置換（15.2 の通常形と同じ形）
+const HEREDOC_SUB = /^cat <<'([A-Za-z_][A-Za-z0-9_]*)'\n[\s\S]*\n\1\n$/;
+
+/** git add の語が、限定したオプションと（`--` の後の）パスだけか。展開・glob・チルダ・リダイレクトは含まない。 */
+function plainAddArgs(words) {
+  if (words.length === 0) return false;
+  let afterDashDash = false;
+  for (const x of words) {
+    if (x.dyn || x.glob || x.tilde || x.redir || x.v === "") return false;
+    if (afterDashDash) {
+      if (x.v.startsWith(":")) return false; // pathspec の特殊記法は通常形としない
+      continue;
+    }
+    if (x.v === "--") { afterDashDash = true; continue; }
+    if (x.v.startsWith("-")) {
+      if (!ADD_PLAIN_OPTS.has(x.v)) return false;
+      continue;
+    }
+    if (x.v.startsWith(":")) return false;
+  }
+  return true;
+}
+
 /**
- * 確認省略してよい形か。単独の git・gh の操作（先頭の cd を除く）で、語に分けられ、他の操作・認識外の記号を含まない。
+ * 複合（&& で連結した git add・commit・push）が確認省略してよい形か（brw-enforcement 15.4）。
+ * 先頭の任意の `cd <dir>`、続く git add（限定した引数）・git commit（通常形）・git push の区間だけを、`&&` で連結したものに限る。
+ * 字句解析の項目で構造を確かめるので、引用の中の `&&` は区切りとして扱わない。操作の数と種類が区間と一致しなければ確認省略しない（展開の中の操作を見逃さないため）。
+ */
+function plainCompound(command, cls) {
+  const { items, broken } = lex(command);
+  if (broken || items.length === 0) return false;
+  const kinds = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.type !== "cmd" || it.heredoc) return false;
+    // 最後の区間の後ろは終わり（;）だけ。途中の区切りは && のみ
+    if (i === items.length - 1 ? it.sep !== ";" : it.sep !== "&&") return false;
+    const w = it.words;
+    if (w.length === 0 || w.some((x) => x.redir) || w[0].dyn) return false;
+    if (w[0].v === "cd") {
+      // cd は先頭の 1 つだけ。引数は展開・glob なしの 1 語
+      if (i !== 0 || w.length !== 2 || it.subs.length || w[1].dyn || w[1].glob || w[1].v === "") return false;
+      continue;
+    }
+    if (w[0].v !== "git" || w.length < 2 || w[1].dyn) return false;
+    const sub = w[1].v;
+    const args = w.slice(2);
+    if (sub === "add") {
+      if (it.subs.length || !plainAddArgs(args)) return false;
+      kinds.push("query");
+    } else if (sub === "commit") {
+      if (!it.subs.every((s) => HEREDOC_SUB.test(s)) || args.some((x) => x.glob || x.tilde)) return false;
+      kinds.push("commit");
+    } else if (sub === "push") {
+      if (it.subs.length || args.some((x) => x.dyn || x.glob || x.tilde)) return false;
+      kinds.push("push");
+    } else return false;
+  }
+  // 区間ごとの操作と一致し、変更操作（commit・push）を含み、commit は通常形と認めたものだけ
+  const ops = cls.operations;
+  if (kinds.length === 0 || ops.length !== kinds.length || !kinds.some((k) => k !== "query")) return false;
+  if (!kinds.every((k, i) => ops[i].kind === k)) return false;
+  return ops.every((o) => o.kind !== "commit" || o.flags?.normal === true);
+}
+
+/**
+ * 確認省略してよい形か。次のいずれか。
+ *  - 単独の git・gh の操作（先頭の cd を除く）で、語に分けられ、他の操作・認識外の記号を含まない
+ *  - git add・commit・push の区間だけの && 連結（plainCompound）
  */
 function plainOperation(command, cls) {
-  if (cls.operations.length !== 1) return false;
+  if (cls.operations.length !== 1) return plainCompound(command, cls);
   const cd = stripCd(command);
   if (!cd.ok) return false;
   const w = scanWords(cd.rest);
@@ -340,6 +654,8 @@ function judgeBash(command, cwd, host = "claude", toolInput = {}) {
   if (pub) return decidePublish(pub);
   const prc = prCall(command, cwd);
   if (prc) return decidePrCall(prc);
+  // 信頼済み BRW の pr-merge は利用者の端末でだけ実行する。エージェントの実行は分類の前に拒否する
+  if (prMergeCall(command, cwd)) return { verdict: "deny", reason: PR_MERGE_REASON, code: "pr-merge-by-agent" };
   const cls = classifyCommand(command, cwd);
   const d = evaluateAll(cls, restrictionsFor(cwd));
   if (d.verdict === "deny") return gateJudge(cls, d, command, cwd, host, toolInput) ?? decisionOf(d);
@@ -530,13 +846,11 @@ function pendingOf(w, head) {
 }
 
 /**
- * Stop: 当該セッションに結び付いた、準備済みで未公開の作業だけを案内する。読み取りだけを行い、状態を書き換えない。
- * stop_hook_active が真なら案内せず終了させる（案内の繰り返しによる無限ループを防ぐ）。判定できなければ案内しない。
+ * 公開の案内（16.3 で残りの案内と分けた既存の処理）の本文。セッションに結び付いた、準備済みで未公開の作業だけを案内する。
+ * セッション ID・状態ファイル・HEAD が無い・読めないときは null。この案内の中だけで止まり、残りの案内には影響させない。読み取りだけを行い、状態を書き換えない。
  */
-function stopGuidance(input) {
+function publishGuidance(ev) {
   try {
-    const ev = eventOf(input);
-    if (!ev || ev.stop_hook_active === true) return null;
     const cwd = cwdOf(ev);
     const session = sessionOf(ev);
     if (!cwd || !session) return null;
@@ -556,9 +870,230 @@ function stopGuidance(input) {
       else lines.push(`- 作業 ${id}: 公開を続けるには、\`${BRW_RUN} work plan --work ${id}\` で計画 ID を取得し、\`${BRW_RUN} publish --work ${id} --plan <計画 ID>\` を実行してください。中断するなら \`${BRW_RUN} pause --work ${id} --reason "<理由>"\` を実行してください。`);
     }
     if (lines.length === 0) return null;
-    return { decision: "block", reason: `${PREFIX}準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}` };
+    return `準備済みで公開が終わっていない作業があります。次のいずれかを行ってから終了してください。\n${lines.join("\n")}`;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 残りの案内（16.3）の本文。リポジトリの全 worktree の Git の状態だけで評価する（セッション・状態ファイル・HEAD に依存しない）。
+ * cwd は案内の cd の手順にだけ使う。各 worktree の push 禁止は、その worktree の作業の制限（restrictionsFor）か、
+ * 宣言の autoApprove.push が明示的に false のとき真（未登録の既定の false とは区別する）。読み取りだけを行い、判定できなければ null。
+ */
+function remainderGuidanceOf(ev) {
+  const cwd = cwdOf(ev);
+  if (!cwd) return null;
+  return remainderGuidanceForCwd(cwd);
+}
+
+/**
+ * 残りの案内の本文（16.4 で Stop と brw guard --finish が共用する）。cwd は cd の手順の基準にだけ使う。
+ * 残りが無い・判定できないときは null（案内しない側に倒す）。読み取りだけを行う。
+ */
+export function remainderGuidanceForCwd(cwd) {
+  try {
+    const remainders = remaindersOf(cwd);
+    if (remainders.length === 0) return null;
+    // 宣言は本体（先頭の worktree）から読む（remaindersOf と同じ読み方。実パスは -z の一覧から取る）
+    const declaredNoPush = declaredNoPushOf(cwd);
+    const items = remainders.map((r) => ({ ...r, noPush: declaredNoPush || restrictionsFor(r.path).noPush === true }));
+    return remainderGuidance(items, { noPush: false, cwd });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stop: 公開の案内（準備済みで未公開の作業）と残りの案内（作業ブランチの未コミット・未 push）を、1 つの block にまとめる。
+ * 公開の案内を先に並べる。読み取りだけを行い、状態を書き換えない。
+ * stop_hook_active が真なら、どちらも案内せず終了させる（案内の繰り返しによる無限ループを防ぐ）。両方とも無ければ案内しない。
+ */
+function stopGuidance(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.stop_hook_active === true) return null;
+    const parts = [publishGuidance(ev), remainderGuidanceOf(ev)].filter((p) => typeof p === "string" && p !== "");
+    if (parts.length === 0) return null;
+    return { decision: "block", reason: `${PREFIX}${parts.join("\n\n")}` };
+  } catch {
+    return null;
+  }
+}
+
+// ---- 続きの作業の案内（UserPromptSubmit）と再開の関連付け（PostToolUse の brw pr の成功）（brw-pr-handoff 9.4） ----
+
+/** 案内の文字数の上限。モデルへ渡す文脈なので短く保つ。 */
+const RESUME_MAX = 500;
+
+/**
+ * 表示や案内文を乱す文字（制御・書式・行区切り・私用・未割り当て・代理）を除き、空白を 1 つにまとめる。
+ * 空白の扱いを先に決めるため、改行や行区切りは空白になる。\p 指定で書くため、ソースに生の文字は入らない。
+ */
+export function harmlessText(s) {
+  return String(s).replace(/\s+/g, " ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}]/gu, "").replace(/ +/g, " ").trim();
+}
+
+/**
+ * 本体（メインの worktree）の場所。実行先（cwd・cd 先）のリポジトリの本体を使う。
+ * 実行先が Git のリポジトリでないときは、CLAUDE_PROJECT_DIR が <本体>/.claude/worktrees/<別名> の形のときの本体を使う。
+ * ただし実行先が消えている（削除済みの作業場所）ときは、その実行先が導いた本体の配下（<本体>/ で始まり、.. を含まない）のときだけ使う。
+ * どれにも当てはまらなければ null（付けない側に倒す）。読み取りだけを行う。UserPromptSubmit と PostToolUse（brw pr）が共通で使う。
+ * strict（PostToolUse）のときは、存在する Git の外の実行先からは導出しない（消えている実行先の導出だけを認める）。
+ */
+function mainOfStart(start, { strict = false } = {}) {
+  const direct = start ? mainWorktreeOf(start) : null;
+  if (direct) return direct;
+  if (strict && (!start || existsSync(start))) return null;
+  const pd = process.env.CLAUDE_PROJECT_DIR;
+  const m = typeof pd === "string" ? /^(.+)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+$/.exec(pd) : null;
+  if (!m) return null;
+  if (start && !existsSync(start)) {
+    if (start.split(/[\\/]/).includes("..") || !resolve(start).startsWith(resolve(m[1]) + sep)) return null;
+  }
+  return mainWorktreeOf(m[1]);
+}
+
+/**
+ * 案内の文面。ブランチ名は無害化して入れる。BRW の実行形（絶対パス）で長すぎるときは短い形（brw）にし、
+ * それでも上限を超えるなら null（案内しない側に倒す）。
+ */
+function resumeTextOf(branch) {
+  const b = harmlessText(branch);
+  const make = (run) => `${PREFIX}作業ブランチ ${b} の作業場所は削除済みです。この PR の続きの作業（検証のやり直し・レビューの指摘への対応など）なら \`${run} resume ${b}\` で作業場所を作り直してください。新しい作業なら \`${run} create <名前>\` を使ってください（新しい依頼なら、この案内は無視してかまいません）。`;
+  for (const run of [BRW_RUN, "brw"]) {
+    const text = make(run);
+    if (text.length <= RESUME_MAX) return text;
+  }
+  return null;
+}
+
+/**
+ * UserPromptSubmit: 続きの作業の案内を文脈（additionalContext）として返す。
+ * 対象が無い・判定できない・例外のときは何も返さない。読み取りだけを行い、作業場所・記録・通信は変えない（作業場所は brw resume が作る）。
+ */
+function resumeGuidanceOf(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev) return null;
+    const session = sessionOf(ev);
+    if (!session) return null;
+    const start = mainOfStart(cwdOf(ev));
+    if (!start) return null;
+    const entry = resumableFor(start, session, new Date());
+    if (!entry) return null;
+    const text = resumeTextOf(entry.branch);
+    if (text === null) return null;
+    return { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: text } };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 信頼済みの `node <brw.mjs の実体> pr …` の呼び出しか。オプションの形は問わない（失敗した実行は成功の判定で外す）。
+ * 戻り値: null（pr ではない・信頼できない）| { dir }
+ */
+function brwPrCallOf(command, cwd) {
+  const cd = stripCd(command);
+  if (!cd.ok) return null;
+  const w = scanWords(cd.rest);
+  if (!w || w[0] !== "node" || w[2] !== "pr") return null;
+  const dir = cd.dir === null ? cwd : resolve(cwd, cd.dir);
+  if (w[1] === undefined || !isTrustedCli(resolve(dir, w[1]))) return null;
+  return { dir };
+}
+
+/**
+ * PreToolUse: 信頼済みの brw pr の呼び出しを実行の前に見て、セッションの手がかり（メモ）を書く（brw-pr-handoff 9.7）。
+ * 実機の Claude Code は、片付けつきの brw pr を「終了コード 1」と報告し PostToolUse を送らないことがあるため、実行前に残す。
+ * 判定と応答は変えない（副作用はメモだけ）。対象外・書けないときは何もせず、例外も出さない。
+ */
+function recordSessionHint(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.tool_name !== "Bash" || typeof ev.tool_input?.command !== "string") return;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return;
+    const call = brwPrCallOf(ev.tool_input.command, cwd);
+    if (!call) return;
+    const main = mainOfStart(call.dir, { strict: true });
+    if (!main) return;
+    writeSessionHint(main, { sessionId: session, dir: realpathSync(call.dir), now: new Date() });
+  } catch {
+    // メモを書けなくても、判定と応答は変えない
+  }
+}
+
+/** brw pr の出力の本文。Claude のオブジェクトは既存の successOutput（成功のときだけ本文）、Codex の文字列はそのまま。 */
+const prOutputText = (tr) => (typeof tr === "string" ? tr : successOutput(tr));
+
+/** 案内の行の見出し（末尾の空白を除いた RESUME_LINE_HEAD）。本文が空の行も見出しで判定する。 */
+const RESUME_HEADING = RESUME_LINE_HEAD.trimEnd();
+/** 正規表現の文字を文字どおりに一致させる。 */
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// pr-flow が生成する 2 形式の行全体（本文の後ろに余計な文字があれば一致しない）。CLI の部分は shq で単一引用符に入る
+const RESUME_NODE_RE = /^node '(?:[^']|'\\'')*' resume ([\w./-]+|'(?:[^']|'\\'')*')$/;
+const RESUME_MANUAL_RE = new RegExp(`^brw resume \`([^\`]+)\`${escapeRe(RESUME_MANUAL_NOTE)}$`);
+
+/**
+ * 案内の行（見出しで始まる 1 行）からブランチ名を取り出す。
+ * 行全体が pr-flow の生成する 2 形式のどちらかに一致するときだけ取り出す。見出しだけ・末尾に余計な本文のある行は null。
+ */
+function branchOfResumeLine(line) {
+  if (!line.startsWith(RESUME_LINE_HEAD)) return null;
+  const rest = line.slice(RESUME_LINE_HEAD.length);
+  const manual = RESUME_MANUAL_RE.exec(rest);
+  if (manual) return manual[1];
+  const node = RESUME_NODE_RE.exec(rest);
+  if (!node) return null;
+  const v = node[1];
+  return v.startsWith("'") ? v.slice(1, -1).replace(/'\\''/g, "'") : v;
+}
+
+/**
+ * brw pr（片付けの後）の出力から、案内の行（見出し「続きの再開:」）のブランチ名を 1 つ取り出す。
+ * エラーの行があるとき、見出しの行が無いとき、見出しの行のうち 1 つでも取り出せないとき（本文が空を含む）、
+ * ブランチが 2 種類以上のときは null（付けない側に倒す）。
+ */
+function resumeBranchOfPrOutput(text) {
+  const ls = text.split("\n").map((l) => l.trim());
+  if (ls.some((l) => l.startsWith("エラー:"))) return null;
+  const lines = ls.filter((l) => l.startsWith(RESUME_HEADING));
+  if (lines.length === 0) return null;
+  const names = new Set();
+  for (const l of lines) {
+    const b = branchOfResumeLine(l);
+    if (b === null) return null;
+    names.add(b);
+  }
+  return names.size === 1 ? [...names][0] : null;
+}
+
+/**
+ * PostToolUse: 信頼済みの brw pr が成功したとき、直近 2 分以内の再開の記録（sessionId が空の最新 1 件）にセッションを付ける。
+ * 成功の根拠は、出力に案内の行があり、エラーの行が無いこと（Claude のオブジェクトは従来の成功判定も満たすこと）。
+ * 付けるのは案内の行のブランチの記録だけ。本体は cwd（削除済みなら CLAUDE_PROJECT_DIR の導出）で決め、決まらなければ付けない。出力の内容では本体を決めない。応答は返さず、失敗しても何もしない。
+ */
+function attachResumeSession(input) {
+  try {
+    const ev = eventOf(input);
+    if (!ev || ev.tool_name !== "Bash" || typeof ev.tool_input?.command !== "string") return;
+    const cwd = cwdOf(ev);
+    const session = sessionOf(ev);
+    if (!cwd || !session) return;
+    const call = brwPrCallOf(ev.tool_input.command, cwd);
+    if (!call) return;
+    const text = prOutputText(ev.tool_response);
+    if (text === null) return;
+    const branch = resumeBranchOfPrOutput(text);
+    if (branch === null) return;
+    const main = mainOfStart(call.dir, { strict: true });
+    if (!main) return;
+    attachResumeRecord(main, session, new Date(), { branch });
+  } catch {
+    // 関連付けに失敗しても、ホストの処理は止めない（記録されないだけ）
   }
 }
 
@@ -568,9 +1103,13 @@ export function handleHook(host, event, input) {
   // PostToolUse は関連付けだけを行い、応答は返さない。Stop は Claude・Codex とも block の形で案内する
   if (event === "PostToolUse") {
     recordWorkStart(input);
+    attachResumeSession(input);
     return null;
   }
   if (event === "Stop") return stopGuidance(input);
+  if (event === "UserPromptSubmit") return resumeGuidanceOf(input);
+  // PreToolUse: 判定の前に、片付けの手がかり（メモ）だけを書く（判定・応答は変えない）
+  if (event === "PreToolUse") recordSessionHint(input);
   return responseOf(host, event, decideHook(host, event, input));
 }
 

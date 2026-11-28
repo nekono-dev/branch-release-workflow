@@ -4,11 +4,16 @@
 // 手順: 事前確認 → 作業の特定 → 本文の確認 → 別コミット（tidy）→ 準備 → 計画 → 公開 → 片付け（宣言の afterPublish.cleanup が有効なとき）。
 // 終了コード: 0 完了、1 途中で止まった（次の操作を表示。再実行で続きから進む）、2 使い方・入力の誤り。外部依存なし。
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { branchBase, classifyBranch, currentBranch, git, loadConfig, repoRoot, worktrees } from "./lib.mjs";
 import { cleanupAfterPr } from "./cleanup.mjs";
+import { runBasePr } from "./base-pr.mjs";
 import * as publish from "./publish.mjs";
 import { runPublish, runWork } from "./publish-cli.mjs";
-import { bodyPathOf, UNFILLED_MARK } from "./pr-template.mjs";
+import { basePrGuidance, bodyPathOf, UNFILLED_MARK } from "./pr-template.mjs";
+import { BRW_CLI_PATH } from "./brw-cmd.mjs";
+import { RESUME_LINE_HEAD, RESUME_MANUAL_NOTE, readSessionHint, writeRecord } from "./resume-record.mjs";
+import { plainPath, visible } from "./work-remainder.mjs";
 import { tidyChanges } from "./tidy.mjs";
 
 const consoleIo = { out: (s) => console.log(s), err: (s) => console.error(s) };
@@ -39,6 +44,16 @@ async function capture(fn, args, d) {
   const err = [];
   const code = await fn(args, { cwd: d.cwd, session: d.session, stdinIsTTY: d.stdinIsTTY, io: { out: (s) => out.push(String(s)), err: (s) => err.push(String(s)) } });
   return { code, out, err, text: [...out, ...err].join("\n") };
+}
+
+/**
+ * 開発ブランチ・恒常的な分岐元以外で `brw pr` を止めるときの理由と取るべき手順（分類ごと）。
+ * 保護ブランチ・宣言外・detached HEAD のどれかで、利用者が次に何をすればよいかを示す。
+ */
+function notDevelopmentMessage(cls, branch, config) {
+  if (!branch) return `detached HEAD のため、作業ブランチを確定できず、PR を作りません。開発ブランチは brw create で作った作業ブランチの worktree で行います。${basePrGuidance(config)}`;
+  if (cls === "protected") return `'${branch}' は保護ブランチのため、ここでは PR を作りません（開発ブランチではないため）。作業は brw create で作った開発ブランチで行います。${basePrGuidance(config)}`;
+  return `'${branch}' は宣言（workBranches・baseBranch など）に無いブランチのため、開発ブランチではなく、PR を作りません。開発ブランチは brw create で作ったブランチで行います。${basePrGuidance(config)}`;
 }
 
 /** 再実行のためのコマンド（利用者の端末での --confirmed を含められる）。 */
@@ -75,7 +90,9 @@ export async function runPr(args, deps = {}) {
   const config = loaded.config;
   const branch = currentBranch(d.cwd);
   const cls = branch ? classifyBranch(config, branch) : "undeclared";
-  if (cls !== "development") return stop("precheck", `'${branch ?? "（ブランチなし）"}' は開発ブランチではないため、PR を作りません。開発ブランチの worktree で実行してください。`);
+  // 恒常的な分岐元は、分岐元からの PR（base-pr）へ渡す。引数の検査もそちらで行う
+  if (cls === "base") return runBasePr(args, { cwd: d.cwd, session: deps.session, io: d.io, stdinIsTTY: d.stdinIsTTY }, { config, branch });
+  if (cls !== "development") return stop("precheck", notDevelopmentMessage(cls, branch, config));
   const [main, ...others] = worktrees(d.cwd);
 
   // 2. 作業の特定: 指定 → 現在の作業 → 公開済みで片付けが残る作業 → 開始
@@ -195,16 +212,74 @@ function finishUp({ d, config, main, others, branch, workId, o }) {
     return 0;
   }
   const known = push?.oid && push?.remote && pr?.url && pr?.base ? { url: pr.url, base: pr.base, oid: push.oid, remote: push.remote } : null;
+  // 切り出し元は片付けで消えるため、片付けの前に読んで再開の記録に残す（9.5）
+  const base = branchBase(main.path, config, branch);
+  // 9.7: 実行前に残したメモのセッションを、作業場所を消す前に読む（同じ作業場所・10 分以内のものだけ使われる）
+  const wtPath = [main, ...others].find((w) => w.branch === branch)?.path ?? d.cwd;
+  const hintSession = readSessionHint(main.path, wtPath, new Date());
   const r = cleanupAfterPr({ main, others, config, branch, workId, known });
   if (r.kind === "kept") {
     d.io.out(`PR は作成済みです。片付けは行いませんでした: ${r.reason}`);
     d.io.out(`原因を解消してから、もう一度 brw pr（この worktree の中）を実行するか、本体（${main.path}）で brw finish ${branch} を実行してください。`);
     return 1;
   }
-  d.io.out(`片付けました: ${r.branch}（worktree: ${r.worktree}）`);
+  d.io.out(`片付けました: ${visible(r.branch)}（worktree: ${visible(r.worktree)}）`);
   if (r.stateNote) d.io.out(`注意: ${r.stateNote}`);
-  d.io.out(`この worktree は削除されました。次の作業は本体（${r.main}）で行います。新しい作業は、本体で brw create <名前> を実行してください。`);
-  // 実機（Claude Code）の観察: 作業ディレクトリが消えると、ツールが終了コード 1 と表示し、次の呼び出しの作業ディレクトリはホームに戻る（本体ではない）
-  d.io.out(`注意: 作業ディレクトリが消えたため、実行したツールが「終了コード 1」や「作業ディレクトリが存在しない」と表示することがありますが、PR の作成と片付けは完了しています。続く操作は、先に cd ${shq(r.main)} してから行ってください。`);
+  recordResume(d, { main: r.main, branch: r.branch, pr, base, sessionId: hintSession });
+  d.io.out("この PR の続きの作業（検証のやり直し・レビューの指摘への対応など）は、新しい作業ではなく、公開済みの作業ブランチから作業場所を作り直して再開します:");
+  d.io.out(resumeLine(r.branch, r.main, r.worktree));
+  d.io.out(`新しい作業は、本体で brw create <名前> を実行してください（本体: ${visible(r.main)}）。`);
+  // 要件 4.9: 本体でセッションを開始した場合はホストが本体へ戻すため追加の操作は不要。作業場所の中で開始した場合は戻らないことがあるため、cd を示す
+  d.io.out(`注意: 作業場所の中でセッションを開始していた場合は、続く操作の前に ${cdLine(r.main)} を実行してください。本体でセッションを開始していた場合は、ホストが本体へ戻すため追加の操作は不要です。`);
+  // 実機（Claude Code）の観察: 作業場所が消えると、ツールが終了コード 1 と表示することがある。PR の作成と片付けは完了している
+  d.io.out("注意: 作業場所が消えたため、ツールが「終了コード 1」と表示することがありますが、PR の作成と片付けは完了しています。");
   return 0;
+}
+
+/** PR の URL（https://<ホスト>/<owner>/<name>/pull/N）から owner/name を取る。取れなければ null。 */
+function repositoryOf(url) {
+  const m = /^https:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(url ?? "");
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * 片付けた作業の再開の記録を書く（brw-pr-handoff 7.2）。
+ * 書けなくても片付けの結果は変えず、警告 1 行だけを出す。sessionId は PostToolUse が後から付けるので空のまま。
+ */
+function recordResume(d, { main, branch, pr, base, sessionId }) {
+  let res;
+  try {
+    res = writeRecord(main, { branch, prUrl: pr?.url ?? null, repository: repositoryOf(pr?.url), sessionId: sessionId ?? null, base: base ?? null, at: new Date().toISOString() });
+  } catch (e) {
+    res = { ok: false, message: String(e?.message ?? e).split("\n")[0] };
+  }
+  if (!res.ok) d.io.out(`注意: 再開の記録を書けませんでした（${res.message}）。続きは brw resume ${visible(branch)} で再開できます。`);
+}
+
+/**
+ * 案内に出す CLI の実行パス。CLI が削除する作業場所の中にあるときは、本体の同じ相対パスに置き換える。
+ * 本体に同じ相対パスが無ければ null（実行できる形を示さない）。作業場所の外（プラグインの導入先など）はそのまま。
+ */
+function cliPathFor(cli, worktree, main) {
+  const prefix = `${worktree}/`;
+  if (!cli.startsWith(prefix)) return cli;
+  const candidate = join(main, cli.slice(prefix.length));
+  return existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * 続きの再開の案内。実行できる形（CLI のパス・ブランチ名がどちらも表示に使える形）のときだけコマンドで示す。
+ * そうでなければ、利用している環境に従う手動の案内にする。
+ */
+function resumeLine(branch, main, worktree) {
+  const cli = cliPathFor(BRW_CLI_PATH, worktree, main);
+  if (!plainPath(branch) || cli === null || !plainPath(cli)) return `  ${RESUME_LINE_HEAD}brw resume ${visible(branch)}${RESUME_MANUAL_NOTE}`;
+  const word = /^[\w./-]+$/.test(branch) ? branch : shq(branch);
+  return `  ${RESUME_LINE_HEAD}node ${shq(cli)} resume ${word}`;
+}
+
+/** 作業場所が消えた後に移る本体の案内（cd のコマンド）。表示に使えないパスは、コマンドを示さない。 */
+function cdLine(main) {
+  if (!plainPath(main)) return `本体（${visible(main)}）へ移ってください（表示に使えない文字を含むため、cd のコマンドは示しません）`;
+  return `cd ${shq(main)}`;
 }

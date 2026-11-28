@@ -2,8 +2,8 @@
 
 /** ホストごとに扱うイベント名。 */
 export const HOSTS = {
-  claude: ["PreToolUse", "PostToolUse", "Stop"],
-  codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop"],
+  claude: ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"],
+  codex: ["PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"],
 };
 
 /**

@@ -13,7 +13,10 @@ import { checkClaudeHooks, codexCommand, hasManaged, hooksDisabled, mergeCodexHo
 import { load, markReady, startWork, stateFileOf } from "./publish.mjs";
 
 /** ホストごとの経路のイベント。Claude は PermissionRequest を登録しない。 */
-const ROUTE_EVENTS = { claude: ["PreToolUse", "PostToolUse", "Stop"], codex: ["PreToolUse", "PermissionRequest", "PostToolUse", "Stop"] };
+const ROUTE_EVENTS = {
+  claude: ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"],
+  codex: ["PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "UserPromptSubmit"],
+};
 const PROBE_TIMEOUT_MS = 20000;
 const PROBE_PREFIX = "brw-diag-probe-";
 const PROBE_REMOTE = "https://github.com/brw-diagnose/probe.git";
@@ -34,6 +37,8 @@ const probesOf = (host, event) => {
   if (event === "PreToolUse") return host === "claude" ? [DENY, ALLOW] : [DENY];
   if (event === "PermissionRequest") return [DENY, ALLOW];
   if (event === "PostToolUse") return [{ name: "attach", expect: "none", repo: "post", attach: true }, { name: "noop", expect: "none", repo: "main", text: "git status" }];
+  // 記録の無い本体では、案内は何も返さない（案内の内容は記録が要るため、ここでは確かめない）
+  if (event === "UserPromptSubmit") return [{ name: "no-record", expect: "none", repo: "main" }];
   return [{ name: "ready", expect: "block", repo: "stop" }, { name: "idle", expect: "none", repo: "main" }];
 };
 
@@ -249,6 +254,7 @@ const responseKind = (event, out) => {
   if (event === "PermissionRequest") return ["allow", "deny"].includes(h?.decision?.behavior) ? h.decision.behavior : "invalid";
   if (event === "PreToolUse") return ["allow", "deny", "ask"].includes(h?.permissionDecision) ? h.permissionDecision : "invalid";
   if (event === "Stop") return j?.decision === "block" ? "block" : "invalid";
+  if (event === "UserPromptSubmit") return typeof h?.additionalContext === "string" ? "context" : "invalid";
   return "invalid";
 };
 
@@ -270,6 +276,7 @@ const runCommand = (command, { cwd, env, input }) => {
 const inputFor = (event, cwd, { text, output }) => {
   const base = { session_id: PROBE_SESSION, cwd, hook_event_name: event };
   if (event === "Stop") return { ...base, stop_hook_active: false };
+  if (event === "UserPromptSubmit") return { ...base, prompt: "brw-diag" };
   if (event === "PostToolUse") return { ...base, tool_name: "Bash", tool_input: { command: text }, tool_response: { exit_code: 0, stdout: output ?? "" } };
   return { ...base, tool_name: "Bash", tool_input: { command: text } };
 };

@@ -267,9 +267,118 @@ export const runGithubClientChecks = async (eq) => {
   eq("client/3.2 応答が届かなかった作成は network・結果不明で、再取得での照合を求める", [crl.ok, crl.kind, crl.outcomeUnknown, crl.reconcile, cl.fake.applied.length], [false, "network", true, true, 1]);
   const names = Object.keys(c1.s).concat(Object.getOwnPropertyNames(c1.s));
   const mergeLike = [await c1.s.request(T, "PUT", "/repos/acme/app/pulls/7/merge", { merge_method: "squash" }), await c1.s.request(T, "PATCH", "/repos/acme/app/pulls/7", { state: "closed" }), await c1.s.request(T, "POST", "/repos/acme/app/pulls/7/requested_reviewers", {}), await c1.s.request(T, "POST", "/repos/acme/app/pulls/7/merge", {})];
-  eq("client/3.2 マージ・自動マージ・PR の更新や終了に当たる公開操作・書き込み経路はない", [names.filter((k) => /merge|delete|close|update|patch|ref/i.test(k)), mergeLike.map((x) => x.kind), c1.fake.writeCount], [[], Array(4).fill("refused"), 1]);
+  const uniq = [...new Set(names)];
+  eq("client/18.1 公開関数のうち merge を含むのは mergePull だけで、公開の request はマージ・自動マージ・PR の更新や終了を拒否する", [uniq.filter((k) => /merge/i.test(k)), uniq.filter((k) => /delete|close|update|patch|ref/i.test(k)), mergeLike.map((x) => x.kind), c1.fake.writeCount], [["mergePull"], [], Array(4).fill("refused"), 1]);
   const dumpPr = JSON.stringify([fe1, gr1, cr1, crm, crj, crl, c1.fake.requests]);
   eq("client/3.2 PR の結果と記録に資格情報は含まれない", dumpPr.includes("SECRETSECRET"), false);
+
+  // ---- PR の読み取りと限定したマージ（18.1） ----
+  const PATH7 = "/repos/acme/app/pulls/7";
+  const GET7b = `GET ${PATH7}`;
+  const MERGE7 = `PUT ${PATH7}/merge`;
+  const SHA = "c".repeat(40);
+  // 応答の PR 本体。top は PR 直下、head・base は各々の項目を上書きする
+  const pb = (top = {}, head = {}, base = {}) => ({
+    number: 7, state: "open", merged: false, title: "変更の公開",
+    head: { ref: "dev/a", sha: OID, repo: repoOf(42, "acme/app"), ...head },
+    base: { ref: "main", repo: repoOf(42, "acme/app"), ...base },
+    ...top,
+  });
+  const rp1 = await mkSession({ [GET7b]: { status: 200, body: pb() } });
+  const rr1 = await rp1.s.readPull(T, 7);
+  eq("client/18.1 readPull は期待を渡さずに状態・取り込み先・head の SHA・タイトルを読み、取り込み先のリポジトリを返す", [rr1.ok, rr1.pull, sent(rp1), rp1.fake.writeCount], [true, { number: 7, state: "open", merged: false, title: "変更の公開", headRef: "dev/a", headSha: OID, baseRef: "main", baseRepo: { owner: "acme", name: "app" } }, [GET7b], 0]);
+  const rp2 = await mkSession({ [GET7b]: { status: 200, body: pb({ merged: true, state: "closed" }, {}, { repo: repoOf(99, "other/fork") }) } });
+  const rr2 = await rp2.s.readPull(T, 7);
+  eq("client/18.1 readPull は取り込み先が対象と違っても事実をそのまま返す（判定は pr-merge）", [rr2.ok, rr2.pull?.baseRepo, rr2.pull?.merged, rr2.pull?.state], [true, { owner: "other", name: "fork" }, true, "closed"]);
+  const rbad = [
+    await mkSession({ [GET7b]: { status: 200, body: "<html>" } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({ number: "7" }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({ number: 8, html_url: "https://github.com/acme/app/pull/8" }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({ state: "draft" }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({ merged: undefined }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({ title: undefined }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({}, { sha: "xyz" }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({}, { ref: undefined }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({}, {}, { ref: 5 }) } }),
+    await mkSession({ [GET7b]: { status: 200, body: pb({}, {}, { repo: undefined }) } }),
+  ];
+  const rbadOut = [];
+  for (const c of rbad) rbadOut.push((await c.s.readPull(T, 7)).kind);
+  eq("client/18.1 readPull は応答の形が不正なら unknown-input、番号が違えば target-mismatch で、成功扱いにしない", rbadOut, ["unknown-input", "unknown-input", "target-mismatch", "unknown-input", "unknown-input", "unknown-input", "unknown-input", "unknown-input", "unknown-input", "unknown-input"]);
+  const rq = await mkSession({ [GET7b]: { status: 200, body: pb() } });
+  const unconfirmed = createGitHubSession({ host: "github.com", transport: viaFake(rq.fake) });
+  const rref = [
+    await unconfirmed.readPull(T, 7),
+    await rq.s.readPull(T, 0),
+    await rq.s.readPull(T, "7/merge"),
+    await rq.s.readPull({ ...T, host: "ghe.example.com" }, 7),
+  ];
+  eq("client/18.1 readPull は照合前の対象・不正な番号・別ホストを通信せずに拒否する", [rref.map((x) => x.kind), sent(rq)], [["refused", "refused", "refused", "target-mismatch"], []]);
+  eq("client/18.1 readPull の結果に資格情報は含まれない", JSON.stringify([rr1, rr2]).includes("SECRETSECRET"), false);
+
+  const m1 = await mkSession({ [MERGE7]: { status: 200, body: { merged: true, sha: SHA, message: "Pull Request successfully merged" } } });
+  const mr1 = await m1.s.mergePull(T, { number: 7, sha: OID });
+  eq("client/18.1 mergePull は PUT …/merge だけを送り、本文は squash と sha に固定する", [mr1.ok, mr1.status, mr1.merged, mr1.sha, mr1.message, mr1.calledTo, m1.fake.applied.map((a) => a.body), sent(m1)], [true, 200, true, SHA, "Pull Request successfully merged", { host: "github.com", method: "PUT", path: "/repos/acme/app/pulls/7/merge" }, [{ merge_method: "squash", sha: OID }], [MERGE7]]);
+  // 余分なキーは送る前に拒否する（merge_method の値・継承・プロトタイプ汚染の形を含む）
+  const inherited = Object.assign(Object.create({ merge_method: "merge" }), { number: 7, sha: OID });
+  const extraKeys = [
+    { number: 7, sha: OID, merge_method: "merge" },
+    { number: 7, sha: OID, merge_method: "rebase" },
+    { number: 7, sha: OID, merge_method: "squash" },
+    { number: 7, sha: OID, commit_title: "x" },
+    { number: 7, sha: OID, commit_message: "x" },
+    JSON.parse(`{"__proto__": {"merge_method": "merge"}, "number": 7, "sha": "${OID}"}`),
+    inherited,
+  ];
+  const mx = await mkSession({ [MERGE7]: { status: 200, body: { merged: true, sha: SHA } } });
+  const mxKinds = [];
+  for (const x of extraKeys) mxKinds.push((await mx.s.mergePull(T, x)).kind);
+  eq("client/18.1 mergePull は number と sha 以外のキー（継承・__proto__ を含む）を渡すと送る前に refused で、書き込みは増えない", [mxKinds, mx.fake.writeCount, mx.fake.applied.length, sent(mx)], [Array(extraKeys.length).fill("refused"), 0, 0, []]);
+  const pubMerge = await m1.s.request(T, "PUT", `${PATH7}/merge`, { merge_method: "squash", sha: OID });
+  eq("client/18.1 公開の request は sha を付けても PUT …/merge を拒否し、通信しない", [pubMerge.kind, m1.fake.writeCount], ["refused", 1]);
+
+  const mz = async (route) => {
+    const c = await mkSession({ [MERGE7]: route });
+    const r = await c.s.mergePull(T, { number: 7, sha: OID });
+    return r;
+  };
+  const m405 = await mz({ status: 405, body: { message: "Pull Request is not mergeable" } });
+  eq("client/18.1 mergePull の 405 はマージできない（not-mergeable）として理由を保つ", [m405.ok, m405.kind, m405.status, m405.reason, m405.outcomeUnknown ?? false], [false, "not-mergeable", 405, "Pull Request is not mergeable", false]);
+  const m409 = await mz({ status: 409, body: { message: "Head branch was modified." } });
+  eq("client/18.1 mergePull の 409 は head の SHA の食い違いとして理由を保ち、結果不明とはしない", [m409.ok, m409.kind, m409.status, m409.reason, m409.outcomeUnknown ?? false], [false, "unknown-input", 409, "Head branch was modified.", false]);
+  const m401 = await mz({ status: 401, body: { message: "Bad credentials" } });
+  eq("client/18.1 mergePull の認証の失敗（401）は auth", [m401.ok, m401.kind, m401.status], [false, "auth", 401]);
+  const m502 = await mz({ status: 502, body: { message: "Bad Gateway" } });
+  eq("client/18.1 mergePull の 5xx は server で、マージ済みかもしれない（outcomeUnknown）と示す", [m502.kind, m502.outcomeUnknown], ["server", true]);
+  const ml = createFakeGitHub({ scenario: "lost", routes: { ...REPO, [MERGE7]: { status: 200, body: { merged: true, sha: SHA } } } });
+  const sl2 = createGitHubSession({ host: "github.com", token: TOKEN, transport: viaFake(ml) });
+  await sl2.confirmTarget(T);
+  const mlost = await sl2.mergePull(T, { number: 7, sha: OID });
+  eq("client/18.1 mergePull の応答喪失は network で結果不明（outcomeUnknown）と示し、成功扱いにしない", [mlost.ok, mlost.kind, mlost.outcomeUnknown, ml.applied.length], [false, "network", true, 1]);
+
+  const mbad = [
+    { label: "sha が無い", t: T, n: 7, s: undefined },
+    { label: "sha が短い", t: T, n: 7, s: "abc" },
+    { label: "sha が 16 進でない", t: T, n: 7, s: "z".repeat(40) },
+    { label: "sha が文字列でない", t: T, n: 7, s: 123 },
+    { label: "番号が 0", t: T, n: 0, s: OID },
+    { label: "番号が文字列", t: T, n: "7", s: OID },
+    { label: "番号に merge を含む", t: T, n: "7/merge", s: OID },
+    { label: "対象が未照合", t: { ...T, name: "other" }, n: 7, s: OID },
+    { label: "別ホスト", t: { ...T, host: "ghe.example.com" }, n: 7, s: OID },
+    { label: "ID が照合済みと違う", t: { ...T, repositoryId: 99 }, n: 7, s: OID },
+  ];
+  const mbadOut = {};
+  for (const x of mbad) {
+    const c = await mkSession({ [MERGE7]: { status: 200, body: { merged: true, sha: SHA } } });
+    const r = x.t.name === "other" ? await createGitHubSession({ host: "github.com", transport: viaFake(c.fake) }).mergePull(x.t, { number: x.n, sha: x.s }) : await c.s.mergePull(x.t, { number: x.n, sha: x.s });
+    mbadOut[x.label] = [r.ok, r.kind, c.fake.writeCount];
+  }
+  const shaNull = await (await mkSession({})).s.mergePull(T, null);
+  eq("client/18.1 mergePull は sha が無い・不正・番号が不正・対象が未照合・別ホスト・ID の食い違いを送る前に拒否し、書き込みを増やさない", mbadOut, Object.fromEntries(mbad.map((x) => [x.label, [false, x.label === "別ホスト" || x.label === "ID が照合済みと違う" ? "target-mismatch" : "refused", 0]])));
+  eq("client/18.1 mergePull は引数が null でも通信せずに拒否する", [shaNull.ok, shaNull.kind], [false, "refused"]);
+  const dumpMerge = JSON.stringify([rr1, rr2, mr1, m405, m409, mlost]);
+  eq("client/18.1 readPull・mergePull の結果に資格情報は含まれない", dumpMerge.includes("SECRETSECRET"), false);
 
   }
 

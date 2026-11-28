@@ -31,7 +31,6 @@ const CLASS_LABEL = {
 const ALT_CREATE = `ブランチや worktree は \`${BRW_RUN} create <名前>\` で作成してください（既存のブランチは \`${BRW_RUN} resume <名前>\`）。`;
 const ALT_RESUME = `既存の開発ブランチは \`${BRW_RUN} resume <名前>\` で再開してください。`;
 const ALT_MERGE = `開発ブランチ間の取り込みは PR を作らず、ローカルで \`${BRW_RUN} merge <取り込み元>\` を使ってください。`;
-const ALT_PR_FLOW = `PR の作成は \`${BRW_RUN} pr-template\` で本文の下書きを用意し、本文を書いたうえで \`${BRW_RUN} pr\` を実行してください（\`gh pr create\`・GitHub の API・MCP による直接の作成は使えません）。`;
 // フック経路は reason と alternative の連結を 500 文字で切るため、短く保つ（案内の 3 点が欠けないように）
 const ALT_SYNC = (b) => b === "<基底>"
   ? `基底の更新は fast-forward に限ります。\`git pull --ff-only origin <基底>\`（基底を別の作業ツリーで確認中なら \`git -C <その作業ツリー> pull --ff-only origin <基底>\`）で更新し、分岐する反映は PR で、開発ブランチへの取り込みは \`git merge origin/<基底>\` で行ってください。`
@@ -46,6 +45,82 @@ const basisNote = (op) => {
   return `（設定 ${keys.map((k) => `${k}=${b.configValues?.[k] ?? "?"}`).join("、")} による: ff=${op.ff}、rebase=${op.rebase}）`;
 };
 const ALT_PR = "保護対象への反映は、開発ブランチから分岐元へ PR を作成し、GitHub 上でリポジトリの条件を満たす利用者が squash マージしてください。";
+// GitHub 側のマージ・自動マージ予約の拒否の案内。フック経路は reason と案内の連結を 500 字で切るため、
+// 重要な部分を先に置き、実行する形（インストール先のパスで長くなりうる）は末尾に置く。ALT_PR はローカルマージ等の拒否が使うので別に持つ。
+export function mergeAlternative(run = BRW_RUN) {
+  return `分岐元向けの PR は、利用者が別の端末で brw pr-merge <番号> を実行してマージしてください。保護ブランチ向けは GitHub 上でマージしてください。（実行する形: ${run} pr-merge <番号>）`;
+}
+const ALT_MERGE_PR = mergeAlternative();
+
+// brw pr で作れる PR の案内（brw-pr-handoff 6.2）。brw pr で作れる組（開発ブランチ→保護ブランチ・分岐元、分岐元→保護ブランチ）だけに使う。
+// 実行する形（インストール先のパスで長くなりうる）は末尾に置く（フック経路の 500 字の切り詰め対策）
+export function prFlowAlternative(run = BRW_RUN) {
+  return `PR の作成は \`brw pr-template\` で本文の下書きを用意し、本文を書いてから \`brw pr\` で行ってください（\`gh pr create\`・GitHub の API・MCP による直接の作成は使えません）。（実行する形: ${run} pr-template、本文を書いたあとに ${run} pr を実行）`;
+}
+
+// 理由の文に出す名前の表示長は、エスケープ後の文字数で 60 字まで。超える分は … で省く。
+// 不可視・制御・空白類などは \u{…} の形で見せる（生のまま出さない）。エスケープ列の途中では切らない
+const SHOWN_MAX = 60;
+const VISIBLE_ESCAPE = /[\p{Cc}\p{Cf}\p{Zs}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}]/u;
+/**
+ * 理由の文に出す表示用の名前（ブランチ名・オーナー名）。表示長（エスケープ後）が 60 字を超えるときは手前で切って … を付ける。
+ * @param {string} name
+ */
+export function shownRef(name) {
+  let out = "";
+  for (const ch of String(name)) {
+    const piece = VISIBLE_ESCAPE.test(ch) ? `\\u{${ch.codePointAt(0).toString(16).toUpperCase()}}` : ch;
+    if (out.length + piece.length > SHOWN_MAX) return `${out}…`;
+    out += piece;
+  }
+  return out;
+}
+
+// Git の ref 名の規則（check-ref-format）に従い、空白・制御・書式制御（双方向・ゼロ幅）・空白類・私用・未割当・代理の符号位置を除く。
+// Unicode の文字（\p{L}・\p{N} など）は許す
+const REF_BAD = /[\p{Cc}\p{Cf}\p{Zs}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}\s~^:?*\[\\]/u;
+const REF_OK = (s) => typeof s === "string" && s.length > 0 && !REF_BAD.test(s) && !s.includes("..") && !s.includes("@{") && s !== "@" && !s.endsWith(".")
+  && s.split("/").every((c) => c !== "" && !c.startsWith(".") && !c.endsWith(".lock"));
+const REPO_OK = (s) => typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s) && !s.includes("..");
+const OWNER_OK = (s) => typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(s);
+// ref 名は / の区間ごとに UTF-8 のパーセントエンコードする（encodeURIComponent）
+const encodeRef = (s) => s.split("/").map(encodeURIComponent).join("/");
+/** GitHub の作成画面の URL。安全でない名前は null（URL を出さない）。長さは呼び出し側が残りの字数で判定する */
+function compareUrlOf({ repository, headOwner, head, base }) {
+  if (!REPO_OK(repository) || !REF_OK(head) || !REF_OK(base) || (headOwner != null && !OWNER_OK(headOwner))) return null;
+  const from = headOwner ? `${headOwner}:${encodeRef(head)}` : encodeRef(head);
+  return `https://github.com/${repository}/compare/${encodeRef(base)}...${from}?expand=1`;
+}
+
+// GitHub の Web 画面で作る手順の要点（URL が出せないときも、この手順を示す）
+const STEP_WEB = "GitHub の Web 画面（Pull requests の New）から、取り込み先と取り込み元を選んで作成してください。";
+
+/**
+ * PR の拒否の案内を、組（取り込み元の分類・取り込み先の分類）ごとに選ぶ（brw-pr-handoff 6.2）。
+ * brw pr で作れる組は brw pr の手順を示す。作れない組は brw pr の手順を示さず、作れない理由と、利用者が GitHub 上で作る作成画面の URL を示す。
+ * ただし開発ブランチ間は PR を作らない運用のため URL を出さず、ローカルの brw merge を示す。
+ * @param {string} headClass 取り込み元の分類（classifyBranch の結果）
+ * @param {string} baseClass 取り込み先の分類
+ * @param {{repository?: string|null, headOwner?: string|null, head?: string, base?: string, run?: string, limit?: number}} [where]
+ *   repository は owner/repo、headOwner は別リポジトリの取り込み元のオーナー（同じリポジトリなら null）、run は実行する形。
+ *   limit は案内の文字数の上限（既定 500。呼び出し側は「理由 + 1 + 案内」が 500 字に収まるよう、理由の長さを引いて渡す）。
+ *   URL は案内の全体（理由・手順を含む）の残りに収まるときだけ付け、収まらなければ手順だけにする。
+ */
+export function prAlternative(headClass, baseClass, { repository = null, headOwner = null, head = "", base = "", run = BRW_RUN, limit = 500 } = {}) {
+  const creatable = !headOwner && ((headClass === "development" && (baseClass === "protected" || baseClass === "base")) || (headClass === "base" && baseClass === "protected"));
+  if (creatable) return prFlowAlternative(run);
+  // 同名（取り込み元と取り込み先が同じブランチ）は取り込みが要らない。brw merge も作成画面の URL も示さない（brw merge は同一ブランチを拒否する）
+  if (!headOwner && head !== "" && head === base)
+    return "この組は BRW の PR の手順では作れません。取り込み元と取り込み先が同じブランチで、取り込みは不要です。";
+  // 開発ブランチ間（PR を作らない運用）は、作成画面の URL を出さず、ローカルの brw merge を示す
+  if (headClass === "development" && baseClass === "development" && !headOwner)
+    return `この組は BRW の PR の手順では作れません。開発ブランチ間の取り込みは PR を使わず、ローカルで \`brw merge <取り込み元>\` を使ってください（実行する形: ${run} merge <取り込み元>）。`;
+  // 並び: 作れない理由 → 手順の要点 → URL（残りの字数に全体が収まるときだけ。URL は末尾に置くので、切れるのは URL より後ろだけ）
+  const lead = ["この組は BRW の PR の手順では作れません。", STEP_WEB];
+  const url = compareUrlOf({ repository, headOwner, head, base });
+  const withUrl = url ? [...lead, `作成画面: ${url}`].join(" ") : null;
+  return withUrl && withUrl.length <= limit ? withUrl : lead.join(" ");
+}
 
 function decide(op, fields) {
   return {
@@ -107,7 +182,7 @@ export function evaluate(op, ctx) {
 
   // GitHub 側のマージと自動マージ予約は、対象が確定できなくても拒否する（マージは利用者が GitHub 上で行う）
   if (op.kind === "github-merge" || op.kind === "auto-merge")
-    return deny(op, "github-merge", `エージェントによる GitHub 上のマージ${op.kind === "auto-merge" ? "と自動マージの予約" : ""}は行えません。`, { alternative: ALT_PR, reasons: op.unresolved });
+    return deny(op, "github-merge", `エージェントによる GitHub 上のマージ${op.kind === "auto-merge" ? "と自動マージの予約" : ""}は行えません。`, { alternative: ALT_MERGE_PR, reasons: op.unresolved });
 
   if (op.unresolved.length > 0 || op.kind === "unparseable")
     return deny(op, "unresolved", `対象を確定できず、規則に適合すると確認できないため変更を止めます: ${op.unresolved.join(" ") || "操作を解釈できません。"}`, { compliance: "unresolved", reasons: op.unresolved });
@@ -116,7 +191,7 @@ export function evaluate(op, ctx) {
   const registered = ctx.registered === true;
   switch (op.kind) {
     case "create": return evalCreate(op, config);
-    case "commit": return evalCommit(op, config);
+    case "commit": return evalCommit(op, config, auto, registered);
     case "push": return evalPush(op, config, auto, registered, restrictions);
     case "merge": return evalMerge(op, config, registered);
     case "pr-create": return evalPrCreate(op, config, auto, registered, restrictions, ctx.origin ?? "agent");
@@ -140,10 +215,18 @@ function evalCreate(op, config) {
   return deny(op, "branch-create", `ブランチ '${branch}' の作成・名前の変更は BRW の手順を経る必要があります。`, { alternative: ALT_CREATE, targets: [branch], facts });
 }
 
-function evalCommit(op, config) {
+// 開発ブランチへの commit の確認省略（タスク 15.3・要件 2.9, 2.10）。push と同じく、宣言の登録・項目の有効・通常形の順に確かめる。
+// 通常でない commit（--amend 等）と commit 以外の経路（rebase・cherry-pick・revert・am は flags を持たない）は確認を省略しない
+function evalCommit(op, config, auto, registered) {
   const cls = classifyBranch(config, op.branch);
   const facts = { branchClass: { [op.branch]: cls } };
-  if (cls === "development") return decide(op, { compliance: "compliant", code: "commit-development", reason: `'${op.branch}' は開発ブランチです。`, targets: [op.branch], facts });
+  if (cls === "development") {
+    const base = { compliance: "compliant", code: "commit-development", targets: [op.branch], facts };
+    if (!auto.commit) return decide(op, { ...base, approval: "normal", approvalWhy: whyOff(registered), reason: registered ? "宣言の autoApprove.commit が無効のため、ホストの通常の承認に任せます。" : "宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。" });
+    if (op.via !== "commit" || !op.flags) return decide(op, { ...base, approval: "normal", approvalWhy: "not-commit-path", reason: "commit 以外の経路（rebase・cherry-pick・revert・am）のため、確認は省略せずホストの通常の承認に任せます。" });
+    if (op.flags.normal !== true) return decide(op, { ...base, approval: "normal", approvalWhy: "not-normal", reason: "通常でない commit（--amend・--no-verify・設定の上書き・環境変数の前置・展開を含むメッセージなど）のため、確認は省略せずホストの通常の承認に任せます。" });
+    return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: `'${op.branch}' は開発ブランチで、登録済みの宣言に従う通常の commit です。確認を省略できます。` });
+  }
   return deny(op, "direct-update", `${label(cls)} '${op.branch}' へ直接 commit はできません。開発ブランチ（${config.workBranches.join(", ")}）で作業してください。`, { alternative: ALT_CREATE, targets: [op.branch], facts });
 }
 
@@ -230,34 +313,49 @@ function aliasRemoteNote(dir) {
 function evalPrCreate(op, config, auto, registered, restrictions, origin) {
   const r = evalPrCreateRules(op, config, auto, registered, restrictions);
   if (origin === "brw-publish" || r.verdict === "deny") return r;
-  return deny(op, "pr-create-use-brw", "エージェントによる PR の直接の作成は行えません。PR は brw pr で作成します。", { compliance: r.compliance, alternative: ALT_PR_FLOW, targets: r.targets, facts: r.facts });
+  return deny(op, "pr-create-use-brw", "エージェントによる PR の直接の作成は行えません。PR は brw pr で作成します。", { compliance: r.compliance, alternative: prFlowAlternative(), targets: r.targets, facts: r.facts });
 }
 
+// 規則に適合する PR 作成の組: 開発ブランチ→保護ブランチ・分岐元（brw-enforcement 3.3）、分岐元→保護ブランチ（brw-pr-handoff 6.1）
 function evalPrCreateRules(op, config, auto, registered, restrictions) {
   const head = op.head;
   const baseName = op.base;
   if (!op.repository || op.repoMatchesCwd !== true)
     return deny(op, "pr-create-repository", `PR の作成先が、この作業ディレクトリのリポジトリと一致すると確認できないため拒否します。${aliasRemoteNote(op.cwd)}`, { compliance: "unresolved", facts: { repository: op.repository ?? null } });
-  if (head.owner)
-    return deny(op, "pr-create-head", `取り込み元 '${head.owner}:${head.branch}' は別のリポジトリのブランチで、開発ブランチと確認できないため拒否します。`, { targets: [head.branch, baseName] });
   const hc = classifyBranch(config, head.branch);
   const bc = classifyBranch(config, baseName);
   const facts = { branchClass: { [head.branch]: hc, [baseName]: bc } };
   const targets = [head.branch, baseName];
-  if (hc !== "development")
-    return deny(op, "pr-create-head", `取り込み元 '${head.branch}' は${label(hc)}で、PR は開発ブランチからだけ作成できます。`, { alternative: ALT_PR, targets, facts });
+  // 拒否の案内は組ごとに選ぶ（brw pr で作れる組だけ brw pr を示す）
+  // 作成画面の URL は github.com の owner/repo だけに作る（別のホストや不明な形のときは URL を出さない）
+  const repo = op.repository;
+  const repository = repo?.host === "github.com" && repo.owner && repo.name ? `${repo.owner}/${repo.name}` : null;
+  // 拒否の理由と案内の連結（理由 + 空白 + 案内）が 500 字に収まるよう、案内の字数の上限は理由の残りとする
+  const denyWith = (code, reason) => deny(op, code, reason, {
+    alternative: prAlternative(hc, bc, { repository, headOwner: head.owner ?? null, head: head.branch, base: baseName, limit: 500 - reason.length - 1 }),
+    targets,
+    facts,
+  });
+  if (head.owner)
+    return denyWith("pr-create-head", `PR 作成を拒否します。取り込み元 '${shownRef(head.owner)}:${shownRef(head.branch)}' は別のリポジトリのブランチで、開発ブランチと確認できません。`);
+  // 取り込み元は開発ブランチ、または分岐元（取り込み先が保護ブランチのときだけ）。それ以外は拒否する
+  if (hc !== "development" && !(hc === "base" && bc === "protected")) {
+    const why = hc === "base" ? "分岐元からの PR は保護ブランチ宛てだけ作成できます" : "PR は開発ブランチからだけ作成できます";
+    return denyWith("pr-create-head", `PR 作成を拒否します。取り込み元 '${shownRef(head.branch)}' は${label(hc)}で、${why}。`);
+  }
   if (bc === "development")
-    return deny(op, "pr-create-development", `開発ブランチ '${baseName}' への PR は作成できません。開発ブランチ間の取り込みに PR は使いません。`, { alternative: ALT_MERGE, targets, facts });
+    return denyWith("pr-create-development", `PR 作成を拒否します。開発ブランチ '${shownRef(baseName)}' への PR は作成できません。開発ブランチ間の取り込みに PR は使いません。`);
   if (bc !== "protected" && bc !== "base")
-    return deny(op, "pr-create-undeclared", `取り込み先 '${baseName}' は${label(bc)}で、宣言外のブランチへの PR は作成できません。`, { alternative: ALT_PR, targets, facts });
-  const base = { compliance: "compliant", code: "pr-create-protected", targets, facts };
+    return denyWith("pr-create-undeclared", `PR 作成を拒否します。取り込み先 '${shownRef(baseName)}' は${label(bc)}で、宣言外のブランチへの PR は作成できません。`);
+  const code = hc === "base" ? "pr-create-base-protected" : "pr-create-protected";
+  const base = { compliance: "compliant", code, targets, facts };
   if (restrictions.noPr)
     return decide(op, { ...base, verdict: "deny", approval: "prohibited", approvalWhy: "work-restriction", reason: "この作業では PR 作成が禁止されています（作業の制限が既定の動作より優先されます）。" });
   if (!auto.pullRequest) return decide(op, { ...base, approval: "normal", approvalWhy: whyOff(registered), reason: registered ? "宣言の autoApprove.pullRequest が無効のため、ホストの通常の承認に任せます。" : "宣言が未登録または編集中のため、確認は省略せずホストの通常の承認に任せます。" });
   // gh pr create は head を push することがある。その push も確認省略の条件を満たすときだけ省略する
   if (op.mayPush && restrictions.noPush) return decide(op, { ...base, approval: "normal", approvalWhy: "work-restriction-push", reason: "この作業では push が禁止されていますが、gh pr create は head を push しうるため、確認は省略しません。" });
   if (op.mayPush && !auto.push) return decide(op, { ...base, approval: "normal", approvalWhy: "opt-out-push", reason: "gh pr create は head を push しうるため、push の確認省略が無効な宣言では確認を省略しません。" });
-  return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: `開発ブランチから ${label(bc)} '${baseName}' への PR 作成です。確認を省略できます（マージは GitHub 上で利用者が行います）。`, alternative: ALT_PR });
+  return decide(op, { ...base, verdict: "eligibleForApproval", approval: "skip", reason: `${label(hc)} '${shownRef(head.branch)}' から ${label(bc)} '${shownRef(baseName)}' への PR 作成です。確認を省略できます（マージは GitHub 上で利用者が行います）。`, alternative: prFlowAlternative() });
 }
 
 /**

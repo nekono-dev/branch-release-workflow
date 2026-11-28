@@ -41,8 +41,27 @@ import { runBranchOpsChecks } from "./branch-ops.mjs";
 import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
+import { runIntegrationEnforcementChecks } from "./integration-enforcement.mjs";
+import { runIntegrationBasePrChecks } from "./integration-base-pr.mjs";
+import { runIntegrationResumeChecks } from "./integration-resume.mjs";
+import { runResumeObserveChecks } from "./resume-observe.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
+import { runStopObserveChecks } from "./stop-observe.mjs";
+import { runTtyObserveChecks } from "./tty-observe.mjs";
+import { runEnforceObserveChecks } from "./enforce-observe.mjs";
+import { runWorkRemainderChecks } from "./work-remainder.mjs";
 import { runIntegrationRulesetChecks } from "./integration-ruleset.mjs";
+import { runInstructionChecks } from "./instructions.mjs";
+import { runPrMergeChecks, runPrMergeCliChecks, runPrMergeReviewChecks } from "./pr-merge.mjs";
+import { runBaseSyncGitChecks } from "./base-sync-git.mjs";
+import { runBaseSyncChecks } from "./base-sync.mjs";
+import { runCreateOrReusePrChecks } from "./create-or-reuse-pr.mjs";
+import { runBasePrChecks } from "./base-pr.mjs";
+import { runBasePrObserveChecks } from "./base-pr-observe.mjs";
+import { runRealEnvCleanupChecks } from "./real-env-cleanup.mjs";
+import { runResumeRecordChecks, runResumeRecordStrictChecks } from "./resume-record.mjs";
+import { runResumeListChecks } from "./resume-list.mjs";
+import { runUserPromptSubmitChecks } from "./user-prompt-submit.mjs";
 import { decideHook } from "../scripts/agent-hooks.mjs";
 import { gitOut, mkRepoWithRemote } from "./support/git-fixture.mjs";
 
@@ -305,6 +324,9 @@ eq("brw-pr-handoff/5.7 本文の言語は ja・en だけを受け付け、省略
 ], [[], "en", 1, 1, 1]);
 eq("brw-pr-handoff/5.3 導入の記入例は片付けを有効にする既定値を持ち、検証を通る", (() => { const ex = JSON.parse(readFileSync(new URL("../assets/config.example.json", import.meta.url), "utf8")); return [ex.afterPublish, ex.pullRequest, validateConfig(ex)]; })(), [{ cleanup: true }, { language: "ja" }, []]);
 eq("branch-guard/AC-14 autoApprove の値が真偽値でない・未知のキーなら不正", [validateConfig({ ...autoCfg, autoApprove: { push: "yes" } }).length, validateConfig({ ...autoCfg, autoApprove: { merge: true } }).length, validateConfig({ ...autoCfg, autoApprove: true }).length], [1, 1, 1]);
+// 要件 2.14, 2.16: commit の項目は省略・true・false を受け付け、型違いは不正。未知のキーのエラー文言は commit を含む
+eq("enforcement/2.14 autoApprove.commit は省略・true・false を受け付け、型違いは不正", [validateConfig(autoCfg), validateConfig({ ...autoCfg, autoApprove: { commit: true } }), validateConfig({ ...autoCfg, autoApprove: { commit: false } }), validateConfig({ ...autoCfg, autoApprove: { commit: "yes" } }).length], [[], [], [], 1]);
+eq("enforcement/2.14 autoApprove の未知のキーのエラー文言は commit を含む項目名を示す", [validateConfig({ ...autoCfg, autoApprove: { merge: true } })[0].includes("（push・pullRequest・commit）"), validateConfig({ ...autoCfg, autoApprove: "on" })[0].includes("（push・pullRequest・commit）")], [true, true]);
 const onDevAuto = mkRepo("dev/feat", autoCfg);
 const ap = (cmd, repo = onDevAuto) => autoApprovable(cmd, repo);
 eq("branch-guard/AC-15 作業ブランチから切り出し元への PR の作成は確認を省く", [
@@ -546,6 +568,12 @@ import * as lib from "../scripts/lib.mjs";
   eq("enforcement/6.3 ルート宣言と旧宣言が両方あればルートを優先する", [lib.loadConfig(both).config.baseBranch, lib.loadConfig(both).legacy], ["root-base", false]);
   const legacyOnly = mkRepo("dev/foo", base);
   eq("enforcement/6.3 旧パスだけの宣言も既存の書式で読み込む", [lib.loadConfig(legacyOnly).config.baseBranch, lib.loadConfig(legacyOnly).legacy], ["develop", true]);
+  // 要件 2.14, 2.16: 旧パスの宣言でも commit の項目を読む（省略は有効、false の明示だけが無効、非真偽値は読み込み時に拒否）
+  const legacyCommit = (a) => lib.loadConfig(mkRepo("dev/foo", a === undefined ? base : { ...base, autoApprove: a }));
+  const commitOf = (a) => lib.autoApproveOf(legacyCommit(a).config, true).commit;
+  eq("enforcement/2.14 旧パスの宣言で commit の省略・true は有効、false だけが無効になる", [commitOf(undefined), commitOf({ commit: true }), commitOf({ commit: false }), commitOf({ push: false })], [true, true, false, true]);
+  const legacyNo = legacyCommit({ commit: "no" });
+  eq("enforcement/2.14 旧パスの宣言で commit が真偽値でなければ読み込み時に拒否する", [legacyNo.config === undefined, typeof legacyNo.error === "string" && legacyNo.error.includes("autoApprove.commit は true / false にしてください")], [true, true]);
   // 要件 2.1, 6.3: 恒常的な分岐元は baseBranch と固定名の baseBranches から解決する
   eq("enforcement/1.3 恒常的な分岐元は baseBranch と baseBranches の重複なしの和", lib.normalizeConfig({ ...base, baseBranches: ["staging", "develop"] }).permanentBases, ["develop", "staging"]);
   eq("enforcement/1.3 baseBranches にパターンや空文字は書けない", [validateConfig({ ...base, baseBranches: ["rel/*"] }).length, validateConfig({ ...base, baseBranches: [""] }).length, validateConfig({ ...base, baseBranches: "x" }).length, validateConfig({ ...base, baseBranches: ["staging"] }).length], [1, 1, 1, 0]);
@@ -563,9 +591,10 @@ import * as lib from "../scripts/lib.mjs";
   eq("enforcement/6.4 記録済みの brwBase を優先する", lib.branchBase ? lib.branchBase(br, lib.normalizeConfig(base), "dev/foo") : "未実装", "dev/parent");
   // 要件 2.1, 2.6: 登録済み宣言で項目ごとの既定値、明示 false は維持
   const aa = (a, reg) => (lib.autoApproveOf ? lib.autoApproveOf(lib.normalizeConfig(a === undefined ? base : { ...base, autoApprove: a }), reg) : "未実装");
-  eq("enforcement/2.1 登録済み宣言で未指定の項目は既定で有効", [aa(undefined, true), aa({}, true), aa({ push: true }, true)], [{ push: true, pullRequest: true }, { push: true, pullRequest: true }, { push: true, pullRequest: true }]);
-  eq("enforcement/2.6 明示的な false は維持し、他の項目だけ既定を適用", [aa({ push: false }, true), aa({ pullRequest: false }, true)], [{ push: false, pullRequest: true }, { push: true, pullRequest: false }]);
-  eq("enforcement/2.1 未登録・編集中の宣言は既定を適用しない", aa({ push: true }, false), { push: false, pullRequest: false });
+  eq("enforcement/2.1 登録済み宣言で未指定の項目は既定で有効（commit を含む）", [aa(undefined, true), aa({}, true), aa({ push: true }, true)], [{ push: true, pullRequest: true, commit: true }, { push: true, pullRequest: true, commit: true }, { push: true, pullRequest: true, commit: true }]);
+  eq("enforcement/2.6 明示的な false は維持し、他の項目だけ既定を適用", [aa({ push: false }, true), aa({ pullRequest: false }, true)], [{ push: false, pullRequest: true, commit: true }, { push: true, pullRequest: false, commit: true }]);
+  eq("enforcement/2.14 commit の明示的な false だけが commit を無効にし、他の項目は既定のまま", [aa({ commit: false }, true), aa({ commit: true, push: false }, true)], [{ push: true, pullRequest: true, commit: false }, { push: false, pullRequest: true, commit: true }]);
+  eq("enforcement/2.14 未登録・編集中の宣言は commit も既定を適用しない", aa({ push: true, commit: true }, false), { push: false, pullRequest: false, commit: false });
 }
 
 // ---- テスト補助の動作確認（brw-enforcement 1.2） ----
@@ -622,6 +651,9 @@ await runAgentHookChecks(eq);
 // ---- 作業 ID の関連付けと終了時の案内（brw-enforcement 6.2） ----
 await runAgentHookSessionChecks(eq);
 
+// ---- 再開の案内（UserPromptSubmit）と登録・診断（brw-pr-handoff 9.4） ----
+await runUserPromptSubmitChecks(eq);
+
 // ---- フックの登録と導入状態（brw-enforcement 6.3） ----
 await runHookInstallChecks(eq);
 
@@ -643,8 +675,61 @@ await runIntegrationPublishChecks(eq);
 // ---- Ruleset の導入・検査の契約（brw-enforcement 8.2） ----
 await runIntegrationRulesetChecks(eq);
 
+// ---- 統合と回帰（再開・終了時の検出・保護の除外・確認省略・保護向け PR の案内。brw-enforcement 19.1） ----
+await runIntegrationEnforcementChecks(eq);
+
+// ---- 分岐元からの PR の統合（brw-pr-handoff 8.1） ----
+await runIntegrationBasePrChecks(eq);
+
+// ---- 続きの再開の統合試験（brw-pr-handoff 9.6 の前半） ----
+await runIntegrationResumeChecks(eq);
+
+// ---- 続きの再開の実機観測の判定部分（brw-pr-handoff 9.6 の後半。実機は呼ばない） ----
+runResumeObserveChecks(eq);
+
 // ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
 await runHookLoggerChecks(eq);
+
+// ---- 実環境の Stop 観測の引数・記録フック・判定・整形（brw-enforcement 14.1） ----
+await runStopObserveChecks(eq);
+
+// ---- 実環境の標準入出力の端末判定の引数・記録・判定・整形（brw-enforcement 14.2） ----
+await runTtyObserveChecks(eq);
+
+// ---- 実環境の追加した規則の観測の引数・記録の検証・判定・計画（brw-enforcement 19.2） ----
+await runEnforceObserveChecks(eq);
+
+// ---- 作業ブランチの残りの検出（brw-enforcement 16.1） ----
+await runWorkRemainderChecks(eq);
+
+// ---- 利用者向けの指示文面の追従（brw-enforcement 17.1） ----
+runInstructionChecks(eq);
+
+// ---- PR の取り込み先からマージの可否の判定（brw-enforcement 18.2） ----
+runPrMergeChecks(eq);
+
+// ---- brw pr-merge の CLI（brw-enforcement 18.3） ----
+await runPrMergeCliChecks(eq);
+await runPrMergeReviewChecks(eq);
+
+// ---- 分岐元の取り込みと差の判定を実際の git で再現する（brw-pr-handoff 5.1） ----
+await runBaseSyncGitChecks(eq);
+
+// ---- 分岐元の取り込み・差の数・作成先の決定（brw-pr-handoff 7.2）と、作業の記録なしの PR 再利用・作成（7.1） ----
+await runBaseSyncChecks(eq);
+await runCreateOrReusePrChecks(eq);
+
+// ---- 分岐元からの PR の調整役（brw-pr-handoff 7.3） ----
+await runBasePrChecks(eq);
+
+// ---- 分岐元からの PR の実環境の観測の道具（brw-pr-handoff 5.2・8.2）。判定・記録の検証のみ（実 GitHub・実ホストは呼ばない） ----
+await runBasePrObserveChecks(eq);
+await runRealEnvCleanupChecks(eq);
+
+// ---- 再開の記録の書き読み・再開の判定・セッションの関連付け（brw-pr-handoff 9.2） ----
+await runResumeRecordChecks(eq);
+await runResumeRecordStrictChecks(eq);
+await runResumeListChecks(eq);
 
 console.log(failed ? `\n${failed} 件失敗` : "\nすべて成功");
 process.exit(failed ? 1 : 0);
