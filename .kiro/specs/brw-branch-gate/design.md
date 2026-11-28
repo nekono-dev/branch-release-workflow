@@ -191,7 +191,7 @@ sequenceDiagram
 | 7.1 | `create` は `.worktree/<別名>` に作る | `brw.mjs`（`create`）、`placement.mjs`（`placementOf`） | `placementOf` |
 | 7.2 | `resume` の再作成も同じ配置先 | `brw.mjs`（`resume`）、`placement.mjs` | `placementOf` |
 | 7.3 | 連携 worktree から実行しても入れ子にしない | `brw.mjs`（本体は worktree 一覧の先頭から得る）、`placement.mjs` | `placementRoot(main)` |
-| 7.4 | 旧置き場を配置先として扱わない | `placement.mjs`、`branch-gate.mjs`、`brw.mjs`（再利用の判定） | `isUnderPlacement`・`isLegacyPlacement` |
+| 7.4 | 旧置き場を配置先として扱わない（判定できないときは止める。5.1） | `placement.mjs`、`branch-gate.mjs`、`brw.mjs`（再利用の判定） | `placementZone`・`isUnderPlacement`・`isLegacyPlacement`・`hasParentSegment` |
 | 7.5 | `resume` が旧置き場の使用中ブランチを拒否し移動の手順を案内 | `brw.mjs`（`resume`）、`placement.mjs`（`legacyMoveGuidance`）、`branch-gate.mjs`（置き換えの再開先） | 拒否・`gate-legacy-placement` |
 | 7.6 | `finish`（`--merged` 含む）が旧置き場の worktree とブランチを片付けない | `cleanup.mjs`（`finishBlocker`）、`placement.mjs` | `finishBlocker` の理由 |
 | 7.7 | 旧置き場の worktree が他のブランチの操作を妨げない | `brw.mjs`・`branch-gate.mjs`（旧置き場の判定をブランチごとに限る） | — |
@@ -277,7 +277,7 @@ function planGate(input: GateInput): GateResult;
 **責務と制約**
 - 対象リポジトリが BRW 導入済みでなければ通過（5.3）。
 - `name` 指定: 拒否。案内は、`brw create <名前>` を実行した後に `EnterWorktree` を `path`（作成される worktree の絶対パス）指定で呼ぶ 2 手。名前が `namePattern` に合わないときは、合う名前の付け方（小文字・数字・`-`）も案内する。
-- `path` 指定: `git worktree list` に載り、そのブランチが開発ブランチ（`classifyBranch` が `development`）で、配置先（`isUnderPlacement`: `<本体>/.worktree/` の配下）にあるときだけ通過。それ以外は拒否し、`brw resume` を案内する。**旧置き場の worktree を指すとき（`isLegacyPlacement`）は専用の拒否（`gate-enter-legacy`、要件 2.6）**で、旧パス・新しい配置先・移動の手順（`legacyMoveGuidance`）を案内する。
+- `path` 指定: `git worktree list` に載り、そのブランチが開発ブランチ（`classifyBranch` が `development`）で、配置先の worktree のルート（`isUnderPlacement`: `<本体>/.worktree/<名前>`）にあるときだけ通過。それ以外は拒否し、`brw resume` を案内する。**旧置き場の worktree を指すとき（`isLegacyPlacement`）は専用の拒否（`gate-enter-legacy`、要件 2.6）**で、旧パス・新しい配置先・移動の手順（`legacyMoveGuidance`）を案内する。
 - **承認と代替の案内（2026-11-28、`poc/design_01.md`）**: `brw create` は worktree を作ってパスを表示する CLI で、呼び出し元の作業場所は移さない（移すのは、フックの置き換えコマンドの `cd`）。そのため、`name` 指定の拒否の案内は、要件 2.1 の 2 手（1) `brw create <名前>`、2) `EnterWorktree` を `path` 指定で呼ぶ）に、**明示的な代替**「2') Bash で `cd <作成された worktree の絶対パス>`」を併記し、理由の行に次を書く（要件の文言は変えない）: (a) Claude Code は `.claude/worktrees/` の外の `path` への EnterWorktree で利用者の承認を求める（BRW のフックの許可では省けない。非対話では `bypassPermissions` が要る）。(b) EnterWorktree で worktree に入ったセッションからは、`.worktree/` の下の別の worktree へ EnterWorktree で移れない。(c) 承認できない・移れない環境では、`cd` で作業場所を移す。`path` の拒否の案内（`gate-enter-path`・`gate-enter-legacy`）の理由の行にも同じ (a)〜(c) を含める。BRW は `path` が配置先の開発ブランチの worktree のときに通過（応答なし）にするが、その後の承認は Claude Code が求める。
 - `name` も `path` も無い（ランダム名の作成）、両方ある、型が不正: 拒否。
 - 例外が出たら拒否（安全側）。
@@ -302,7 +302,13 @@ function judgeEnterWorktree(input: EnterWorktreeInput, cwd: string | null): Ente
 **責務と制約**
 - 配置先は `<本体>/.worktree/<別名>`（別名は `aliasOf`）。旧置き場は `<本体>/.claude/worktrees/` の配下。`.brw/` の置き場は扱わない（`brw-pr-handoff` が持つ）。
 - 本体は、呼び出し側が `git worktree list` の先頭から得た値を渡す（連携 worktree の中からでも本体になる。`poc/design_02.md` の 4。要件 7.3）。
-- 配下の判定は実体のパス（realpath）で行い、配置先ディレクトリがシンボリックリンクで本体の外を指すときは配下と認めない（現行の `placementSound` の規則を引き継ぐ）。存在しないパスは文字列で比べる。
+- **判定は、worktree のルート 1 階層の一致だけで行い、結果は 4 値（`placement`・`legacy`・`other`・`unknown`）にする（2026-11-28 の単純化。`research.md` の D6）**。呼び出し側（EnterWorktree の `path`、`resume`・`finish` の既存 worktree、置き換えの照合）が渡すのは worktree のルートで、内部のパスではないため、「配下か」ではなく「親ディレクトリが等しいか」で足りる。`placementZone(main, target)` の規則は次のとおり（上から順に適用）。
+  1. **入力の検査**: `main` と `target` が文字列で、絶対パスで、`..` の区切りを含まない。満たさなければ `unknown`。
+  2. **配置先の健全性**: `<本体の実体>/.worktree`・`<本体の実体>/.claude`・`<本体の実体>/.claude/worktrees` のいずれかが存在してシンボリックリンクなら `unknown`（対象によらない。リンクの向きが内側・外側・互い・重なりのどれでも、この 1 条件で足りる）。
+  3. **対象の実体**: 対象が存在すれば実体のパス（realpath）。存在しなければ、**存在する最も深い祖先**の実体のパス＋残りの名前（残りの名前に `..` は無い。規則 1）。これにより、`.worktree` がまだ無くても、本体の実体＋`.worktree/<別名>` になる（例外ではなく同じ規則）。祖先を解決できない（循環・権限エラーなど）ときは `unknown`。
+  4. **一致**: 対象の親が `<本体の実体>/.worktree` に等しければ `placement`。`<本体の実体>/.claude/worktrees` に等しく、名前が `.brw` でなければ `legacy`。それ以外は `other`（配置先でも旧置き場でもないことを確認できた。内部のパス・配置先そのもの・名前の前方一致・`.brw` を含む）。
+- **呼び出し側の契約**: (a) **`unknown` は、許可・再利用・削除に使わず、必ず止める**（要件 5.1「作業場所を確定できないときは止め、理由を表示する」。理由は「配置先の状態を判定できません（シンボリックリンクなど）」）。`create`・`resume` が worktree を作る前に `placementZone(main, placementOf(main, ブランチ))` が `unknown` のときも作らずに止める（対応しない構成）。(b) 生の入力を `resolve()`・`join()` で正規化する**前**に、`hasParentSegment(生の入力)` で `..` を検査する（EnterWorktree の `path`、置き換えの `git worktree add` のパス）。真なら `unknown` として止める。(c) `resume` の既存 worktree の再利用は、ゾーンが `legacy` なら拒否、`unknown` なら止める、`placement`・`other` なら従来どおり。`finish` は、`legacy`・`unknown` を対象外にする。置き換え・EnterWorktree は、`placement` のとき通し、`legacy` は専用の拒否、`other`・`unknown` は従来の拒否（`unknown` は判定できない旨を添える）。
+- **帰結（受け入れる）**: 重なりは起きない（リンクが無く、親の文字列が異なる）。配置先・その親・旧置き場がシンボリックリンクの構成は対応しない（`unknown` で止まる。資料に記載する）。worktree の内部のパスは `other`（呼び出し側は渡さない）。
 - 副作用を持たない（`ignoreStatus` が git を読む以外は、ファイルを書かない・git を変えない）。導入先の `.gitignore`・`info/exclude` は、配置先の変更のために書かない（要件 7.9）。既存の Codex 用の `.codex/` の有効化（`hook-install.mjs` の `activateWorktree`）が共通の `info/exclude` に `.codex/` を追記する副作用は、配置先の変更とは別の既存の挙動で、この要件の対象外（試験は、`.worktree/` の行が増えないことを確かめる）。
 
 **契約**: Service
@@ -316,9 +322,14 @@ function placementRoot(main: string): string;
 function placementOf(main: string, branch: string): string;
 /** 未追跡の一覧から除く前方一致の文字列（`.worktree/`） */
 function placementPrefix(): string;
-/** target が配置先の配下か */
+type Zone = "placement" | "legacy" | "other" | "unknown";
+/** worktree のルートの所属を 4 値で返す。規則は上の 1〜4。`unknown` は呼び出し側が止める */
+function placementZone(main: string, target: string): Zone;
+/** 生の入力に `..` の区切りがあるか。呼び出し側が正規化する前に使う */
+function hasParentSegment(raw: string): boolean;
+/** `placementZone(main, target) === "placement"`。判定不能・対象外は偽 */
 function isUnderPlacement(main: string, target: string): boolean;
-/** target が旧置き場（`<main>/.claude/worktrees/` の配下）か。`.brw/` は worktree ではないため含めない */
+/** `placementZone(main, target) === "legacy"`（旧置き場の worktree のルート。名前が `.brw` のものは含めない）。判定不能・対象外は偽。**偽を「許可してよい」の意味に使わない（`unknown` を区別するなら `placementZone` を使う）** */
 function isLegacyPlacement(main: string, target: string): boolean;
 /** 旧置き場の worktree を移す手順の案内（旧パス・新しい配置先・手順） */
 function legacyMoveGuidance(main: string, branch: string, oldPath: string): { reason: string; next: string[] };
@@ -328,7 +339,7 @@ function ignoreStatus(main: string): IgnoreStatus;
 function ignoreWarning(): string[];
 ```
 - 事前条件: `main` は本体の作業ツリーの絶対パス。
-- 事後条件: `placementOf` の結果は文字列として常に `placementRoot(main)` の配下。`isUnderPlacement(main, placementOf(main, b))` は、配置先ディレクトリが本体の外を指すシンボリックリンクでないかぎり真（シンボリックリンクのときは偽になり、判定は拒否側に倒れる）。`isLegacyPlacement` と `isUnderPlacement` は同時に真にならない。
+- 事後条件: `placementOf` の結果は常に `placementRoot(main)` の直下の 1 階層。`placementZone(main, placementOf(main, b))` は、`.worktree`・`.claude`・`.claude/worktrees` がシンボリックリンクでなく、祖先を解決できるとき `placement`（`.worktree` がまだ無くても、存在する最も深い祖先＝本体の実体＋残りの名前で判定する）。`isLegacyPlacement` と `isUnderPlacement` は同時に真にならない（親の文字列が異なる）。`..` を含む入力・シンボリックリンクの配置先（またはその親）・解決できない経路は `unknown`。worktree の内部のパス・配置先そのもの・名前の前方一致・`.brw` は `other`。
 - 不変条件: 旧置き場のパスの文字列は、このモジュールだけが持つ（`scripts/` の他のファイルに `.claude/worktrees` は残らない。`.brw/` の定数を除く）。
 
 **案内の文面**
@@ -412,7 +423,7 @@ BRW 案内: 置き換え | 拒否
 - Codex の手順書の経路（`brw guard`）は、現在は commit・push の旧来の判定だけを呼ぶ。作成・再開の拒否を同じ文面で返すため、`guard` は先に共通の判定（`classifyCommand` と `evaluateAll`）を呼び、拒否があれば案内を表示して終了する形に変える。この変更は brw-pr-handoff（`gh pr create` の拒否）と共有する入口なので、先に実装する側が作り、他方は再利用する。
 - 判定層の拒否のうち、対象を確定できない拒否（`unresolved`）は `planGate` に渡さず、既存の理由に共通の案内の見出し（書式の 4 行）を付けて返す。これにより、どの拒否でも見出しと「次のコマンド」の行が揃う（要件 4.2）。
 - `--carry` は、分岐元の取得後の開始点（`origin/<分岐元>`）が元の作業ツリーの `HEAD` と同じときだけ移す。手元の分岐元が古いときは失敗し、案内に「先に `git pull` するか、移さずに作る」を含める。
-- EnterWorktree の `path` の許可は、「配置先（`<本体>/.worktree/` の配下。2026-11-28 の更新）にあり、`git worktree list` に載り、開発ブランチを指す」ことを BRW の来歴の確認とする（BRW が作ったという記録は持たない。`brw resume` が作る worktree も同じ条件を満たす）。
+- EnterWorktree の `path` の許可は、「配置先の worktree のルート（`<本体>/.worktree/<名前>`。2026-11-28 の更新）にあり、`git worktree list` に載り、開発ブランチを指す」ことを BRW の来歴の確認とする（BRW が作ったという記録は持たない。`brw resume` が作る worktree も同じ条件を満たす）。
 
 ## データモデル
 
@@ -452,7 +463,7 @@ BRW 案内: 置き換え | 拒否
 - 未追跡のファイルは移らず、一覧が表示されること（1.13）。
 
 ### 配置先（`tests/placement.mjs`、2026-11-28）
-- `placementOf`・`isUnderPlacement`・`isLegacyPlacement` の単体: 配置先は `.worktree/<別名>`、旧置き場は `.claude/worktrees/` の配下、`.brw/` は旧置き場の worktree に含めない。配置先ディレクトリがシンボリックリンクで本体の外を指すときは配下と認めない（1.5、2.2、7.4）。
+- `placementOf`・`placementZone`・`isUnderPlacement`・`isLegacyPlacement`・`hasParentSegment` の単体（1.5、2.2、5.1、7.1、7.4）: 配置先は `.worktree/<別名>`（`.worktree` がまだ無いときも `placement`）、旧置き場は `.claude/worktrees/<名前>`（`legacy`）、`.brw` は `other`。生の `..` を含む入力（`<main>/.worktree/link/../child`・`<main>/.worktree/a/../b`・`main` 自体に `..`。`join()` を使わず文字列を直接組み立てる）は `unknown`。`.` と重複した `/`（`<main>//.worktree/./dev-a`）は許す。`.worktree`・`.claude`・`.claude/worktrees` のいずれかがシンボリックリンクのとき（内側を指す・外を指す・互いを指す・一方向だけ・リンクが親の `.claude`）は、対象によらず `unknown`。壊れたリンク・循環・解決できない祖先の下の対象は `unknown`（`.worktree` が未作成なだけの対象は `placement`）。worktree の内部のパス（`<main>/.worktree/dev-a/sub`）・配置先そのもの（`<main>/.worktree`）・名前の前方一致（`<main>/.worktree-other/x`）は `other`。対象自体が配置先の別の worktree を指すリンクのときは、実体の位置で判定する。本体がシンボリックリンクのとき、リンク経由と実体経由の指定が同じ結果になる。`isUnderPlacement` と `isLegacyPlacement` が同時に真になる例が無い。呼び出し側の契約（`unknown` で止める。`create`・`resume` が作る前に `unknown` なら作らない）は、6.4〜6.7 の試験で確かめる。
 - 連携 worktree の中から `brw create`・`brw resume` を実行しても、`<本体>/.worktree/` に作り、入れ子を作らない（7.3）。
 - `resume` が旧置き場の使用中ブランチを拒否し、旧パス・新しい配置先・`git worktree move`（ロックのときは `unlock`）の手順を案内し、worktree もブランチも変えないこと。他のブランチの `create`・`resume` が、旧置き場の worktree があっても通ること（7.5、7.7）。
 - `finish`・`finish --merged` が旧置き場の worktree を持つブランチを片付けず（worktree もブランチも残す）、理由を表示すること（7.6）。
