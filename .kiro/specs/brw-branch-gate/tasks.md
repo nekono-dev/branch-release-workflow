@@ -100,7 +100,7 @@
   - 完了の状態: 現在の Claude Code で観察がすべて設計どおりと出力され、食い違いがあれば失敗する。
   - _Boundary: 実機検証の基盤_
   - _Requirements: 2.2, 7.1_
-- [ ] 5.2 実機で、Codex が `.worktree/` の linked worktree で本体のフックを読むことを確かめる
+- [x] 5.2 実機で、Codex が `.worktree/` の linked worktree で本体のフックを読むことを確かめる
   - 使い捨てのリポジトリで、本体にだけ未追跡の `.codex/hooks.json` を置き、`.worktree/<別名>`（空の `.codex/` あり・なし）と旧置き場の worktree を cwd にして、Codex が実際に読み込むフックの一覧（モデルを呼ばない）を調べる。認証は複製せず、一時の `CODEX_HOME` に設定だけを置き、プロジェクトの信頼もその設定に書く。
   - 完了の状態: `.codex/` のある `.worktree/<別名>` で本体の `hooks.json` が読まれ、`.codex/` の無い worktree では読まれず、旧置き場と同じ結果になることが出力され、食い違いがあれば失敗する。
   - _Boundary: 実機検証の基盤_
