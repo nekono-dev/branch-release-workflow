@@ -936,7 +936,7 @@ export function harmlessText(s) {
 
 /**
  * 本体（メインの worktree）の場所。実行先（cwd・cd 先）のリポジトリの本体を使う。
- * 実行先が Git のリポジトリでないときは、CLAUDE_PROJECT_DIR が <本体>/.claude/worktrees/<別名> の形のときの本体を使う。
+ * 実行先が Git のリポジトリでないときは、CLAUDE_PROJECT_DIR が <本体>/.worktree/<別名> の形（配置先）のときの本体を使う。旧置き場の形では導かない（要件 7.4。旧置き場は配置先として認めない）。
  * ただし実行先が消えている（削除済みの作業場所）ときは、その実行先が導いた本体の配下（<本体>/ で始まり、.. を含まない）のときだけ使う。
  * どれにも当てはまらなければ null（付けない側に倒す）。読み取りだけを行う。UserPromptSubmit と PostToolUse（brw pr）が共通で使う。
  * strict（PostToolUse）のときは、存在する Git の外の実行先からは導出しない（消えている実行先の導出だけを認める）。
@@ -946,7 +946,7 @@ function mainOfStart(start, { strict = false } = {}) {
   if (direct) return direct;
   if (strict && (!start || existsSync(start))) return null;
   const pd = process.env.CLAUDE_PROJECT_DIR;
-  const m = typeof pd === "string" ? /^(.+)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+$/.exec(pd) : null;
+  const m = typeof pd === "string" ? /^(.+)[\\/]\.worktree[\\/][^\\/]+$/.exec(pd) : null;
   if (!m) return null;
   if (start && !existsSync(start)) {
     if (start.split(/[\\/]/).includes("..") || !resolve(start).startsWith(resolve(m[1]) + sep)) return null;
