@@ -1,9 +1,9 @@
 // 片付け（cleanup）の試験。selftest.mjs から呼ばれる。実際の一時リポジトリ（本体・worktree・bare の origin）で確かめる。
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { cleanupAfterPr } from "../scripts/cleanup.mjs";
+import { cleanupAfterPr, finishBlocker } from "../scripts/cleanup.mjs";
 import { bodyPathOf } from "../scripts/pr-template.mjs";
 import { startWork, stateFileOf } from "../scripts/publish.mjs";
 import { normalizeConfig, worktrees } from "../scripts/lib.mjs";
@@ -13,7 +13,8 @@ const CONFIG = normalizeConfig({ workBranches: ["dev/*"], protectedBranches: ["m
 const g = (cwd, ...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-C", cwd, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 // 本体（develop）・push 済みの作業ブランチ dev/foo の worktree・bare の origin・作業状態（公開済み）を用意する
-function setup() {
+// legacy: true なら旧置き場（<本体>/.claude/worktrees/）に worktree を作る。既定は配置先（<本体>/.worktree/）
+function setup({ legacy = false } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "brw-cleanup-")));
   const origin = join(dir, "origin.git");
   const main = join(dir, "main");
@@ -25,7 +26,7 @@ function setup() {
   g(main, "add", "-A");
   g(main, "commit", "-q", "-m", "init");
   g(main, "push", "-q", "origin", "develop");
-  const wt = join(main, ".claude", "worktrees", "dev-foo");
+  const wt = legacy ? join(main, ".claude", "worktrees", "dev-foo") : join(main, ".worktree", "dev-foo");
   g(main, "worktree", "add", "-q", "-b", "dev/foo", wt);
   writeFileSync(join(wt, "f.txt"), "f\n");
   g(wt, "add", "f.txt");
@@ -120,4 +121,46 @@ export const runCleanupChecks = async (eq) => {
   let blocked = "";
   try { execFileSync("node", [BRW, "finish", "dev/foo", "--base", "develop"], { cwd: manual.main, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch (e) { blocked = String(e.stderr); }
   eq("brw-pr-handoff/4.5 手動の brw finish は従来どおり、未コミットのある worktree を残す", [blocked.includes("commit していない変更"), exists(manual).wt], [true, true]);
+
+  // 旧置き場（<本体>/.claude/worktrees/）の worktree を持つブランチは、取り込み済みでも片付けない（要件 7.6）
+  const hasBranch = (cwd, b) => { try { g(cwd, "rev-parse", "--verify", "--quiet", `refs/heads/${b}`); return true; } catch { return false; } };
+  const lg = setup({ legacy: true });
+  g(lg.main, "merge", "-q", "--no-ff", "-m", "取り込み", "dev/foo");
+  g(lg.main, "push", "-q", "origin", "develop");
+  const lgInfo = lg.info();
+  const lwhy = finishBlocker(lgInfo.main, lgInfo.others, CONFIG, "dev/foo", "develop");
+  eq("brw-branch-gate/7.6 旧置き場の worktree を持つブランチは、取り込み済みでも片付けず、旧パス・新しい配置先・ブランチも消さないことを理由に含める", [typeof lwhy === "string", lwhy?.includes(lg.wt), lwhy?.includes(join(lg.main, ".worktree", "dev-foo")), lwhy?.includes("ブランチも消しません")], [true, true, true, true]);
+  let lcode = 0;
+  try { execFileSync("node", [BRW, "finish", "dev/foo", "--base", "develop"], { cwd: lg.main, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch (e) { lcode = e.status; }
+  eq("brw-branch-gate/7.6 brw finish は旧置き場の worktree を持つブランチを終了コード 1 で止め、worktree もブランチも残す", [lcode, exists(lg).wt, exists(lg).branch], [1, true, true]);
+
+  // finish --merged: 旧置き場のブランチは「残します」の行になり、.worktree/ の取り込み済みブランチは従来どおり片付く（要件 7.7）
+  const addWork = (t, branch, rel) => {
+    const p = join(t.main, rel);
+    g(t.main, "worktree", "add", "-q", "-b", branch, p);
+    writeFileSync(join(p, "w.txt"), `${branch}\n`);
+    g(p, "add", "w.txt");
+    g(p, "commit", "-q", "-m", branch);
+    g(p, "push", "-q", "origin", branch);
+    return p;
+  };
+  const mg = setup();
+  const mgLegacyWt = addWork(mg, "dev/legacy", join(".claude", "worktrees", "dev-legacy"));
+  g(mg.main, "merge", "-q", "--no-ff", "-m", "取り込み", "dev/foo");
+  g(mg.main, "merge", "-q", "--no-ff", "-m", "取り込み", "dev/legacy");
+  g(mg.main, "push", "-q", "origin", "develop");
+  const mout = execFileSync("node", [BRW, "finish", "--merged", "--base", "develop"], { cwd: mg.main, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).toString();
+  eq("brw-branch-gate/7.7 finish --merged は旧置き場のブランチを「残します」の行にし、.worktree/ の取り込み済みブランチは従来どおり片付ける", [mout.includes("残します: dev/legacy — "), mout.includes("片付けました: dev/foo"), existsSync(mgLegacyWt), hasBranch(mg.main, "dev/legacy"), exists(mg).wt, hasBranch(mg.main, "dev/foo")], [true, true, true, true, false, false]);
+
+  // 配置先（.worktree）がシンボリックリンクのとき、worktree の所属を判定できないため片付けない（要件 5.1）
+  const sy = setup();
+  const elsewhere = join(sy.dir, "elsewhere");
+  mkdirSync(elsewhere);
+  g(sy.main, "worktree", "move", sy.wt, join(elsewhere, "dev-foo"));
+  rmSync(join(sy.main, ".worktree"), { recursive: true, force: true });
+  symlinkSync(elsewhere, join(sy.main, ".worktree"));
+  sy.wt = join(elsewhere, "dev-foo");
+  const syInfo = sy.info();
+  const swhy = finishBlocker(syInfo.main, syInfo.others, CONFIG, "dev/foo", "develop");
+  eq("brw-branch-gate/5.1 配置先がシンボリックリンクのときは所属を判定できないとして片付けず、理由を返す（worktree もブランチも消さない）", [typeof swhy === "string" && swhy.includes("判定できない"), swhy?.includes(".claude/worktrees") ?? true, exists(sy).wt, exists(sy).branch], [true, false, true, true]);
 };
