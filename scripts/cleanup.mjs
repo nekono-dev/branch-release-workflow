@@ -4,6 +4,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { classifyBranch, git, matchesAny } from "./lib.mjs";
 import { bodyPathOf } from "./pr-template.mjs";
+import { legacyFinishGuidance, placementZone } from "./placement.mjs";
 import { removeWorkRecordAt, remoteNameOf, stateFileOf } from "./publish.mjs";
 import { existsSync, rmSync } from "node:fs";
 
@@ -45,6 +46,16 @@ function landedState(repo, config, branch, base) {
 
 // 片付けの可否を確かめる。片付けられないときは理由を返す
 export function finishBlocker(main, others, config, branch, base) {
+  // 旧置き場の worktree と、所属を判定できない worktree は、取り込み済みでも片付けない。他の検査より先に確かめる（要件 7.6・5.1）
+  const own = others.find((w) => w.branch === branch);
+  if (own) {
+    const zone = placementZone(main.path, own.path);
+    if (zone === "legacy") {
+      const g = legacyFinishGuidance(main.path, branch, own.path);
+      return `${g.reason}\n  次のどちらかで進めてください:\n  ${g.next.join("\n  ")}`;
+    }
+    if (zone === "unknown") return `作業ブランチ ${branch} の worktree の所属を判定できないため片付けません（配置先やその親のディレクトリがシンボリックリンクなど）。worktree もブランチも消しません。`;
+  }
   if (classifyBranch(config, branch) !== "development") return `'${branch}' は作業ブランチではありません。`;
   if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) === null) return `ローカルに ${branch} がありません。`;
   const wt = others.find((w) => w.branch === branch);

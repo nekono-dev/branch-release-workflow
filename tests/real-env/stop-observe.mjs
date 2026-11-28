@@ -260,11 +260,11 @@ export function cleanupCodexHome(home) {
 /**
  * 作業場所を作る（作業の記録・状態ファイルは作らない）。
  * 本体には記録用フックの登録を置くが、追跡せず info/exclude で除外する（本体の作業ツリーを clean に保つ）。
- * worktree は PoC と同じく本体の .claude/worktrees/wt に作る。戻り値: { main, worktree, hook, log }
+ * worktree は本体の .worktree/wt に作る（brw-branch-gate の配置先。PoC は旧置き場で確認したが、本体の内側に置く点は同じ）。戻り値: { main, worktree, hook, log }
  */
 export function setupRepos(base, host) {
   const main = join(base, "main");
-  const worktree = join(main, ".claude", "worktrees", "wt");
+  const worktree = join(main, ".worktree", "wt");
   const hook = join(base, `hook-${host}.mjs`);
   const log = join(base, `stop-${host}.jsonl`);
   const registration = host === "claude" ? join(".claude", "settings.json") : join(".codex", "hooks.json");
@@ -274,7 +274,7 @@ export function setupRepos(base, host) {
   writeFileSync(join(main, "a.txt"), "a\n");
   git(main, "add", ".");
   git(main, "commit", "-q", "-m", "初期");
-  writeFileSync(join(main, ".git", "info", "exclude"), "/.claude/\n/.codex/\n", { flag: "a" });
+  writeFileSync(join(main, ".git", "info", "exclude"), "/.claude/\n/.codex/\n/.worktree/\n", { flag: "a" });
   mkdirSync(dirname(join(main, registration)), { recursive: true });
   writeFileSync(join(main, registration), `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${hook}` }] }] } }, null, 2)}\n`);
   git(main, "worktree", "add", "-q", "-b", "dev/stop-observe", worktree);

@@ -54,6 +54,7 @@ import { resolveTarget } from "./base-sync.mjs";
 import { previewTidy } from "./tidy.mjs";
 import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
+import { ignoreStatus, ignoreWarning, legacyMoveGuidance, placementOf, placementRoot, placementZone } from "./placement.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
 
@@ -426,6 +427,9 @@ function carryInto({ root, main, wt, branch, start, rel, moved }) {
   if (r.skipped.length > 0) console.log(`未追跡のファイルは移していません（元の作業ツリーに残っています）:\n${list(r.skipped)}`);
 }
 
+// 配置先の所属を判定できないときの理由（create・resume で共通。要件 5.1）
+const UNKNOWN_PLACEMENT = "配置先の状態を判定できません（配置先やその親のディレクトリがシンボリックリンクなど。この構成には対応していません）。worktree とブランチは作っていません。";
+
 function create(args) {
   const root = repoRoot(process.cwd()) ?? fail("git リポジトリ内で実行してください。", 2);
   const config = need(root);
@@ -462,12 +466,15 @@ function create(args) {
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
     if (unregistered) console.log(`注意: ${rel} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
-    // 配置先は常にリポジトリ本体の .claude/worktrees/（連携 worktree から実行しても入れ子にしない）
+    // 配置先は常にリポジトリ本体の .worktree/（連携 worktree から実行しても入れ子にしない。brw-branch-gate 7.1・7.3）
     const main = worktrees(root)[0]?.path ?? root;
-    const wt = join(main, ".claude/worktrees", aliasOf(branch));
+    const wt = placementOf(main, branch);
+    // 配置先やその親がシンボリックリンクなどで所属を判定できないときは、worktree を作る前に止める（5.1）
+    if (placementZone(main, wt) === "unknown")
+      fail(UNKNOWN_PLACEMENT);
     if (existsSync(wt) || worktrees(root).some((w) => w.path === wt))
       fail(`配置先 ${wt} が既に存在する、または worktree として登録されているため、worktree を作りません（既存のものは変更していません）。`);
-    mkdirSync(join(main, ".claude/worktrees"), { recursive: true });
+    mkdirSync(placementRoot(main), { recursive: true });
     try {
       execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
     } catch (error) {
@@ -489,6 +496,12 @@ function create(args) {
       }
     }
     if (carry) carryInto({ root, main, wt, branch, start, rel, moved });
+    // 最終成功の後に、配置先が無視されていなければ警告を 1 回だけ出す（巻き戻しで止まったときはここに来ない。導入先の設定は書き換えない）
+    if (ignoreStatus(main) === "not-ignored") {
+      const [first, ...rest] = ignoreWarning();
+      console.log(`警告: ${first}`);
+      for (const line of rest) console.log(line);
+    }
   }
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
   const url = previewUrl(config, branch);
@@ -643,6 +656,14 @@ function resume(args) {
   const cls = classifyBranch(config, branch);
   if (cls !== "development") fail(`'${branch}' は${CLASS_LABEL[cls]}のため、作業ブランチとして再開できません。`);
   const remote = git(main.path, "fetch", "origin", branch, "--quiet") !== null;
+  // 配置先の所属が判定できないときの文言（旧置き場の文字列は入れない）
+  // 作成・再作成が成功した後に、配置先が無視されていなければ警告を 1 回出す（既存の worktree の再利用では呼ばない）
+  const warnIfNotIgnored = () => {
+    if (ignoreStatus(main.path) !== "not-ignored") return;
+    const [first, ...rest] = ignoreWarning();
+    console.log(`警告: ${first}`);
+    for (const line of rest) console.log(line);
+  };
   if (git(main.path, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`) !== null) {
     const wt = others.find((w) => w.branch === branch);
     if (!wt) {
@@ -651,14 +672,24 @@ function resume(args) {
       if (remote && git(main.path, "merge-base", "--is-ancestor", `refs/heads/${branch}`, `refs/remotes/origin/${branch}`) === null
         && git(main.path, "merge-base", "--is-ancestor", `refs/remotes/origin/${branch}`, `refs/heads/${branch}`) === null)
         fail(`${branch} がリモートと分岐しています（rebase された可能性があります）。差分を確かめてから取り込んでください。worktree は作っていません。`);
-      const newWt = join(main.path, ".claude/worktrees", aliasOf(branch));
-      mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
+      // 作成先（配置先）の所属が判定できないときは、作らずに止める（5.1）
+      const newWt = placementOf(main.path, branch);
+      if (placementZone(main.path, newWt) === "unknown") fail(UNKNOWN_PLACEMENT);
+      mkdirSync(placementRoot(main.path), { recursive: true });
       execFileSync("git", ["worktree", "add", newWt, branch], { cwd: main.path, stdio: "inherit" });
       if (remote && git(newWt, "merge", "--ff-only", "--quiet", `origin/${branch}`) === null)
         fail(`${branch} の worktree を作りましたが、リモートの更新を取り込めませんでした: ${newWt}`);
       console.log(`ローカルのブランチから worktree を作りました${remote ? "（リモートの更新を取り込みました）" : "（リモートにはまだありません）"}: ${branch}\n  worktree: ${newWt}`);
       hooksForWorktree(main.path, newWt);
+      warnIfNotIgnored();
       return;
+    }
+    // 既存の worktree の所属を確かめてから再利用する。旧置き場は使わず拒否し、判定できないときは止める（7.5・5.1）。どちらも何も変更しない
+    const zone = placementZone(main.path, wt.path);
+    if (zone === "unknown") fail(UNKNOWN_PLACEMENT);
+    if (zone === "legacy") {
+      const g = legacyMoveGuidance(main.path, branch, wt.path);
+      fail(`${g.reason}\n次の手順:\n  ${g.next.join("\n  ")}`);
     }
     if (remote) {
       if (git(wt.path, "status", "--porcelain") !== "") fail(`worktree ${wt.path} に commit していない変更があるため、リモートの更新を取り込めません。`);
@@ -669,14 +700,17 @@ function resume(args) {
     return;
   }
   if (!remote) fail(`origin/${branch} を取得できません。`);
-  const wt = join(main.path, ".claude/worktrees", aliasOf(branch));
-  mkdirSync(join(main.path, ".claude/worktrees"), { recursive: true });
+  // 作成先（配置先）の所属が判定できないときは、作らずに止める（5.1）
+  const wt = placementOf(main.path, branch);
+  if (placementZone(main.path, wt) === "unknown") fail(UNKNOWN_PLACEMENT);
+  mkdirSync(placementRoot(main.path), { recursive: true });
   execFileSync("git", ["worktree", "add", "--track", "-b", branch, wt, `origin/${branch}`], { cwd: main.path, stdio: "inherit" });
   restoreBase(main.path, config, branch);
   console.log(`リモートから取得し直して worktree を作りました: ${branch}\n  worktree: ${wt}`);
   hooksForWorktree(main.path, wt);
   const url = previewUrl(config, branch);
   if (url) console.log(`プレビューURL（push 後）: ${url}`);
+  warnIfNotIgnored();
 }
 
 /**

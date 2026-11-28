@@ -162,7 +162,7 @@ export const runIntegrationPublishChecks = async (eq) => {
     // ================================================================
     const dev = newRepo({ branch: "develop", develop: true, recorded: null });
     const created = brw(dev, ["create", "int-one"]);
-    const wt1 = join(dev.dir, ".claude/worktrees/dev-int-one");
+    const wt1 = join(dev.dir, ".worktree/dev-int-one");
     eq("integration/8.1 create は命名規則に従い作業ブランチと worktree を作る", [created.status, existsSync(wt1)], [0, true]);
     writeFileSync(join(wt1, "one.txt"), "1");
     git(dev, wt1, "add", "one.txt");
@@ -173,9 +173,10 @@ export const runIntegrationPublishChecks = async (eq) => {
     git(dev, dev.dir, "worktree", "remove", "--force", wt1);
     git(dev, dev.dir, "branch", "-D", "dev/int-one");
     const resumed = brw(dev, ["resume", "dev/int-one"]);
-    eq("integration/8.1 resume は遠隔の commit を持つ worktree を作り直す", [resumed.status, existsSync(wt1), git(dev, wt1, "log", "-1", "--format=%s")], [0, true, "one"]);
+    const resumedWt = join(dev.dir, ".worktree/dev-int-one");
+    eq("integration/8.1 resume は遠隔の commit を持つ worktree を作り直す", [resumed.status, existsSync(resumedWt), git(dev, resumedWt, "log", "-1", "--format=%s")], [0, true, "one"]);
     const created2 = brw(dev, ["create", "int-two"]);
-    const wt2 = join(dev.dir, ".claude/worktrees/dev-int-two");
+    const wt2 = join(dev.dir, ".worktree/dev-int-two");
     writeFileSync(join(wt2, "two.txt"), "2");
     git(dev, wt2, "add", "two.txt");
     git(dev, wt2, "commit", "-q", "-m", "two");

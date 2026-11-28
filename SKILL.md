@@ -56,7 +56,7 @@ Codex では `install-codex.mjs --repo <導入先>` で登録したフックが 
 brw create <名前> [--base <分岐元>] [--branch-only | --carry]
 ```
 
-接頭辞（`dev/` など）は宣言から自動で付く。既定で worktree（`.claude/worktrees/<alias>`）も作るので、以降の編集・commit はその worktree の中で行う。worktree を使えない事情があるときは `--branch-only` でブランチだけ作る。名前が命名規則に合わないと失敗するので、表示された規則に合わせて付け直す。
+接頭辞（`dev/` など）は宣言から自動で付く。既定で worktree（`<本体>/.worktree/<alias>`。`<alias>` はブランチ名の `/` を `-` にしたもの）も作るので、以降の編集・commit はその worktree の中で行う。worktree を使えない事情があるときは `--branch-only` でブランチだけ作る。名前が命名規則に合わないと失敗するので、表示された規則に合わせて付け直す。
 
 ### 素の git での作成は BRW が置き換える（brw-branch-gate）
 
@@ -68,14 +68,25 @@ BRW を導入したリポジトリでは、`git switch -c`・`git checkout -b`�
 | `git branch dev/foo` | ブランチだけを作り、作業場所は移さない（`--branch-only`） | 同上（作業場所は移さない形のコマンド） |
 | 既存の開発ブランチへの `git switch dev/foo` | `brw resume dev/foo` に置き換え、その worktree へ移す | 拒否し、再開と移動のコマンドを示す |
 | 保護ブランチ・分岐元への切り替え | ブランチは増えないので通常の承認に任せる | 同左 |
-| 規則外の名前・開始点が分岐元以外・複合コマンド・配置先が `.claude/worktrees/` の外 | 拒否。理由と `brw create` の例を示す | 同左 |
+| 規則外の名前・開始点が分岐元以外・複合コマンド・配置先が `.worktree/` の外 | 拒否。理由と `brw create` の例を示す | 同左 |
 | EnterWorktree の `name` 指定 | 拒否。`brw create` の後に `path` 指定で入る 2 手を案内する | （Codex に無い入口） |
-| EnterWorktree の `path` 指定 | BRW の開発ブランチの worktree（`.claude/worktrees/` の配下）だけ通す | （同上） |
+| EnterWorktree の `path` 指定 | BRW の開発ブランチの worktree（`.worktree/` の配下）だけ通す。旧置き場（`.claude/worktrees/` の直下）の worktree は拒否し、移動手順を案内する | （同上） |
 
+- **EnterWorktree の注意**: `.worktree/` の下への EnterWorktree は、Claude Code が利用者の承認を求める（BRW のフックの許可では省けず、非対話では権限モードの迂回が要る）。また worktree に入ったセッションからは、別の worktree へ EnterWorktree で移れない。承認できない・移れない環境では、`brw create`・`brw resume` の後に Bash で `cd <worktree の絶対パス>` して作業する。
 - **作業場所が移る条件**: 置き換えが実行できる（Claude Code）、かつ worktree を作る形（`git branch` は移さない）のとき。拒否のときは、案内の「次のコマンド」を実行する（作成と移動は 1 コマンド）。
 - **未コミットの変更**: 追跡済みの変更があり、ブランチを切り替える作成は拒否される。案内の 2 択から選ぶ。そのまま作る（`brw create <名前>`。変更は元の作業ツリーに残る）、または移す（`brw create <名前> --carry`。変更を新しい worktree へ移し、元からは取り除く。ステージ済みはステージ済みのまま移り、未追跡のファイルは移さず一覧が表示される）。`--carry` は開始点が元の `HEAD` と同じときだけ移す（違えば失敗し、何も作らない）。移した内容は `refs/brw/carry/<ブランチ>` に残り、`git stash apply` で取り出せる（`brw finish` が削除する）。**同じ作業ツリーを複数のセッションが同時に編集しない前提**で使う（取り除きの直前から完了までのごく短い間の書き込みは検出できない）。
 - **案内の書式**: 拒否・置き換えの応答は、見出し行（`[branch-release-workflow] <結論>`・`BRW 案内: 置き換え|拒否`・`次のコマンド: …`・`作業場所: …`）に続けて、理由と次の手順の文章が付く。呼び出し側は BRW を知らなくても、この案内の文章どおりに進める。
 - **導入状態の検査**: `brw setup` は Claude のフックの登録状態（Bash・EnterWorktree・MCP などの入口が判定の対象か）を表示し、欠けていれば「不足: PreToolUse(EnterWorktree)」のように対象外の入口と、プラグインの更新手順を示す。
+
+### worktree の配置先と旧置き場（brw-branch-gate）
+
+- 配置先は `<本体>/.worktree/<alias>`。導入先では `.worktree/` を無視する設定（`.gitignore` に `/.worktree/` の追記など）が必要。無視されていないと、本体で `git add -A` したときに worktree が埋め込みリポジトリとして誤って追加される。BRW は導入先の `.gitignore`・`.git/info/exclude` を書き換えない。無視されていないときは、`brw create`・`brw resume` が worktree を新規に作る（再作成を含む）のに成功した後に、警告を 1 回出す（既存の worktree の再利用・`--branch-only`・巻き戻し・無視の状態を判定できないときは出さない）。
+- 旧置き場（`<本体>/.claude/worktrees/<alias>`）の worktree は BRW が自動で移さず、扱わない: `brw resume` と EnterWorktree は拒否して移動手順を案内し、`brw finish` は worktree もブランチも消さずに対象外とする。利用者が手で移す:
+  1. ロックされているときだけ `git worktree unlock <旧パス>`
+  2. `git worktree move <旧パス> <本体>/.worktree/<alias>`（未コミットの変更・未追跡のファイルはそのまま移る）
+  3. `brw resume <ブランチ>`
+  サブモジュールを持つ worktree など、`git worktree move` が拒否されるときは、未コミットの変更を commit か退避してから `git worktree remove <旧パス>` で片付け（サブモジュールがあるときは `--force` が要る。変更を失わないことを確かめてから）、`brw resume <ブランチ>` で新しい配置先に作り直す。
+- `.brw/`（PR 本文の置き場）は、この更新では従来の `<本体>/.claude/worktrees/.brw/` のまま。
 
 ## 2. プレビューURLの案内
 

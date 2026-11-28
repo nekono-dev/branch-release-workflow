@@ -1,7 +1,7 @@
 // CLI のブランチ操作の契約テスト（brw-enforcement 7.1）。selftest.mjs から呼ばれる。
 // 一時リポジトリと bare remote で create・resume・merge・finish を実行する。GitHub には接続しない。
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +62,95 @@ export const runBranchOpsChecks = async (eq) => {
     l.cleanup();
   }
 
+  // ---- create: 配置先（<本体>/.worktree/<別名>）・入れ子の回避・判定不能での停止・無視の警告（brw-branch-gate 7.1・7.3・7.9・7.10・5.1） ----
+  // 無視の警告は、最終成功後に標準出力へ 1 回だけ出る（この文言の出現回数で数える）
+  const WARN = "`.worktree/` が導入先で無視されていません";
+  const warnCount = (out) => out.split(WARN).length - 1;
+  {
+    const t = mkTeam();
+    const r = brw(t.dir, ["create", "place"]);
+    eq("brw-branch-gate/7.1 create は本体の .worktree/<別名> に worktree を作り、旧置き場には作らない", [r.status, existsSync(join(t.dir, ".worktree/dev-place")), existsSync(join(t.dir, ".claude/worktrees/dev-place"))], [0, true, false]);
+    t.cleanup();
+  }
+  {
+    // 連携 worktree の中から実行しても、本体の .worktree/ に作り、連携 worktree の下に入れ子を作らない
+    const t = mkTeam();
+    const w = mkWorktree(t.dir, "dev/outer");
+    const r = brw(w, ["create", "nest"]);
+    eq("brw-branch-gate/7.3 連携 worktree から create しても本体の .worktree/ に作り、入れ子を作らない", [r.status, existsSync(join(t.dir, ".worktree/dev-nest")), existsSync(join(w, ".worktree"))], [0, true, false]);
+    t.cleanup();
+  }
+  {
+    // 配置先がシンボリックリンクなら、worktree もブランチも作らず、判定できない理由を示して終了コード 1 で止まる
+    const t = mkTeam();
+    const elsewhere = mkdtempSync(join(tmpdir(), "brw-elsewhere-"));
+    symlinkSync(elsewhere, join(t.dir, ".worktree"));
+    const r = brw(t.dir, ["create", "linked"]);
+    eq("brw-branch-gate/5.1 配置先がシンボリックリンクなら worktree もブランチも作らず、理由を示して止まる", [r.status, r.stderr.includes("配置先の状態を判定できません"), readdirSync(elsewhere).length, hasRef(t.dir, "refs/heads/dev/linked")], [1, true, 0, false]);
+    rmSync(elsewhere, { recursive: true, force: true });
+    t.cleanup();
+  }
+  {
+    // 無視されていない配置先: 最終成功の後に警告が 1 回だけ出る
+    const t = mkTeam();
+    const r = brw(t.dir, ["create", "warn"]);
+    eq("brw-branch-gate/7.9 配置先が無視されていなければ、create の最終成功の後に警告が 1 回出る", [r.status, warnCount(r.stdout)], [0, 1]);
+    t.cleanup();
+  }
+  {
+    // 無視されている配置先: 警告は出ない
+    const t = mkTeam();
+    writeFileSync(join(t.dir, ".gitignore"), "/.worktree/\n");
+    const r = brw(t.dir, ["create", "quiet"]);
+    eq("brw-branch-gate/7.9 配置先が無視されていれば警告は出ない", [r.status, warnCount(r.stdout), existsSync(join(t.dir, ".worktree/dev-quiet"))], [0, 0, true]);
+    t.cleanup();
+  }
+  {
+    // --branch-only は worktree を作らないので、警告は出ない
+    const t = mkTeam();
+    const r = brw(t.dir, ["create", "bo", "--branch-only"]);
+    eq("brw-branch-gate/7.9 --branch-only では警告を出さない", [r.status, warnCount(r.stdout)], [0, 0]);
+    t.cleanup();
+  }
+  {
+    // --carry の成功後は、最終成功として警告が 1 回出る
+    const t = mkTeam();
+    writeFileSync(join(t.dir, "README.md"), "x\n");
+    gitOut(t.dir, "add", "README.md");
+    gitOut(t.dir, "commit", "-q", "-m", "readme");
+    gitOut(t.dir, "push", "-q", "origin", "develop");
+    writeFileSync(join(t.dir, "README.md"), "y\n");
+    const r = brw(t.dir, ["create", "carried", "--carry"]);
+    eq("brw-branch-gate/7.9 --carry の成功の後も警告は 1 回出る", [r.status, warnCount(r.stdout)], [0, 1]);
+    t.cleanup();
+  }
+  {
+    // --carry の失敗で巻き戻したときは、警告を出さない（最終成功ではない）。decl が分岐元に無い構成で、開始点が HEAD と異なる
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "brw-warn-rb-")));
+    gitOut(d, "init", "-q", "-b", "develop");
+    writeFileSync(join(d, ".branch-release-workflow.json"), JSON.stringify(CFG));
+    writeFileSync(join(d, "a.txt"), "a\n");
+    gitOut(d, "add", "a.txt");
+    gitOut(d, "commit", "-q", "-m", "i");
+    gitOut(d, "checkout", "-q", "-b", "side");
+    writeFileSync(join(d, "a.txt"), "side\n");
+    gitOut(d, "commit", "-q", "-am", "side");
+    writeFileSync(join(d, "a.txt"), "dirty\n");
+    const r = brw(d, ["create", "rb", "--carry"]);
+    eq("brw-branch-gate/7.9 --carry の失敗で巻き戻したときは警告を出さない", [r.status !== 0, warnCount(r.stdout), existsSync(join(d, ".worktree/dev-rb"))], [true, 0, false]);
+    rmSync(d, { recursive: true, force: true });
+  }
+  {
+    // create の前後で .gitignore・info/exclude に .worktree/ の行は増えない（既存の .codex/ の追記は対象外）
+    const t = mkTeam();
+    const snap = () => [".gitignore", ".git/info/exclude"].map((p) => (existsSync(join(t.dir, p)) ? readFileSync(join(t.dir, p), "utf8") : null));
+    const before = snap();
+    const r = brw(t.dir, ["create", "noedit"]);
+    const after = snap();
+    eq("brw-branch-gate/7.10 create は .gitignore・info/exclude に .worktree/ の行を追加しない", [r.status, after, after.some((x) => x !== null && x.includes(".worktree"))], [0, before, false]);
+    t.cleanup();
+  }
+
   // ---- worktree ごとの Codex フック登録（8.4: Codex は worktree で親の .codex を読まない）----
   {
     const launcher = realpathSync(join(dirname(BRW), "agent-hooks.mjs"));
@@ -71,16 +160,16 @@ export const runBranchOpsChecks = async (eq) => {
     try {
       // 親に登録が無いときは何もしない
       const plain = brw(t.dir, ["create", "plain"], env);
-      eq("branch-ops/8.4 親に Codex の登録が無ければ、create は worktree に .codex/ を作らない", [plain.status, existsSync(join(t.dir, ".claude/worktrees/dev-plain/.codex"))], [0, false]);
+      eq("branch-ops/8.4 親に Codex の登録が無ければ、create は worktree に .codex/ を作らない", [plain.status, existsSync(join(t.dir, ".worktree/dev-plain/.codex"))], [0, false]);
       installCodexHooks({ repoDir: t.dir, launcherPath: launcher });
       const made = brw(t.dir, ["create", "hooked"], env);
-      const wt = join(t.dir, ".claude/worktrees/dev-hooked");
+      const wt = join(t.dir, ".worktree/dev-hooked");
       const wtd = (trust) => diagnoseHooks({ pluginRoot: dirname(dirname(BRW)), codexRepoDir: wt, host: "codex", codexTrust: trust, env: {} }).routes.filter((x) => x.environment === "local").map((x) => x.status);
       eq("branch-ops/8.4 親に登録があれば create は worktree の .codex/ を有効化して案内する（hooks.json は作らない。診断は信頼済みで active・未信頼で untrusted）",
         [made.status, existsSync(join(wt, ".codex")), existsSync(join(wt, ".codex/hooks.json")), /有効にしました/.test(made.stdout), wtd("trusted"), wtd("untrusted")], [0, true, false, true, Array(5).fill("active"), Array(5).fill("untrusted")]);
       gitOut(t.dir, "branch", "dev/loc2", "develop");
       const res = brw(t.dir, ["resume", "dev/loc2"], env);
-      eq("branch-ops/8.4 resume が作る worktree も有効化される", [res.status, existsSync(join(t.dir, ".claude/worktrees/dev-loc2/.codex"))], [0, true]);
+      eq("branch-ops/8.4 resume が作る worktree も有効化される", [res.status, existsSync(join(t.dir, ".worktree/dev-loc2/.codex"))], [0, true]);
     } finally {
       t.cleanup();
       rmSync(codexHome, { recursive: true, force: true });
@@ -92,7 +181,7 @@ export const runBranchOpsChecks = async (eq) => {
     const t = mkTeam();
     gitOut(t.dir, "branch", "dev/loc", "develop");
     const r = brw(t.dir, ["resume", "dev/loc"]);
-    const wt = join(t.dir, ".claude/worktrees/dev-loc");
+    const wt = join(t.dir, ".worktree/dev-loc");
     eq("branch-ops/7.1 リモートに無いローカルの開発ブランチから worktree を作れる", [r.status, existsSync(wt) && gitOut(wt, "branch", "--show-current")], [0, "dev/loc"]);
     t.cleanup();
   }
@@ -106,7 +195,7 @@ export const runBranchOpsChecks = async (eq) => {
     gitOut(t.dir, "commit", "-q", "--allow-empty", "-m", "local-side");
     gitOut(t.dir, "checkout", "-q", "develop");
     const r = brw(t.dir, ["resume", "dev/div"]);
-    eq("branch-ops/7.1 リモートと分岐したローカルのブランチは worktree を作らず止める", [r.status, existsSync(join(t.dir, ".claude/worktrees/dev-div"))], [1, false]);
+    eq("branch-ops/7.1 リモートと分岐したローカルのブランチは worktree を作らず止める", [r.status, existsSync(join(t.dir, ".worktree/dev-div"))], [1, false]);
     t.cleanup();
   }
   {
@@ -114,7 +203,7 @@ export const runBranchOpsChecks = async (eq) => {
     const t = mkTeam();
     gitOut(t.dir, "checkout", "-q", "-b", "dev/cur", "develop");
     const r = brw(t.dir, ["resume", "dev/cur"]);
-    eq("branch-ops/7.1 本体の作業ツリーで使用中のブランチは resume で止める", [r.status, existsSync(join(t.dir, ".claude/worktrees/dev-cur"))], [1, false]);
+    eq("branch-ops/7.1 本体の作業ツリーで使用中のブランチは resume で止める", [r.status, existsSync(join(t.dir, ".worktree/dev-cur"))], [1, false]);
     t.cleanup();
   }
   {
@@ -124,12 +213,80 @@ export const runBranchOpsChecks = async (eq) => {
     gitOut(t.dir, "push", "-q", "origin", "dev/legacy");
     gitOut(t.dir, "branch", "-D", "dev/legacy"); // 遠隔にだけ残す
     const r = brw(t.dir, ["resume", "dev/legacy"]);
-    eq("branch-ops/7.1 恒常的な分岐元の名前は resume で作業ブランチにしない", [r.status, existsSync(join(t.dir, ".claude/worktrees/dev-legacy"))], [1, false]);
+    eq("branch-ops/7.1 恒常的な分岐元の名前は resume で作業ブランチにしない", [r.status, existsSync(join(t.dir, ".worktree/dev-legacy"))], [1, false]);
     t.cleanup();
   }
   {
     const t = mkTeam();
     eq("branch-ops/7.1 保護・分岐元・宣言外の名前は resume で拒否する", ["main", "develop", "other/x"].map((b) => brw(t.dir, ["resume", b]).status), [1, 1, 1]);
+    t.cleanup();
+  }
+
+  // ---- resume: 配置先・旧置き場の拒否・判定不能での停止・無視の警告（brw-branch-gate 7.2・7.4・7.5・7.7・7.10・5.1） ----
+  {
+    // リモートにだけあるブランチから resume すると、配置先の .worktree/<別名> に作る。作成の後に無視の警告が 1 回出る
+    const t = mkTeam();
+    gitOut(t.dir, "branch", "dev/rem", "develop");
+    gitOut(t.dir, "push", "-q", "origin", "dev/rem");
+    gitOut(t.dir, "branch", "-D", "dev/rem"); // 遠隔にだけ残す
+    const r = brw(t.dir, ["resume", "dev/rem"]);
+    const wt = join(t.dir, ".worktree/dev-rem");
+    eq("brw-branch-gate/7.2 リモートのブランチから resume は .worktree/<別名> に作り、旧置き場には作らない", [r.status, existsSync(wt) && gitOut(wt, "branch", "--show-current"), existsSync(join(t.dir, ".claude/worktrees/dev-rem")), warnCount(r.stdout)], [0, "dev/rem", false, 1]);
+    t.cleanup();
+  }
+  {
+    // 旧置き場の worktree で使用中のブランチは、worktree もブランチも変えず、旧パス・新しい配置先・移動の手順を示して終了コード 1 で拒否する。
+    // 同じ旧置き場に別の worktree があっても、他のブランチの resume は通る
+    const t = mkTeam();
+    const oldWt = join(t.dir, ".claude/worktrees/dev-old");
+    gitOut(t.dir, "worktree", "add", "-q", oldWt, "-b", "dev/old", "develop");
+    const before = gitOut(t.dir, "rev-parse", "refs/heads/dev/old");
+    const r = brw(t.dir, ["resume", "dev/old"]);
+    const out = `${r.stdout}${r.stderr}`;
+    eq("brw-branch-gate/7.5 旧置き場で使用中のブランチの resume は拒否し、旧パス・新しい配置先・移動の手順を示す", [r.status, out.includes(oldWt), out.includes(join(t.dir, ".worktree/dev-old")), out.includes("git worktree move"), existsSync(join(t.dir, ".worktree/dev-old"))], [1, true, true, true, false]);
+    eq("brw-branch-gate/7.5 旧置き場の拒否は worktree もブランチも変えない", [gitOut(t.dir, "rev-parse", "refs/heads/dev/old") === before, gitOut(oldWt, "branch", "--show-current")], [true, "dev/old"]);
+    gitOut(t.dir, "branch", "dev/other", "develop");
+    const other = brw(t.dir, ["resume", "dev/other"]);
+    eq("brw-branch-gate/7.7 旧置き場に別の worktree があっても、他のブランチの resume は通る", [other.status, existsSync(join(t.dir, ".worktree/dev-other"))], [0, true]);
+    t.cleanup();
+  }
+  {
+    // 配置先（.worktree）がシンボリックリンクなら、ローカルのブランチからの作成は worktree もブランチも作らず、理由を示して止まる
+    const t = mkTeam();
+    gitOut(t.dir, "branch", "dev/sym", "develop");
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), "brw-elsewhere-")));
+    symlinkSync(elsewhere, join(t.dir, ".worktree"));
+    const r = brw(t.dir, ["resume", "dev/sym"]);
+    eq("brw-branch-gate/5.1 配置先がシンボリックリンクなら resume は作らず、判定できない理由で止まる", [r.status, `${r.stdout}${r.stderr}`.includes("配置先の状態を判定できません"), readdirSync(elsewhere).length, hasRef(t.dir, "refs/heads/dev/sym")], [1, true, 0, true]);
+    rmSync(elsewhere, { recursive: true, force: true });
+    t.cleanup();
+  }
+  {
+    // 既存の worktree（配置先にあったもの）も、配置先がシンボリックリンクに変わったら再利用せず、理由を示して止まる
+    const t = mkTeam();
+    const made = brw(t.dir, ["create", "reuse"]);
+    renameSync(join(t.dir, ".worktree"), join(t.dir, ".worktree-moved"));
+    symlinkSync(join(t.dir, ".worktree-moved"), join(t.dir, ".worktree"));
+    const r = brw(t.dir, ["resume", "dev/reuse"]);
+    eq("brw-branch-gate/5.1 既存の worktree も、配置先がシンボリックリンクなら再利用せず止まる", [made.status, r.status, `${r.stdout}${r.stderr}`.includes("配置先の状態を判定できません")], [0, 1, true]);
+    t.cleanup();
+  }
+  {
+    // 無視されていない配置先で作成した後は警告が 1 回出る。既存の worktree の再利用では出ない
+    const t = mkTeam();
+    gitOut(t.dir, "branch", "dev/warn", "develop");
+    const made = brw(t.dir, ["resume", "dev/warn"]);
+    const reused = brw(t.dir, ["resume", "dev/warn"]);
+    eq("brw-branch-gate/7.10 resume は作成の後に警告を 1 回出し、既存の worktree の再利用では出さない", [made.status, warnCount(made.stdout), reused.status, warnCount(reused.stdout)], [0, 1, 0, 0]);
+    t.cleanup();
+  }
+  {
+    // 無視されている配置先では、resume の作成でも警告を出さない
+    const t = mkTeam();
+    writeFileSync(join(t.dir, ".gitignore"), "/.worktree/\n");
+    gitOut(t.dir, "branch", "dev/quiet2", "develop");
+    const r = brw(t.dir, ["resume", "dev/quiet2"]);
+    eq("brw-branch-gate/7.10 配置先が無視されていれば resume は警告を出さない", [r.status, warnCount(r.stdout), existsSync(join(t.dir, ".worktree/dev-quiet2"))], [0, 0, true]);
     t.cleanup();
   }
 

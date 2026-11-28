@@ -31,9 +31,9 @@ export const runStopObserveChecks = async (eq) => {
       execFileSync("git", ["status", "--porcelain"], { cwd: fx.worktree, encoding: "utf8" }),
     ], ["", ""]);
     eq("stop-observe/14.1 作業の記録（.git/brw）を作らない", [existsSync(join(fx.main, ".git", "brw")), existsSync(join(fx.worktree, ".git"))], [false, true]);
-    // PoC（poc/claude-stop-cwd.sh）と同じく、worktree は本体の .claude/worktrees の下に置く。
-    // 作業ディレクトリが本体の外へ出ると Claude の Bash は cd を引き継がないため、この配置が前提になる。
-    eq("stop-observe/14.1 worktree は本体の .claude/worktrees の下に置く（PoC と同じ配置）", fx.worktree, join(fx.main, ".claude", "worktrees", "wt"));
+    // worktree は本体の .worktree の下に置く（brw-branch-gate の配置先。PoC（poc/claude-stop-cwd.sh）は旧置き場で確認したが、本体の内側に置く点は同じ）。
+    // 作業ディレクトリが本体の外へ出ると Claude の Bash は cd を引き継がないため、本体の内側の配置が前提になる。
+    eq("stop-observe/14.1 worktree は本体の .worktree の下に置く（配置先）", fx.worktree, join(fx.main, ".worktree", "wt"));
     eq("stop-observe/14.1 フックの登録は本体の追跡対象外（info/exclude）で、本体は clean のまま", [
       spawnSync("git", ["check-ignore", "-q", ".claude/settings.json"], { cwd: fx.main }).status,
       spawnSync("git", ["check-ignore", "-q", ".codex/hooks.json"], { cwd: fxCodex.main }).status,

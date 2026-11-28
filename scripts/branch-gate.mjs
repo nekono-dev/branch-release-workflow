@@ -5,9 +5,10 @@
 import { BRW_RUN } from "./brw-cmd.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { aliasOf, checkName, classifyBranch, configRel, currentBranch, enabledInRepo, git, loadConfig, redactSecrets, sanitize, worktrees } from "./lib.mjs";
+import { checkName, classifyBranch, configRel, currentBranch, enabledInRepo, git, loadConfig, redactSecrets, sanitize, worktrees } from "./lib.mjs";
+import { hasParentSegment, legacyMoveGuidance, placementOf, placementPrefix, placementRoot, placementZone } from "./placement.mjs";
 
 const HEADING = "[branch-release-workflow]";
 const OUTCOMES = ["置き換え", "拒否"];
@@ -142,7 +143,14 @@ export function gatherFacts(cwd) {
   const status = git(cwd, "status", "--porcelain");
   if (mainRoot === null || status === null) return null;
   const lines = status.split("\n").filter((l) => l !== "");
-  const untracked = lines.filter((l) => l.startsWith("??")).length;
+  const isUntracked = (l) => l.startsWith("??");
+  // 未追跡のうち、配置先（.worktree/）の配下は件数に含めない（要件 7.8）。porcelain の行は「?? <パス>」。
+  // ただし、除くのは操作の作業ディレクトリが本体の作業ツリーのときだけ。連携 worktree の中の同名のディレクトリは
+  // 本体の配置先ではなく、ただの未追跡なので数える
+  const top = git(cwd, "rev-parse", "--show-toplevel");
+  const isMainTree = top !== null && sameDirectory(top, mainRoot);
+  const inPlacement = (l) => isMainTree && l.slice(3).startsWith(placementPrefix());
+  const untracked = lines.filter((l) => isUntracked(l) && !inPlacement(l)).length;
   const exists = (ref) => git(cwd, "show-ref", "--verify", "--quiet", ref) !== null;
   return {
     cwd,
@@ -151,7 +159,7 @@ export function gatherFacts(cwd) {
     mainBranch: list[0]?.branch ?? null,
     // ブランチを使用中の worktree（本体を除く）のパス。無ければ null
     worktreeOf: (name) => list.slice(1).find((w) => w.branch === name)?.path ?? null,
-    trackedChanges: lines.length - untracked,
+    trackedChanges: lines.filter((l) => !isUntracked(l)).length,
     untrackedChanges: untracked,
     branchExists: (name) => ({ local: exists(`refs/heads/${name}`), origin: exists(`refs/remotes/origin/${name}`) }),
     declaredAt: (ref) => git(cwd, "cat-file", "-e", `${ref}:${configRel(mainRoot)}`) !== null,
@@ -164,6 +172,27 @@ const denied = (code, conclusion, commands, notes, workdir = null) => ({
   code,
   reason: guidance({ outcome: "拒否", conclusion, commands, workdir, notes: notes.join("\n") }),
 });
+
+/**
+ * 旧置き場（`<本体>/.claude/` の下の既定の置き場）の worktree を指す操作の拒否（要件 1.5・2.6）。
+ * 旧パス・新しい配置先・移動の手順を、placement の案内（legacyMoveGuidance）から本文に載せる。BRW は自動で移さない。
+ * @param {string} main 本体の作業ツリー
+ * @param {string} branch 対象のブランチ
+ * @param {string} oldPath 旧置き場の worktree のパス
+ * @param {string} command 次に実行するコマンド（1 件）
+ */
+const legacyDeny = (main, branch, oldPath, command) => {
+  const g = legacyMoveGuidance(main, branch, oldPath);
+  return denied("gate-legacy-placement", `作業場所（${oldPath}）は旧置き場のため、BRW の配置先として扱えず、置き換えられません`, [command], [g.reason, ...g.next]);
+};
+
+/**
+ * 拒否・置き換えの結果の種類（code）。主な値は次のとおり。
+ * - gate-unresolved: 作業場所（配置先・パス）を確定できない、または判定できない
+ * - gate-legacy-placement: 旧置き場の worktree を指す（専用の拒否。要件 1.5）
+ * - gate-outside-placement: 配置先（`.worktree/<別名>`）以外を指す
+ * @typedef {string} GateDenyCode
+ */
 
 // 作成の置き換え（rewrite）か拒否を決める本体。git は呼ばない
 function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
@@ -201,10 +230,24 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
       return { verdict: "pass", code: "gate-resume-protected", reason: `'${branch}' は${cls === "protected" ? "保護ブランチ" : "恒常的な分岐元"}への切り替えで、ブランチは増えません。通常のホスト承認に任せます。` };
     if (cls !== "development") return denied("gate-name-invalid", `'${branch}' は宣言の開発ブランチではないため、再開に置き換えられません`, [cmd()], [`${BRW_RUN} resume で再開できるのは、宣言の作業ブランチ（workBranches）に一致するブランチだけです。`, `新しく作るなら、命名規則に合う名前で brw create を実行してください。`]);
     if (facts.mainBranch === branch) return denied("gate-action-unsupported", `ブランチ '${branch}' は本体の作業ツリーで使用中のため、再開に置き換えられません`, [cmd()], ["brw resume は worktree を作るため、本体で使用中のブランチは再開できません。"]);
-    // 再開先: 既にそのブランチの worktree があればそこ。無ければ brw resume が作る場所
-    const wt = facts.worktreeOf(branch) ?? join(main, ".claude", "worktrees", aliasOf(branch));
+    // 再開先: 既にそのブランチの worktree があればそこ（旧置き場なら拒否、判定できなければ止める）。無ければ brw resume が作る配置先
+    const existingWt = facts.worktreeOf(branch);
+    if (existingWt !== null) {
+      const zone = placementZone(main, existingWt);
+      if (zone === "legacy") return legacyDeny(main, branch, existingWt, resumeCmd);
+      if (zone === "unknown") return denied("gate-unresolved", `ブランチ '${branch}' の既存の worktree の所属を判定できないため、置き換えられません`, [resumeCmd], ["配置先（.worktree/）やその親がシンボリックリンクなどのため、worktree の所属を確定できません。"]);
+    } else if (placementZone(main, placementOf(main, branch)) === "unknown") {
+      return denied("gate-unresolved", "配置先の状態を判定できないため、置き換えられません", [resumeCmd], ["配置先（.worktree/）やその親がシンボリックリンクなどのため、作業場所を確定できません。"]);
+    }
+    const wt = existingWt ?? placementOf(main, branch);
+    if (op.via === "worktree" && op.path !== undefined && op.path !== null) {
+      // 生の `..` は手前の判定で検査済み。ここでは旧置き場と判定できない状態を止める
+      const pathZone = placementZone(main, resolve(op.path));
+      if (pathZone === "legacy") return legacyDeny(main, branch, op.path, resumeCmd);
+      if (pathZone === "unknown") return denied("gate-unresolved", `作業場所（${op.path}）の所属を判定できないため、置き換えられません`, [resumeCmd], ["配置先（.worktree/）やその親がシンボリックリンクなどのため、作業場所を確定できません。"]);
+    }
     if (op.via === "worktree" && (op.path === undefined || op.path === null || resolve(op.path) !== resolve(wt)))
-      return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の再開先（${wt}）ではないため、置き換えられません`, [resumeCmd], [`${BRW_RUN} resume は本体の .claude/worktrees/ の配下か、そのブランチの既存の worktree を使います。`]);
+      return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の再開先（${wt}）ではないため、置き換えられません`, [resumeCmd], [`${BRW_RUN} resume は本体の .worktree/ の配下か、そのブランチの既存の worktree を使います。`]);
     const notes = [
       "既存の開発ブランチの再開として brw resume を実行します。リモートに更新があれば取り込みます。",
       `作業場所をブランチの worktree（${wt}）に移しました。続けて、この worktree で作業してください。`,
@@ -243,6 +286,10 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
       j++;
     }
   }
+
+  // 配置先のパスの生の入力に `..` があれば、正規化（resolve）の前に判定できないとして止める（2026-11-28 の更新。要件 5.1）
+  if (op.via === "worktree" && typeof operands[0] === "string" && hasParentSegment(operands[0]))
+    return denied("gate-unresolved", "配置先のパスに `..` を含むため、作業場所を確定できず、置き換えられません", [cmd()], ["`..` を含まない形で、配置先（`.worktree/<名前>`）のパスを指定してください。"]);
 
   // 開始点と、ブランチ名の位置
   let start = null;
@@ -283,11 +330,19 @@ function planCore({ command, op, config, facts, hasLeadingCd, unresolved }) {
   const existing = facts.branchExists(branch);
   if (existing.local || existing.origin) return denied("gate-action-unsupported", `ブランチ '${branch}' は既に存在するため、作成ではなく再開です`, [`cd ${shellQuote(main)} && node ${shellQuote(BRW_CLI)} resume ${shellQuote(branch)}`], [`既存のブランチの再開は ${BRW_RUN} resume で行ってください。`]);
 
-  // 配置先（本体の .claude/worktrees/ の配下。brw create が作る場所と一致すること）
+  // 配置先（本体の .worktree/ の配下。brw create が作る場所と一致すること）
   const base = config.baseBranch;
-  const wt = join(main, ".claude", "worktrees", aliasOf(branch));
+  const wt = placementOf(main, branch);
+  // 配置先そのものを判定できない（シンボリックリンクなど）ときは、worktree を作る前に止める（要件 5.1）
+  if (placementZone(main, wt) === "unknown")
+    return denied("gate-unresolved", "配置先の状態を判定できないため、置き換えられません", [cmd()], ["配置先（.worktree/）やその親がシンボリックリンクなどのため、作業場所を確定できません。"]);
+  if (op.via === "worktree" && op.path !== undefined && op.path !== null) {
+    const pathZone = placementZone(main, resolve(op.path));
+    if (pathZone === "legacy") return legacyDeny(main, branch, op.path, cmd());
+    if (pathZone === "unknown") return denied("gate-unresolved", `作業場所（${op.path}）の所属を判定できないため、置き換えられません`, [cmd()], ["配置先（.worktree/）やその親がシンボリックリンクなどのため、作業場所を確定できません。"]);
+  }
   if (op.via === "worktree" && (op.path === undefined || op.path === null || resolve(op.path) !== resolve(wt)))
-    return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の配置先（${wt}）ではないため、置き換えられません`, [cmd()], [`BRW は本体の .claude/worktrees/ の配下にだけ worktree を作ります。${BRW_RUN} create で作ってください。`]);
+    return denied("gate-outside-placement", `作業場所（${op.path ?? "不明"}）は BRW の配置先（${wt}）ではないため、置き換えられません`, [cmd()], [`BRW は本体の .worktree/ の配下にだけ worktree を作ります。${BRW_RUN} create で作ってください。`]);
 
   // 開始点は分岐元（baseBranch か origin/baseBranch）に限る。現在のブランチから作る操作は分岐元からの作成と結果が違う
   if (start === null) {
@@ -366,10 +421,25 @@ const enterDenied = (code, conclusion, commands, notes, workdir = null) => ({
   code,
   reason: guidance({ outcome: "拒否", conclusion, commands, workdir, notes: notes.join("\n") }),
 });
+// EnterWorktree の拒否の理由の行（D3）。承認の要否と、移れない環境の代替を書く。要件 2.1 の 2 手の文言は変えない
+const ENTER_REASONS = [
+  "理由（承認）: Claude Code は、本体の `.claude/` の下の Claude Code の既定の置き場の外にある path への EnterWorktree で、利用者の承認を求めます。BRW のフックの許可では省けず、非対話では bypassPermissions が要ります。",
+  "理由（移動）: EnterWorktree で worktree に入ったセッションからは、.worktree/ の下の別の worktree へ EnterWorktree で移れません。",
+  "理由（代替）: 承認できない・移れない環境では、cd で作業場所を移して作業してください。",
+];
+// 拒否の案内の理由の行に、共通の 3 点を足す（分岐ごとに文字列をコピーしない）
+const withEnterReasons = (notes) => [...notes, ...ENTER_REASONS];
+// 移れない環境の代替の次のコマンド（brw create・brw resume の後に cd で同じ worktree へ移る）。worktree のパスが確定しないときの書式
+const ENTER_CD_ALT = "cd <brw create または brw resume が作った worktree の絶対パス>（代替: Bash で cd して作業場所を移す）";
 // 実在するパスは実体へ解決し、無ければ絶対パスへ正規化する
 const realOf = (p) => {
   try { return existsSync(p) ? realpathSync(p) : resolve(p); } catch { return resolve(p); }
 };
+
+// 2 つのパスが同じディレクトリ（実体）を指すか。どちらかを解決できないときは同じとは見なさない
+function sameDirectory(a, b) {
+  try { return realpathSync(a) === realpathSync(b); } catch { return false; }
+}
 
 // 作業ディレクトリのリポジトリの状態。git が「リポジトリではない」と答えたときだけ outside。実行の失敗・権限などは unresolved（確定できない）
 function repoOf(cwd) {
@@ -382,11 +452,11 @@ function repoOf(cwd) {
 /**
  * EnterWorktree の入力を判定する。副作用なし。
  * BRW を導入していないリポジトリ（または git の外）は通過。導入済みでは、`path` が BRW の開発ブランチの worktree
- * （本体の .claude/worktrees/ の配下で、worktree 一覧に載り、宣言の開発ブランチを使用中）のときだけ通過し、それ以外は案内つきで拒否する。
+ * （本体の .worktree/ の配下で、worktree 一覧に載り、宣言の開発ブランチを使用中）のときだけ通過し、それ以外は案内つきで拒否する。
  * 例外が出たときも拒否（安全側）。
  * @param {{name?: unknown, path?: unknown}|null|undefined} input EnterWorktree の tool_input
  * @param {string|null} cwd フックの作業ディレクトリ
- * @returns {{verdict: "pass"} | {verdict: "deny", code: "gate-enter-name"|"gate-enter-path"|"gate-enter-unresolved", reason: string}}
+ * @returns {{verdict: "pass"} | {verdict: "deny", code: "gate-enter-name"|"gate-enter-path"|"gate-enter-legacy"|"gate-enter-unresolved", reason: string}}
  */
 export function judgeEnterWorktree(input, cwd) {
   try {
@@ -423,7 +493,9 @@ export function judgeEnterWorktree(input, cwd) {
     if (!hasPath) {
       // 新しい worktree の作成（name 指定、または名前なし）。brw create の後に path 指定で入る 2 手を案内する
       const branch = valid(name) && SAFE_VALUE.test(name) && classifyBranch(config, name) === "development" && checkName(config, name) === null ? name : "<名前>";
-      const wt = join(main, ".claude", "worktrees", aliasOf(branch === "<名前>" ? "<名前>" : branch));
+      const wt = placementOf(main, branch);
+      // 2') は承認を省けない環境や移れない環境の代替。worktree のパスが確定しないとき（<名前>）は書式だけ示す
+      const cdTarget = branch === "<名前>" ? "<作成された worktree の絶対パス>" : shellQuote(wt);
       const hint = branch === "<名前>"
         ? [`作業ブランチの名前は、宣言の作業ブランチ（${config.workBranches.join(", ")}）と命名規則${config.namePattern ? `（${config.namePattern}）` : ""}に合う名前にしてください。`, "<名前> は、その名前に置き換えます。"]
         : [];
@@ -432,30 +504,48 @@ export function judgeEnterWorktree(input, cwd) {
         `EnterWorktree を path に ${wt} を指定して呼ぶ`,
       ], [
         `1) ${BRW_RUN} create で作業ブランチと worktree を作ります。2) できた worktree のパスを path に指定して EnterWorktree を呼ぶと、作業場所がその worktree に移ります。`,
+        `2') 承認を省けない環境や、EnterWorktree で移れない環境では、代わりに Bash で cd ${cdTarget} を実行すると、同じ worktree に作業場所を移せます。`,
         ...hint,
+        ...ENTER_REASONS,
       ], branch === "<名前>" ? null : wt);
     }
 
-    // path 指定: BRW の開発ブランチの worktree への切り替えだけを通す
-    const target = realOf(isAbsolute(path) ? path : resolve(cwd, path));
+    // path 指定: 生の入力の `..` は正規化（resolve）の前に検査し、判定できないとして止める（要件 2.4）
+    if (hasParentSegment(path))
+      return enterDenied("gate-enter-unresolved", "EnterWorktree の path に `..` を含むため、対象を確定できないため止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`, ENTER_CD_ALT], withEnterReasons(["path は `..` を含まない形で、配置先（.worktree/<名前>）の worktree を指定してください。"]));
+    const abs = isAbsolute(path) ? path : resolve(cwd, path);
+    const target = realOf(abs);
     const entry = list.slice(1).find((w) => realOf(w.path) === target);
-    // 配置先そのものが本体の外を指す（シンボリックリンク）ときは、配下と認めない
-    const placementDir = join(realOf(main), ".claude", "worktrees");
-    const placementSound = realOf(join(main, ".claude", "worktrees")) === placementDir;
-    const placed = relative(placementDir, target);
-    const underPlacement = placementSound && placed !== "" && !placed.startsWith("..") && !isAbsolute(placed);
-    if (entry && entry.branch && underPlacement && classifyBranch(config, entry.branch) === "development") return { verdict: "pass" };
-    const cause = !entry ? "git の worktree 一覧に載っていません"
-      : !underPlacement ? "本体の .claude/worktrees/ の配下にありません"
-      : !entry.branch ? "ブランチを使用していません（detached HEAD）"
-      : `使用中のブランチ '${entry.branch}' は宣言の開発ブランチではありません`;
-    return enterDenied("gate-enter-path", `指定された場所（${sanitize(String(path))}）は BRW の作業ブランチの worktree ではないため、EnterWorktree を止めます`, [
+    const pathDenied = (cause) => enterDenied("gate-enter-path", `指定された場所（${sanitize(String(path))}）は BRW の作業ブランチの worktree ではないため、EnterWorktree を止めます`, [
       `cd ${shellQuote(root)} && node ${shellQuote(BRW_CLI)} resume <ブランチ>`,
       "EnterWorktree を path に、brw resume が示した worktree を指定して呼ぶ",
     ], [
       `理由: ${cause}。`,
       `既存の作業ブランチへ入るときは、${BRW_RUN} resume でその worktree を用意してから、path に指定してください。新しく作るときは ${BRW_RUN} create <名前> を使います。`,
+      ...ENTER_REASONS,
     ]);
+    // 所属が判定できないときの拒否（配置先やその親がシンボリックリンクなど）。一覧に載るかどうかに関わらず同じ案内にする
+    const unresolvedZone = () => enterDenied("gate-enter-unresolved", "配置先の状態を判定できないため、EnterWorktree を止めます（シンボリックリンクなど）", [`node ${shellQuote(BRW_CLI)} check`, ENTER_CD_ALT], withEnterReasons([`配置先（.worktree/）やその親がシンボリックリンクなどのため、worktree の所属を確定できません。${BRW_RUN} check で導入の状態を確かめてから、作業場所を用意してください。`]));
+    // 一覧に無い場所は、worktree ではないため原則は従来の拒否。ただし所属を判定できない構成（シンボリックリンクなど）は判定不能として止める（要件 5.1）
+    if (!entry) return placementZone(main, abs) === "unknown" ? unresolvedZone() : pathDenied("git の worktree 一覧に載っていません");
+    // 一覧に載る worktree の所属（4 値）で分ける。判定できないときは止め、旧置き場は専用の拒否にする
+    const zone = placementZone(main, abs);
+    if (zone === "unknown") return unresolvedZone();
+    if (zone === "legacy") {
+      // 旧パス・新しい配置先・移動の手順（placement の案内）を載せる。ブランチが無いときは場所の名前で新しい配置先を示す
+      const g = legacyMoveGuidance(main, entry.branch ?? basename(entry.path), entry.path);
+      return enterDenied("gate-enter-legacy", `指定された場所（${sanitize(String(path))}）は旧置き場の worktree のため、EnterWorktree を止めます`, [g.next[1], g.next[2]], [
+        g.reason,
+        `先にロックされているときだけ: ${g.next[0]}`,
+        g.next[3],
+        ...ENTER_REASONS,
+      ]);
+    }
+    if (zone === "placement" && entry.branch && classifyBranch(config, entry.branch) === "development") return { verdict: "pass" };
+    const cause = zone !== "placement" ? `配置先（${placementRoot(main)}/<名前>）の worktree ではありません`
+      : !entry.branch ? "ブランチを使用していません（detached HEAD）"
+      : `使用中のブランチ '${entry.branch}' は宣言の開発ブランチではありません`;
+    return pathDenied(cause);
   } catch {
     return enterDenied("gate-enter-unresolved", "EnterWorktree の判定で内部エラーが起きたため、止めます", [`node ${shellQuote(BRW_CLI)} resume <ブランチ>`], [`判定を完了できませんでした。${BRW_RUN} create または ${BRW_RUN} resume で作業場所を用意してください。`]);
   }

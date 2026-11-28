@@ -10,10 +10,14 @@ import {
   readInstallConfig, parseState, buildState, decideInstall,
   removalTargets, buildManifest, npxArgs, messageInstalled, messageSkipped, messageReadSkillDirectly, messageBlocked, messageUsage
 } from './install-rules.mjs';
+import { stopOutput } from './stop-notice-rules.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const absolute = (rel, repoRoot = root) => path.join(repoRoot, rel);
 const writeOutput = (text) => fs.writeSync(1, text);
+// 入力を止めるとき: `decision: 'block'` ではなく、停止の案内と止める指示を追加の文脈で渡し、モデルに応答の文章を作らせる。
+// prompt は止めた入力（解析できなかったときは null）、reason は止めた理由と次にやること。
+const writeStop = (prompt, reason) => writeOutput(`${JSON.stringify(stopOutput({ prompt, reason }))}\n`);
 const writeRecord = (rel, text) => {
   fs.mkdirSync(path.dirname(absolute(rel)), { recursive: true });
   fs.writeFileSync(absolute(rel), text, 'utf8');
@@ -269,6 +273,8 @@ async function runSessionStart(tool) {
 }
 
 async function runUserPromptSubmit(tool) {
+  // 止めた入力。入力の解析に成功した後は、後続の例外でも停止の案内に入れる
+  let prompt = null;
   let installing = false;
   let rewriting = false;
   try {
@@ -276,6 +282,7 @@ async function runUserPromptSubmit(tool) {
     for await (const chunk of process.stdin) input += chunk;
     const event = JSON.parse(input);
     if (typeof event.prompt !== 'string') throw new Error('入力 JSON に prompt 文字列がありません。');
+    prompt = event.prompt;
     let facts = readInstallFacts();
     let decision = decideInstall(facts);
     if (decision.action === 'skip') {
@@ -283,12 +290,12 @@ async function runUserPromptSubmit(tool) {
       return;
     }
     if (decision.action === 'fail') {
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'failed', detail: decision.reason }) })}\n`);
+      writeStop(prompt, messageBlocked({ kind: 'failed', detail: decision.reason }));
       process.exitCode = 0;
       return;
     }
     if (decision.action === 'busy') {
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'busy', stale: decision.stale }) })}\n`);
+      writeStop(prompt, messageBlocked({ kind: 'busy', stale: decision.stale }));
       process.exitCode = 0;
       return;
     }
@@ -310,12 +317,12 @@ async function runUserPromptSubmit(tool) {
         return;
       }
       if (decision.action === 'fail') {
-        writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'failed', detail: decision.reason }) })}\n`);
+        writeStop(prompt, messageBlocked({ kind: 'failed', detail: decision.reason }));
         process.exitCode = 0;
         return;
       }
       if (decision.action === 'busy') {
-        writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'busy', stale: decision.stale }) })}\n`);
+        writeStop(prompt, messageBlocked({ kind: 'busy', stale: decision.stale }));
         process.exitCode = 0;
         return;
       }
@@ -331,14 +338,14 @@ async function runUserPromptSubmit(tool) {
         const facts = readInstallFacts();
         stale = facts.lock.present && facts.lock.ageMs > STALE_LOCK_MS;
       } catch { /* 印を読めない場合も、止める理由を下で示す */ }
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'busy', stale }) })}\n`);
+      writeStop(prompt, messageBlocked({ kind: 'busy', stale }));
     } else if (rewriting && error instanceof SectionRewriteError) {
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'section', detail: error.message }) })}\n`);
+      writeStop(prompt, messageBlocked({ kind: 'section', detail: error.message }));
     } else if (installing || (error instanceof Error && recordedInstallErrors.has(error))) {
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: messageBlocked({ kind: 'failed', detail: error.message }) })}\n`);
+      writeStop(prompt, messageBlocked({ kind: 'failed', detail: error.message }));
     } else {
       const detail = error instanceof Error ? error.message : String(error);
-      writeOutput(`${JSON.stringify({ decision: 'block', reason: `入力を止めています。判定できなかった理由: ${detail}\n通常の端末で次を実行して再試行してください: ${RETRY_COMMAND}` })}\n`);
+      writeStop(prompt, `入力を止めています。判定できなかった理由: ${detail}\n通常の端末で次を実行して再試行してください: ${RETRY_COMMAND}`);
     }
   }
   process.exitCode = 0;

@@ -177,9 +177,12 @@ export const runUserPromptSubmitChecks = async (eq) => {
     const t = fixture();
     record(t.dir);
     const plain = mkdtempSync(join(tmpdir(), "brw-94-home-"));
-    const wtLike = join(t.dir, ".claude", "worktrees", "x");
+    const wtLike = join(t.dir, ".worktree", "x");
     const found = runCli("claude", "UserPromptSubmit", upsOf("claude", plain), { env: { CLAUDE_PROJECT_DIR: wtLike } });
-    eq("brw-pr-handoff/9.4 cwd が Git の外でも、CLAUDE_PROJECT_DIR が <本体>/.claude/worktrees/<別名> なら本体の記録で案内する", [found.code, contextOf(found.out) !== null && contextOf(found.out) !== undefined], [0, true]);
+    eq("brw-pr-handoff/7.4 cwd が Git の外でも、CLAUDE_PROJECT_DIR が <本体>/.worktree/<別名> なら本体の記録で案内する", [found.code, contextOf(found.out) !== null && contextOf(found.out) !== undefined], [0, true]);
+    const legacyLike = join(t.dir, ".claude", "worktrees", "x");
+    const legacy = runCli("claude", "UserPromptSubmit", upsOf("claude", plain), { env: { CLAUDE_PROJECT_DIR: legacyLike } });
+    eq("brw-pr-handoff/7.4 CLAUDE_PROJECT_DIR が旧置き場の形（<本体>/.claude/worktrees/<別名>）なら、Git の外からは本体を導かず案内しない", [legacy.code, legacy.out], [0, ""]);
     const notWt = runCli("claude", "UserPromptSubmit", upsOf("claude", plain), { env: { CLAUDE_PROJECT_DIR: t.dir } });
     eq("brw-pr-handoff/9.4 CLAUDE_PROJECT_DIR が worktrees の形でなければ、Git の外からは案内しない", [notWt.code, notWt.out], [0, ""]);
     rmSync(plain, { recursive: true, force: true });
@@ -369,7 +372,19 @@ export const runUserPromptSubmitChecks = async (eq) => {
     t.cleanup();
   }
   {
-    // 作業場所（worktree）を削除した後の入力（Claude）: 作業場所は本体の .claude/worktrees/ の下にあり、CLAUDE_PROJECT_DIR も同じ場所を指す。その本体で付く
+    // 作業場所（worktree）を削除した後の入力（Claude）: 作業場所は本体の .worktree/ の下にあり、CLAUDE_PROJECT_DIR も同じ場所を指す。その本体で付く（要件 7.4）
+    const t = fixture({ branch: "dev/zz", pushed: false });
+    const wt = join(t.dir, ".worktree", "x");
+    mkdirSync(join(t.dir, ".worktree"), { recursive: true });
+    gitOut(t.dir, "worktree", "add", "-q", "-b", "dev/a", wt);
+    record(t.dir, { sessionId: null, at: ago(10 * 1000), branch: "dev/a" });
+    gitOut(t.dir, "worktree", "remove", "--force", wt);
+    withEnv({ CLAUDE_PROJECT_DIR: wt }, () => prEvent(t, { cwd: wt, response: claudeOk(finishOut(t.dir)) }));
+    eq("brw-pr-handoff/7.4 Claude: cwd が削除済みの作業場所（本体の .worktree/<別名>）なら、CLAUDE_PROJECT_DIR の本体の記録に付ける", sessionsOf(t), { "dev/a": SESSION });
+    t.cleanup();
+  }
+  {
+    // 旧置き場（本体の .claude/worktrees/<別名>）の形の CLAUDE_PROJECT_DIR では本体を導かない。cwd が削除済みなので付けない側に倒す（要件 7.4）
     const t = fixture({ branch: "dev/zz", pushed: false });
     const wt = join(t.dir, ".claude", "worktrees", "x");
     mkdirSync(join(t.dir, ".claude", "worktrees"), { recursive: true });
@@ -377,7 +392,7 @@ export const runUserPromptSubmitChecks = async (eq) => {
     record(t.dir, { sessionId: null, at: ago(10 * 1000), branch: "dev/a" });
     gitOut(t.dir, "worktree", "remove", "--force", wt);
     withEnv({ CLAUDE_PROJECT_DIR: wt }, () => prEvent(t, { cwd: wt, response: claudeOk(finishOut(t.dir)) }));
-    eq("brw-pr-handoff/9.4 Claude: cwd が削除済みの作業場所（本体の .claude/worktrees/ の下）なら、CLAUDE_PROJECT_DIR の本体の記録に付ける", sessionsOf(t), { "dev/a": SESSION });
+    eq("brw-pr-handoff/7.4 Claude: CLAUDE_PROJECT_DIR が旧置き場の形（本体の .claude/worktrees/<別名>）なら、削除済みの cwd からは本体を導かず、記録に付けない", sessionsOf(t), { "dev/a": null });
     t.cleanup();
   }
   {
@@ -390,7 +405,7 @@ export const runUserPromptSubmitChecks = async (eq) => {
       gitOut(b.dir, "worktree", "remove", "--force", b.wt);
       const out = finishOut(b.dir);
       const command = `cd ${b.wt} && node ${BRW} pr --title 件名`;
-      withEnv({ CLAUDE_PROJECT_DIR: join(a.dir, ".claude", "worktrees", "x") }, () => prEvent(a, { host, cwd: a.dir, command, response: host === "claude" ? claudeOk(out) : out }));
+      withEnv({ CLAUDE_PROJECT_DIR: join(a.dir, ".worktree", "x") }, () => prEvent(a, { host, cwd: a.dir, command, response: host === "claude" ? claudeOk(out) : out }));
       eq(`brw-pr-handoff/9.4 ${host}: cd 先が別リポジトリの削除済みの作業場所なら、CLAUDE_PROJECT_DIR が A を指していても、A の記録に付けない`, [sessionsOf(a), sessionsOf(b)], [{ "dev/a": null }, { "dev/a": null }]);
       a.cleanup();
       b.cleanup();
@@ -447,7 +462,7 @@ export const runUserPromptSubmitChecks = async (eq) => {
       record(a.dir, { sessionId: null, at: ago(10 * 1000), branch: "dev/a" });
       const plain = mkdtempSync(join(tmpdir(), "brw-94-plain-"));
       const out = finishOut(a.dir);
-      withEnv({ CLAUDE_PROJECT_DIR: join(a.dir, ".claude", "worktrees", "x") }, () => prEvent(a, { host, cwd: plain, response: host === "claude" ? claudeOk(out) : out }));
+      withEnv({ CLAUDE_PROJECT_DIR: join(a.dir, ".worktree", "x") }, () => prEvent(a, { host, cwd: plain, response: host === "claude" ? claudeOk(out) : out }));
       eq(`brw-pr-handoff/9.4 ${host}: 存在する Git の外の実行先の brw pr は、CLAUDE_PROJECT_DIR が A を指していても、A の記録に付けない`, sessionsOf(a), { "dev/a": null });
       rmSync(plain, { recursive: true, force: true });
       a.cleanup();

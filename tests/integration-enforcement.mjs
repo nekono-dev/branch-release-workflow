@@ -147,7 +147,7 @@ export const runIntegrationEnforcementChecks = async (eq) => {
   const createFoo = (repo) => {
     const c = brw(repo, repo.dir, ["create", "foo"]);
     if (c.status !== 0) throw new Error(`brw create が失敗: ${c.stderr}`);
-    return join(repo.dir, ".claude/worktrees/dev-foo");
+    return join(repo.dir, ".worktree/dev-foo");
   };
   /** 既存のブランチ（または新しいブランチ）を別の worktree で開き、そのパスを返す。 */
   const worktreeOf = (repo, { branch, newBranch } = {}) => {
@@ -228,7 +228,7 @@ export const runIntegrationEnforcementChecks = async (eq) => {
     // ================================================================
     {
       const r = newRepo();
-      const wt = createFoo(r);
+      let wt = createFoo(r);
       commitAndPush(r, wt, "a.txt", "a");
       commitAndPush(r, wt, "b.txt", "b");
       // 区切り（直前に push した状態）の commit と履歴を覚える
@@ -241,6 +241,7 @@ export const runIntegrationEnforcementChecks = async (eq) => {
       git(r, r.dir, "worktree", "remove", "--force", wt);
       git(r, r.dir, "branch", "-D", "dev/foo");
       eq("integration/19.1 再開の前に、手元の worktree とローカルブランチが無いことを確かめる", [existsSync(wt), localRefExists(r, "dev/foo")], [false, false]);
+      wt = join(r.dir, ".worktree/dev-foo");
       const res = brw(r, r.dir, ["resume", "dev/foo"]);
       eq("integration/19.1 リモートのブランチから resume で worktree を作り直し、直前の区切りの commit が揃う", [res.status, existsSync(wt), git(r, wt, "rev-parse", "HEAD") === savedHead, git(r, wt, "log", "--format=%s", "HEAD") === savedLog], [0, true, true, true]);
       eq("integration/19.1 直前の区切りまでのファイルの内容が揃う", [readFileSync(join(wt, "a.txt"), "utf8"), readFileSync(join(wt, "b.txt"), "utf8")], ["a", "b"]);

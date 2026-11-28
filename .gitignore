@@ -1,3 +1,6 @@
+# worktree の置き場（BRW が <本体>/.worktree/ の下に作る。Claude・Codex など共通）
+/.worktree/
+
 # >>> cc-sdd-bootstrap
 .claude/skills/kiro-*/
 .agents/skills/kiro-*/

@@ -18,6 +18,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agent-hooks/cc-sdd-bootstrap/freshness.mjs\" session-start --tool claude",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

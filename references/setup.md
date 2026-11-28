@@ -11,7 +11,7 @@
    - 保護ブランチ（本番デプロイが走るブランチ。例: `main`）
    - プレビューの有無と公開先の URL の形
 2. `assets/config.example.json` を元に、本体の作業ツリーへ `.branch-release-workflow.json` を書く。
-3. `brw create <名前>`（例: `add-branch-release-workflow`）で導入用の作業ブランチを作る。宣言は分岐元にまだ無いので、新しい worktree へ移る。
+3. `brw create <名前>`（例: `add-branch-release-workflow`）で導入用の作業ブランチを作る。宣言は分岐元にまだ無いので、新しい worktree（`<本体>/.worktree/<alias>`）へ移る。導入先では `.worktree/` を無視する設定（`.gitignore` に `/.worktree/`）を追加する（BRW は書き換えず、無視されていないと作成・再開の成功後に警告する）。旧置き場（`.claude/worktrees/`）の worktree が残っているときは、SKILL.md の「worktree の配置先と旧置き場」の手順で手で移す。
 4. その worktree で `brw check` を実行し、workflow との整合を確かめる（未登録の宣言は ERROR になる。commit 後に消える）。プレビューの workflow が無ければ `brw gen-workflow` で雛形を示す。
 5. 宣言を commit する。リポジトリ単位でプラグインを有効にする場合（下の 2 章）は、`.claude/settings.json` も同じ commit に入れる。
 6. push し、分岐元へ取り込む（プルリクエストなど、リポジトリの流れに従う）。取り込まれるまでは、ほかのブランチでは宣言が見えない。

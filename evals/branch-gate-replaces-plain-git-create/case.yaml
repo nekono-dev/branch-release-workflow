@@ -1,6 +1,6 @@
 schema_version: "1.1"
 name: branch-gate-replaces-plain-git-create
 expected_outcome: |
-  main をチェックアウトした状態で、依頼が「通常のブランチを作って作業する」だけでも、素の git switch -c が BRW の置き換えまたは拒否の案内に従って brw create に収束する。作業は dev/ の worktree（.claude/worktrees/ 配下）の中で行い、develop と main には commit しない。EnterWorktree は name 指定では使わない。
+  main をチェックアウトした状態で、依頼が「通常のブランチを作って作業する」だけでも、素の git switch -c が BRW の置き換えまたは拒否の案内に従って brw create に収束する。作業は dev/ の worktree（.worktree/ 配下）の中で行い、develop と main には commit しない。EnterWorktree は name 指定では使わない。
 context:
   scaffold_script: place-files.sh

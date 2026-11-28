@@ -38,7 +38,7 @@
 - 専用コマンド（`brw sync` など）の新設。
 - GitHub 側の設定（Ruleset）。
 - プラグインの導入状態の検査（BRW 自身のリポジトリでプラグインが未導入のまま気づけない問題）。必要なら brw-enforcement 要件 6 の別の拡張として扱う。
-- cc-sdd-bootstrap 側の対応（既定ブランチ `main` が空、導入コピーの古さの検知など）。メモは `.kiro/discovery-notes/2026-11-26-base-branch-sync.md`。
+- cc-sdd-bootstrap 側の対応（既定ブランチ `main` が空、導入コピーの古さの検知など）。
 
 ## Upstream / Downstream
 - **Upstream**: brw-enforcement（フック判定・`evalMerge`・宣言の読み込み・拒否の案内）。
