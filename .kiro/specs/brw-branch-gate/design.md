@@ -412,7 +412,7 @@ BRW 案内: 置き換え | 拒否
 - Codex の手順書の経路（`brw guard`）は、現在は commit・push の旧来の判定だけを呼ぶ。作成・再開の拒否を同じ文面で返すため、`guard` は先に共通の判定（`classifyCommand` と `evaluateAll`）を呼び、拒否があれば案内を表示して終了する形に変える。この変更は brw-pr-handoff（`gh pr create` の拒否）と共有する入口なので、先に実装する側が作り、他方は再利用する。
 - 判定層の拒否のうち、対象を確定できない拒否（`unresolved`）は `planGate` に渡さず、既存の理由に共通の案内の見出し（書式の 4 行）を付けて返す。これにより、どの拒否でも見出しと「次のコマンド」の行が揃う（要件 4.2）。
 - `--carry` は、分岐元の取得後の開始点（`origin/<分岐元>`）が元の作業ツリーの `HEAD` と同じときだけ移す。手元の分岐元が古いときは失敗し、案内に「先に `git pull` するか、移さずに作る」を含める。
-- EnterWorktree の `path` の許可は、「`.claude/worktrees/` の配下にあり、`git worktree list` に載り、開発ブランチを指す」ことを BRW の来歴の確認とする（BRW が作ったという記録は持たない。`brw resume` が作る worktree も同じ条件を満たす）。
+- EnterWorktree の `path` の許可は、「配置先（`<本体>/.worktree/` の配下。2026-11-28 の更新）にあり、`git worktree list` に載り、開発ブランチを指す」ことを BRW の来歴の確認とする（BRW が作ったという記録は持たない。`brw resume` が作る worktree も同じ条件を満たす）。
 
 ## データモデル
 
@@ -470,7 +470,7 @@ BRW 案内: 置き換え | 拒否
 
 ### 実機（`claude -p`、`tests/real-env/` の方式）
 - 使い捨てリポジトリで、`git switch -c` の置き換え後に次の Bash 呼び出しの `pwd` が `<本体>/.worktree/<別名>` であること。EnterWorktree の `name` が拒否され、案内に従って `brw create` で作った worktree へ、Bash の `cd` で移れること（PoC #5・#9 の再現。2026-11-28 の更新で、`.worktree/` への EnterWorktree の承認は人の確認が要るため、`cd` で確かめる）。
-- `.worktree/<別名>` で開始したセッションでフックが届き、`mainOfStart` が `CLAUDE_PROJECT_DIR` から本体を導くこと（`poc/design_01.md` の 2）。Codex の linked worktree（`.worktree/<別名>`）でフックが届くこと（読み込みは `poc/design_03.md` で確認済み。実セッションでの発火を `brw create` の実機で再確認する）。
+- `.worktree/<別名>` で開始したセッションでフックが届き、`mainOfStart` が `CLAUDE_PROJECT_DIR` から本体を導くこと（`poc/design_01.md` の 2）。Codex の linked worktree（`.worktree/<別名>`）で、本体の `.codex/hooks.json` が読み込まれること（`poc/design_03.md` の方法で再確認する。実セッションでの発火は、旧置き場で確認済みの規則と同じ読み込みに依存するため、新配置先での再確認の対象にしない）。
 
 ## 運用上のリスク（2026-11-28 の更新）
 
