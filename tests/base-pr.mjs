@@ -363,6 +363,11 @@ export const runBasePrChecks = async (eq) => {
       }
       eq("brw-pr-handoff/7.3 p 本文の場所が許可外（外の絶対パス・..・外部のシンボリックリンク・ディレクトリ・存在しない）なら止まる", results, Object.keys(cases).map(() => [1, true]));
       eq("brw-pr-handoff/7.3 p 拒否のとき fetch・通信・書き込みは 0 件、HEAD 不変", [sshLines(s).length, gh.fake.requests.length, gh.fake.writeCount, headOf(s) === headBefore], [0, 0, 0, true]);
+      // 旧置き場の本文の拒否の案内は、移し方（mkdir -p・mv）と新しい置き場の絶対パスを示す（要件 3.9・3.11）
+      const legacyFile = join(s.w, ".claude", "worktrees", ".brw", "develop.md");
+      const newFile = join(s.w, ".worktree", ".brw", "develop.md");
+      const lx = await run(s, { args: ["--title", TITLE, "--body-file", legacyFile], gh: github() });
+      eq("brw-pr-handoff/3.11 旧置き場の本文の拒否の案内に、mv と新置き場の絶対パスを含む", [lx.code, lx.err.includes("mv "), lx.err.includes(newFile), lx.err.includes("mkdir -p")], [1, true, true, true]);
     } finally { s.restore(); }
   }
 

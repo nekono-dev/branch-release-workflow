@@ -227,7 +227,7 @@
   - 完了の状態: `brw pr-template` が示す本文の場所と `brw pr` が受け付ける場所が `.worktree/.brw/` で、旧置き場の本文は拒否される。`tests/placement-integration.mjs` の `.brw` の許可リストを新しい置き場に合わせ、`scripts/` に旧置き場の文字列が `placement.mjs`（配置先の旧置き場の判定と案内）以外に残らない。
   - _Boundary: 本文置き場、フックの本文パス判定_
   - _Requirements: 3.9, 3.11, 3.12_
-- [ ] 10.2 試験・手順書・配布の版を新しい置き場に合わせる
+- [x] 10.2 試験・手順書・配布の版を新しい置き場に合わせる
   - `tests/` の本文置き場を使う試験（pr-template・publish・cleanup・integration・user-prompt-submit など）と、SKILL.md・references・`tests/real-env/README.md` の記述を `.worktree/.brw/` に合わせ、`.claude-plugin/plugin.json` の版を上げる。旧置き場の本文を拒否する試験を足す。
   - 完了の状態: 自己テストが通信なしで全件通り、手順書の本文置き場の記述がすべて `.worktree/.brw/` になる（旧置き場は「拒否・移し方」の説明に限る）。
   - _Boundary: 試験、手順書、配布_
