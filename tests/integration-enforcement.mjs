@@ -241,8 +241,7 @@ export const runIntegrationEnforcementChecks = async (eq) => {
       git(r, r.dir, "worktree", "remove", "--force", wt);
       git(r, r.dir, "branch", "-D", "dev/foo");
       eq("integration/19.1 再開の前に、手元の worktree とローカルブランチが無いことを確かめる", [existsSync(wt), localRefExists(r, "dev/foo")], [false, false]);
-      // resume は 6.5 まで旧置き場に作るため、再開後の確認は旧置き場のパスを使う（create の配置先は .worktree/）
-      wt = join(r.dir, ".claude/worktrees/dev-foo");
+      wt = join(r.dir, ".worktree/dev-foo");
       const res = brw(r, r.dir, ["resume", "dev/foo"]);
       eq("integration/19.1 リモートのブランチから resume で worktree を作り直し、直前の区切りの commit が揃う", [res.status, existsSync(wt), git(r, wt, "rev-parse", "HEAD") === savedHead, git(r, wt, "log", "--format=%s", "HEAD") === savedLog], [0, true, true, true]);
       eq("integration/19.1 直前の区切りまでのファイルの内容が揃う", [readFileSync(join(wt, "a.txt"), "utf8"), readFileSync(join(wt, "b.txt"), "utf8")], ["a", "b"]);

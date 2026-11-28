@@ -271,8 +271,8 @@ g(subWt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--ini
 g(subWt, "push", "-q", "origin", "dev/fin-sub");
 land("dev/fin-sub");
 eq("branch-guard/AC-8 submodule を含む worktree も片付けられる", [run(subWt, "finish").status, existsSync(subWt)], [0, false]);
-// resume は 6.5 まで旧置き場に作るため、resume の結果の確認は旧置き場のパスを使う（create の配置先は .worktree/）
-const finResumeWt = join(fin, ".claude/worktrees/dev-fin-work");
+// resume の作る場所も配置先（.worktree/）に揃えてある（brw-branch-gate 7.2）
+const finResumeWt = join(fin, ".worktree/dev-fin-work");
 eq("branch-guard/AC-9 リモートのブランチから worktree を作り直せる", run(fin, "resume", "dev/fin-work").status, 0);
 eq("branch-guard/AC-9 作り直した worktree はリモートの commit を持ち、追跡先がリモートになる", [
   spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finResumeWt, encoding: "utf8" }).stdout.trim(),

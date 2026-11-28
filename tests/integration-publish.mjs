@@ -172,9 +172,8 @@ export const runIntegrationPublishChecks = async (eq) => {
     // 作業ブランチを一度外し、遠隔から再開する（resume）
     git(dev, dev.dir, "worktree", "remove", "--force", wt1);
     git(dev, dev.dir, "branch", "-D", "dev/int-one");
-    // resume は 6.5 まで旧置き場に作るため、resume の結果の確認は旧置き場のパスを使う（create の配置先は .worktree/）
     const resumed = brw(dev, ["resume", "dev/int-one"]);
-    const resumedWt = join(dev.dir, ".claude/worktrees/dev-int-one");
+    const resumedWt = join(dev.dir, ".worktree/dev-int-one");
     eq("integration/8.1 resume は遠隔の commit を持つ worktree を作り直す", [resumed.status, existsSync(resumedWt), git(dev, resumedWt, "log", "-1", "--format=%s")], [0, true, "one"]);
     const created2 = brw(dev, ["create", "int-two"]);
     const wt2 = join(dev.dir, ".worktree/dev-int-two");
