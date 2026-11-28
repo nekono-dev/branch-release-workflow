@@ -155,7 +155,7 @@ prRepo.cleanup();
 const newSetup = mkRepo("develop", null);
 writeFileSync(join(newSetup, ".branch-release-workflow.json"), JSON.stringify(cfg));
 eq("branch-guard/AC-12 未登録の共通宣言で worktree を作成できる", run(newSetup, "create", "shared-setup").status, 0);
-eq("branch-guard/AC-12 共通宣言は新規 worktree へ移される", existsSync(join(newSetup, ".claude/worktrees/dev-shared-setup/.branch-release-workflow.json")), true);
+eq("branch-guard/AC-12 共通宣言は新規 worktree へ移される", existsSync(join(newSetup, ".worktree/dev-shared-setup/.branch-release-workflow.json")), true);
 const skillsDir = mkdtempSync(join(tmpdir(), "brw-skills-"));
 const install = () => spawnSync("node", [join(root, "scripts/install-codex.mjs"), "--skills-dir", skillsDir], { encoding: "utf8" });
 eq("branch-guard/AC-13 Codex skill をリンクできる", install().status, 0);
@@ -205,7 +205,7 @@ eq("branch-guard/AC-5 規則に合う名前は作成される", run(created, "cr
 // 導入: 未登録の宣言は新しい worktree へ移り、そこで commit すると登録される
 const setup = mkRepo("develop", cfg, { register: false });
 eq("branch-guard/AC-11 未登録の宣言は整合検査でエラー", run(setup, "check").status, 1);
-const setupWt = join(setup, ".claude/worktrees/dev-setup");
+const setupWt = join(setup, ".worktree/dev-setup");
 eq("branch-guard/AC-11 作業ブランチを作ると未登録の宣言が worktree へ移る", [run(setup, "create", "setup").status, existsSync(join(setupWt, ".claude/branch-release-workflow.json")), existsSync(join(setup, ".claude/branch-release-workflow.json"))], [0, true, false]);
 g(setupWt, "add", ".claude/branch-release-workflow.json");
 g(setupWt, "commit", "-q", "-m", "宣言");
@@ -230,7 +230,7 @@ const land = (branch, { squash = false } = {}) => {
   g(tmp, "push", "-q", "origin", "develop");
 };
 run(fin, "create", "fin-work");
-const finWt = join(fin, ".claude/worktrees/dev-fin-work");
+const finWt = join(fin, ".worktree/dev-fin-work");
 writeFileSync(join(finWt, "a.txt"), "a");
 g(finWt, "add", "a.txt");
 g(finWt, "commit", "-q", "-m", "w");
@@ -245,7 +245,7 @@ eq("branch-guard/AC-8 切り出し元へ取り込まれていれば worktree の
 eq("branch-guard/AC-8 worktree とローカルブランチが消える", [existsSync(finWt), hasBranch("dev/fin-work")], [false, false]);
 eq("branch-guard/AC-8 作業ブランチでなければ片付けない", run(fin, "finish", "develop").status, 1);
 run(fin, "create", "fin-squash");
-const sqWt = join(fin, ".claude/worktrees/dev-fin-squash");
+const sqWt = join(fin, ".worktree/dev-fin-squash");
 writeFileSync(join(sqWt, "b.txt"), "b");
 g(sqWt, "add", "b.txt");
 g(sqWt, "commit", "-q", "-m", "b1");
@@ -254,7 +254,7 @@ g(sqWt, "commit", "-q", "-am", "b2");
 g(sqWt, "push", "-q", "origin", "dev/fin-squash");
 land("dev/fin-squash", { squash: true });
 run(fin, "create", "fin-open");
-const openWt = join(fin, ".claude/worktrees/dev-fin-open");
+const openWt = join(fin, ".worktree/dev-fin-open");
 g(openWt, "commit", "-q", "--allow-empty", "-m", "o");
 g(openWt, "push", "-q", "origin", "dev/fin-open");
 const swept = run(fin, "finish", "--merged");
@@ -266,15 +266,17 @@ g(fin, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
 g(fin, "commit", "-q", "-m", "sub");
 g(fin, "push", "-q", "origin", "develop");
 run(fin, "create", "fin-sub");
-const subWt = join(fin, ".claude/worktrees/dev-fin-sub");
+const subWt = join(fin, ".worktree/dev-fin-sub");
 g(subWt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init");
 g(subWt, "push", "-q", "origin", "dev/fin-sub");
 land("dev/fin-sub");
 eq("branch-guard/AC-8 submodule を含む worktree も片付けられる", [run(subWt, "finish").status, existsSync(subWt)], [0, false]);
+// resume は 6.5 まで旧置き場に作るため、resume の結果の確認は旧置き場のパスを使う（create の配置先は .worktree/）
+const finResumeWt = join(fin, ".claude/worktrees/dev-fin-work");
 eq("branch-guard/AC-9 リモートのブランチから worktree を作り直せる", run(fin, "resume", "dev/fin-work").status, 0);
 eq("branch-guard/AC-9 作り直した worktree はリモートの commit を持ち、追跡先がリモートになる", [
-  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
-  spawnSync("git", ["rev-parse", "--abbrev-ref", "@{u}"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
+  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finResumeWt, encoding: "utf8" }).stdout.trim(),
+  spawnSync("git", ["rev-parse", "--abbrev-ref", "@{u}"], { cwd: finResumeWt, encoding: "utf8" }).stdout.trim(),
 ], ["w", "origin/dev/fin-work"]);
 // 別の環境から push された更新は、残っている worktree へ取り込んでから使う
 const other = mkdtempSync(join(tmpdir(), "brw-other-"));
@@ -283,7 +285,7 @@ g(other, "commit", "-q", "--allow-empty", "-m", "from-other");
 g(other, "push", "-q", "origin", "dev/fin-work");
 eq("branch-guard/AC-9 worktree が残っていれば、リモートの更新を取り込んで使う", [
   run(fin, "resume", "dev/fin-work").status,
-  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finWt, encoding: "utf8" }).stdout.trim(),
+  spawnSync("git", ["log", "-1", "--format=%s"], { cwd: finResumeWt, encoding: "utf8" }).stdout.trim(),
 ], [0, "from-other"]);
 
 // ---- 作業ブランチ運用の操作の確認を省く（autoApprove） ----

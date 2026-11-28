@@ -54,6 +54,7 @@ import { resolveTarget } from "./base-sync.mjs";
 import { previewTidy } from "./tidy.mjs";
 import * as publishState from "./publish.mjs";
 import { runSetup, runStateCheck } from "./setup-cli.mjs";
+import { ignoreStatus, ignoreWarning, placementOf, placementRoot, placementZone } from "./placement.mjs";
 
 // ---- フック用: シェルコマンドから git commit / push を抽出 --------------------------
 
@@ -462,12 +463,15 @@ function create(args) {
     console.log(`ブランチを作成しました: ${branch}（分岐元: ${start}）`);
     if (unregistered) console.log(`注意: ${rel} は ${start} に登録されていません。このブランチで commit して登録してください。`);
   } else {
-    // 配置先は常にリポジトリ本体の .claude/worktrees/（連携 worktree から実行しても入れ子にしない）
+    // 配置先は常にリポジトリ本体の .worktree/（連携 worktree から実行しても入れ子にしない。brw-branch-gate 7.1・7.3）
     const main = worktrees(root)[0]?.path ?? root;
-    const wt = join(main, ".claude/worktrees", aliasOf(branch));
+    const wt = placementOf(main, branch);
+    // 配置先やその親がシンボリックリンクなどで所属を判定できないときは、worktree を作る前に止める（5.1）
+    if (placementZone(main, wt) === "unknown")
+      fail("配置先の状態を判定できません（配置先やその親のディレクトリがシンボリックリンクなど。この構成には対応していません）。worktree とブランチは作っていません。");
     if (existsSync(wt) || worktrees(root).some((w) => w.path === wt))
       fail(`配置先 ${wt} が既に存在する、または worktree として登録されているため、worktree を作りません（既存のものは変更していません）。`);
-    mkdirSync(join(main, ".claude/worktrees"), { recursive: true });
+    mkdirSync(placementRoot(main), { recursive: true });
     try {
       execFileSync("git", ["worktree", "add", "--no-track", "-b", branch, wt, start], { cwd: root, stdio: "inherit" });
     } catch (error) {
@@ -489,6 +493,12 @@ function create(args) {
       }
     }
     if (carry) carryInto({ root, main, wt, branch, start, rel, moved });
+    // 最終成功の後に、配置先が無視されていなければ警告を 1 回だけ出す（巻き戻しで止まったときはここに来ない。導入先の設定は書き換えない）
+    if (ignoreStatus(main) === "not-ignored") {
+      const [first, ...rest] = ignoreWarning();
+      console.log(`警告: ${first}`);
+      for (const line of rest) console.log(line);
+    }
   }
   git(root, "config", `branch.${branch}.brwBase`, base); // finish が取り込み先を判定するため
   const url = previewUrl(config, branch);
