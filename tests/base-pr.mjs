@@ -115,8 +115,8 @@ const setup = ({ config = CONFIG, withDiff = true } = {}) => {
     mkdirSync(w);
     git(w, "init", "-q", "-b", "main");
     git(w, "remote", "add", "origin", ORIGIN_URL);
-    // 本文の置き場（.claude/worktrees/.brw/）は作業ツリーから除外する（未コミットの件数に含めない）
-    writeFileSync(join(w, ".gitignore"), ".claude/\n");
+    // 本文の置き場（.worktree/.brw/）は作業ツリーから除外する（未コミットの件数に含めない）
+    writeFileSync(join(w, ".gitignore"), ".claude/\n.worktree/\n");
     writeFileSync(join(w, ".branch-release-workflow.json"), JSON.stringify(config));
     writeFileSync(join(w, "init.txt"), "init\n");
     git(w, "add", "-A");
@@ -128,8 +128,8 @@ const setup = ({ config = CONFIG, withDiff = true } = {}) => {
     git(root, "clone", "-q", "-b", "develop", ORIGIN_URL, other);
     // 準備の push の記録は数えない（試験の対象の操作だけを数える）
     writeFileSync(sshLog, "");
-    // 既定の本文の置き場（絶対パス。本体の worktree の .claude/worktrees/.brw/ の配下）
-    const bodyDir = join(w, ".claude", "worktrees", ".brw");
+    // 既定の本文の置き場（絶対パス。本体の配置先の .worktree/.brw/ の配下）
+    const bodyDir = join(w, ".worktree", ".brw");
     mkdirSync(bodyDir, { recursive: true });
     const body = join(bodyDir, "develop.md");
     writeFileSync(body, BODY);
@@ -339,6 +339,9 @@ export const runBasePrChecks = async (eq) => {
       const outside = join(s.root, "outside.md");
       writeFileSync(outside, BODY);
       const link = join(s.bodyDir, "link.md");
+      // 旧置き場の本文（実体は存在する。新しい置き場の外なので拒否される）
+      mkdirSync(join(s.w, ".claude", "worktrees", ".brw"), { recursive: true });
+      writeFileSync(join(s.w, ".claude", "worktrees", ".brw", "develop.md"), BODY);
       symlinkSync(outside, link);
       const dir = join(s.bodyDir, "sub");
       mkdirSync(dir);
@@ -348,6 +351,8 @@ export const runBasePrChecks = async (eq) => {
         "外部を指すシンボリックリンク": link,
         "ディレクトリ": dir,
         "存在しない": join(s.bodyDir, "none.md"),
+        // 旧置き場（.claude/worktrees/.brw/）の配下の絶対パスは受け付けず、移し方を示して拒否する
+        "旧置き場の本文": join(s.w, ".claude", "worktrees", ".brw", "develop.md"),
       };
       const gh = github();
       const headBefore = headOf(s);
@@ -358,6 +363,26 @@ export const runBasePrChecks = async (eq) => {
       }
       eq("brw-pr-handoff/7.3 p 本文の場所が許可外（外の絶対パス・..・外部のシンボリックリンク・ディレクトリ・存在しない）なら止まる", results, Object.keys(cases).map(() => [1, true]));
       eq("brw-pr-handoff/7.3 p 拒否のとき fetch・通信・書き込みは 0 件、HEAD 不変", [sshLines(s).length, gh.fake.requests.length, gh.fake.writeCount, headOf(s) === headBefore], [0, 0, 0, true]);
+      // 旧置き場の本文の拒否の案内は、移し方（mkdir -p・mv）と新しい置き場の絶対パスを示す（要件 3.9・3.11）
+      const legacyFile = join(s.w, ".claude", "worktrees", ".brw", "develop.md");
+      const newFile = join(s.w, ".worktree", ".brw", "develop.md");
+      const lx = await run(s, { args: ["--title", TITLE, "--body-file", legacyFile], gh: github() });
+      eq("brw-pr-handoff/3.11 旧置き場の本文の拒否の案内に、mv と新置き場の絶対パスを含む", [lx.code, lx.err.includes("mv "), lx.err.includes(newFile), lx.err.includes("mkdir -p")], [1, true, true, true]);
+    } finally { s.restore(); }
+  }
+
+  // p3. 本文置き場（.worktree/.brw）がリンクで旧置き場（.claude/worktrees/.brw）を指すとき、旧置き場の本文は読まない（要件 3.12）
+  {
+    const s = setup();
+    try {
+      const legacy = join(s.w, ".claude", "worktrees", ".brw");
+      mkdirSync(legacy, { recursive: true });
+      writeFileSync(join(legacy, "develop.md"), BODY);
+      rmSync(s.bodyDir, { recursive: true, force: true });
+      symlinkSync(legacy, s.bodyDir);
+      const gh = github();
+      const x = await run(s, { args: ["--title", TITLE, "--body-file", join(s.bodyDir, "develop.md")], gh });
+      eq("brw-pr-handoff/3.12 本文置き場がリンクで旧置き場を指すとき、旧置き場の本文を読まず、通信の前に止まる", [x.code, x.err.length > 0, sshLines(s).length, gh.fake.requests.length, gh.fake.writeCount], [1, true, 0, 0, 0]);
     } finally { s.restore(); }
   }
 
@@ -367,7 +392,7 @@ export const runBasePrChecks = async (eq) => {
     try {
       const oid = refOf(s, "refs/heads/develop");
       const gh = github({ routes: { [POST]: { status: 201, body: PR(oid) } } });
-      const rel = join(".claude", "worktrees", ".brw", "rel.md");
+      const rel = join(".worktree", ".brw", "rel.md");
       writeFileSync(join(s.w, rel), "相対パスの本文\n");
       const x = await run(s, { args: ["--title", TITLE, "--body-file", rel], gh });
       eq("brw-pr-handoff/7.3 p2 作業ディレクトリ配下の相対パスの本文を読み、PR を作成する", [x.code, gh.fake.writeCount, gh.fake.applied[0]?.body?.body], [0, 1, "相対パスの本文\n"]);

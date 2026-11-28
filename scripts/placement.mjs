@@ -3,17 +3,47 @@
 // 判定は「worktree のルートを実体のパスにし、その親ディレクトリが配置先・旧置き場に等しいか」の一致だけで行う（research.md の D6）。
 // 副作用を持たない（ファイル・git を変えない）。Node 標準ライブラリと lib.mjs の aliasOf だけを使う。
 import { spawnSync } from "node:child_process";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { aliasOf } from "./lib.mjs";
 
 const PLACEMENT_DIR = ".worktree";
 const LEGACY_DIR = join(".claude", "worktrees");
-const BRW_DIR = ".brw";
+export const BRW_DIR = ".brw";
 
 /** 配置先のディレクトリ（`<main>/.worktree`）。main は本体の作業ツリーの絶対パス */
 export function placementRoot(main) {
   return join(main, PLACEMENT_DIR);
+}
+
+/** 本文置き場（`<main>/.worktree/.brw`）。配置先の配下で、worktree ではない */
+export function bodyDirOf(main) {
+  return join(placementRoot(main), BRW_DIR);
+}
+
+/**
+ * 本文置き場の実体のルート（`<本体の実体>/.worktree/.brw`）。存在するディレクトリで、実体のパスがこの場所と一致するときだけ返す。
+ * 置き場そのものがリンク（旧置き場などを指す）・親（`.worktree`）がリンクのときは null。読み取り・フックの許可・削除は、この値が無いときは使わない。
+ */
+export function bodyRootOf(main) {
+  let mainReal;
+  try {
+    mainReal = realpathSync(main);
+  } catch {
+    return null;
+  }
+  const expected = join(mainReal, PLACEMENT_DIR, BRW_DIR);
+  try {
+    const real = realpathSync(expected);
+    return real === expected && statSync(real).isDirectory() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 旧い本文置き場（`<main>/.claude/worktrees/.brw`）。新しい配置では使わず、拒否の判定にだけ使う */
+export function legacyBodyDirOf(main) {
+  return join(main, LEGACY_DIR, BRW_DIR);
 }
 
 /** ブランチの worktree の配置先（`<main>/.worktree/<別名>`。別名は aliasOf の規則） */
@@ -108,7 +138,7 @@ export function isLegacyPlacement(main, target) {
 }
 
 // シェルの 1 語として安全に渡す形にする。安全な文字だけなら無引用、それ以外は単引用符で囲み、内側の ' は '\'' にする
-const shQuote = (s) => /^[A-Za-z0-9_/.:=@+,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+export const shQuote = (s) => /^[A-Za-z0-9_/.:=@+,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
 
 /**
  * 旧置き場の worktree を配置先へ移す手順の案内。BRW は自動で移さない（worktree・ブランチ・変更に触れない）。

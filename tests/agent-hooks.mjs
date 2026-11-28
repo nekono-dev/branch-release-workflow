@@ -384,7 +384,7 @@ b"`), dir), null);
     // brw-pr-handoff 6.1: 信頼済みの brw pr だけが確認省略の対象
     {
       const pr = (extra = "") => `node ${BRW} pr --title "${TITLE}" --completion "完了した" --verification "確認した" ${extra}`.trim();
-      const bodyDir = join(dir, ".claude", "worktrees", ".brw");
+      const bodyDir = join(dir, ".worktree", ".brw");
       mkdirSync(bodyDir, { recursive: true });
       writeFileSync(join(bodyDir, "dev-foo.md"), "本文\n");
       writeFileSync(join(dir, "outside.md"), "別の場所\n");
@@ -400,8 +400,15 @@ b"`), dir), null);
       eq("brw-pr-handoff/6.1 信頼できない BRW のパスの pr は確認を省略しない", preOf("claude", `node /tmp/nonexistent-brw/scripts/brw.mjs pr --title "${TITLE}" --completion c --verification v`, dir), null);
       eq("brw-pr-handoff/6.1 Codex は PreToolUse では応答せず、PermissionRequest でだけ許可する", [preOf("codex", pr(), dir), permOf("codex", pr(), dir)], [null, "allow"]);
       eq("brw-pr-handoff/6.1 他の連結コマンドを含む brw pr は確認を省略しない", preOf("claude", `${pr()} && echo x`, dir), null);
-      // 後続の試験が「未コミットの変更なし」を前提にするため、置いたファイルを片付ける
+      // 本文置き場（.worktree/.brw）がリンクで旧置き場（.claude/worktrees/.brw）を指すときは、旧置き場の本文を確認省略の対象にしない（要件 3.12）
+      rmSync(bodyDir, { recursive: true, force: true });
+      mkdirSync(join(dir, ".claude", "worktrees", ".brw"), { recursive: true });
+      writeFileSync(join(dir, ".claude", "worktrees", ".brw", "dev-foo.md"), "旧置き場の本文\n");
+      symlinkSync(join(dir, ".claude", "worktrees", ".brw"), bodyDir);
+      eq("brw-pr-handoff/6.1 本文置き場がリンクで旧置き場を指すときは、旧置き場の本文の絶対パスを確認省略の対象にしない", preOf("claude", pr(`--body-file ${join(bodyDir, "dev-foo.md")}`), dir), null);
       rmSync(join(dir, ".claude"), { recursive: true, force: true });
+      // 後続の試験が「未コミットの変更なし」を前提にするため、置いたファイルを片付ける
+      rmSync(join(dir, ".worktree"), { recursive: true, force: true });
       rmSync(join(dir, "outside.md"), { force: true });
     }
     eq("enforcement/6.1 信頼できない BRW のパスでは確認を省略しない", preOf("claude", `node /tmp/nonexistent-brw/scripts/brw.mjs publish --work ${id} --plan ${plan.planId} --title "${TITLE}"`, dir), null);

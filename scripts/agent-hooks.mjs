@@ -17,6 +17,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BRW_RUN } from "./brw-cmd.mjs";
+import { bodyRootOf } from "./placement.mjs";
 import { gatherFacts, guidance, judgeEnterWorktree, planGate, shellQuote } from "./branch-gate.mjs";
 import { autoApproveOf, configMatchesHead, git, loadConfig, redactSecrets, repoRoot, sanitize } from "./lib.mjs";
 import { classifyCommand, classifyMcpCall, lex } from "./operation-policy.mjs";
@@ -137,12 +138,14 @@ const validTitle = (t) => typeof t === "string" && t.trim() !== "" && t.trim().l
 const bodyFileOk = (dir, f) => {
   if (f === "" || f.includes("\0") || f.split(/[\\/]/).includes("..")) return false;
   try {
-    // 絶対パスは、本体の worktree 置き場（.claude/worktrees/.brw/）の配下だけ。相対パスは作業ディレクトリの配下
+    // 絶対パスは、本体の配置先の本文置き場（.worktree/.brw/）の配下だけ。相対パスは作業ディレクトリの配下
     let root;
     if (isAbsolute(f)) {
       const main = (git(dir, "worktree", "list", "--porcelain") ?? "").match(/^worktree (.+)$/m)?.[1];
       if (!main) return false;
-      root = realpathSync(join(main, ".claude", "worktrees", ".brw"));
+      // 本文置き場が想定の場所（実体）でないときは許可しない（リンクで旧置き場などを指す場合を含む）
+      root = bodyRootOf(main);
+      if (root === null) return false;
     } else root = realpathSync(dir);
     const real = realpathSync(resolve(dir, f));
     return real.startsWith(root + sep) && statSync(real).isFile();

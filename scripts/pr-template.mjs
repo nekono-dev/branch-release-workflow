@@ -4,9 +4,10 @@
 // 本文ファイルは本体の worktree 置き場の配下（作業ツリーの外）に置く。外部依存なし。
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { aliasOf, classifyBranch } from "./lib.mjs";
+import { bodyDirOf, legacyBodyDirOf, shQuote } from "./placement.mjs";
 import { TIDY_SUBJECT } from "./tidy.mjs";
 
 const ASSETS = join(dirname(fileURLToPath(import.meta.url)), "..", "assets");
@@ -27,8 +28,28 @@ export function resolveTemplate(worktree, language) {
   return { source: "builtin", text: readFileSync(join(ASSETS, `pr-template.${lang}.md`), "utf8") };
 }
 
-/** 本文ファイルの場所: <本体>/.claude/worktrees/.brw/<alias>.md（作業ツリーの外） */
-export const bodyPathOf = (mainPath, branch) => join(mainPath, ".claude", "worktrees", ".brw", `${aliasOf(branch)}.md`);
+/** 本文ファイルの場所: <本体>/.worktree/.brw/<alias>.md（作業ツリーの外） */
+export const bodyPathOf = (mainPath, branch) => join(bodyDirOf(mainPath), `${aliasOf(branch)}.md`);
+
+/** 絶対パスが旧い本文置き場（placement.mjs の legacyBodyDirOf）の配下か（字句の判定。存在しなくてよい） */
+export const isUnderLegacyBody = (mainPath, file) => {
+  const dir = legacyBodyDirOf(mainPath);
+  const f = resolve(file);
+  return f.startsWith(dir + sep);
+};
+
+/** 旧い本文置き場の絶対パスを拒否するときの案内。自動では移さず、移し方を示す */
+export const legacyBodyMessage = (mainPath, file) => {
+  const oldDir = legacyBodyDirOf(mainPath);
+  const newDir = bodyDirOf(mainPath);
+  const newFile = join(newDir, basename(file));
+  return [
+    `本文ファイル ${file} は旧置き場（${oldDir}）にあり、BRW の本文置き場（${newDir}）ではないため使えません。BRW は本文を自動で移しません。`,
+    `次の手順で移してから、移した先の絶対パスを --body-file に指定してください。`,
+    `mkdir -p ${shQuote(newDir)}`,
+    `mv ${shQuote(file)} ${shQuote(newFile)}`,
+  ].join("\n");
+};
 
 const headingRe = (sec) => new RegExp(`^(#{1,6})[ \\t]*(?:${sec.alias.map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})[ \\t]*$`, "im");
 

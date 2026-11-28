@@ -4,9 +4,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { classifyBranch, git, matchesAny } from "./lib.mjs";
 import { bodyPathOf } from "./pr-template.mjs";
-import { legacyFinishGuidance, placementZone } from "./placement.mjs";
+import { bodyRootOf, legacyFinishGuidance, placementZone } from "./placement.mjs";
 import { removeWorkRecordAt, remoteNameOf, stateFileOf } from "./publish.mjs";
 import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 // 作業ブランチが片付けてよい状態か。切り出し元へ取り込まれた、または保護ブランチへの PR がある、のどれかを満たすと done。
 // 取り込みは commit の祖先関係のほか、squash merge を見込んで「ブランチで変えたファイルが切り出し元で同じ内容」でも判定する
@@ -128,6 +129,8 @@ export function cleanupAfterPr({ main, others, config, branch, workId, known }) 
   // 削除の前に、状態ファイルと本文ファイルの場所を求め、状態の場所を残す（途中で止まっても brw finish で回復できる）
   const stateFile = stateFileOf(wt.path);
   const bodyFile = bodyPathOf(main.path, branch);
+  // 本文置き場が想定の場所（実体）でないときは、本文ファイルを消さない（リンク先の旧置き場の本文を消さないため）
+  const bodyRoot = bodyRootOf(main.path);
   if (stateFile) {
     // 回復用の記録を書けないまま削除を始めると、途中で止まったとき brw finish が状態を取り除けない。書けなければ削除前に止める
     const wrote = git(main.path, "config", `branch.${branch}.brwState`, stateFile) !== null && git(main.path, "config", `branch.${branch}.brwWork`, workId) !== null;
@@ -143,7 +146,9 @@ export function cleanupAfterPr({ main, others, config, branch, workId, known }) 
   // 以降は子プロセスを実行しない（worktree が消えた後の作業ディレクトリを引き継ぐ子プロセスは失敗する。research.md #6）
   const notes = [];
   try {
-    rmSync(bodyFile, { force: true });
+    if (bodyRoot === null) {
+      if (existsSync(bodyFile)) notes.push(`本文置き場が想定の場所（${join(main.path, ".worktree", ".brw")}）の実体ではないため、本文ファイル ${bodyFile} は消しません。手で確認してください。`);
+    } else rmSync(bodyFile, { force: true });
   } catch (error) {
     notes.push(`片付けは済みましたが、本文ファイル ${bodyFile} を削除できませんでした（${error.code ?? error.message}）。手で削除してください。`);
   }

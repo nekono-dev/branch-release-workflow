@@ -18,6 +18,7 @@ import { runCarryChecks } from "./carry.mjs";
 import { runCleanupChecks } from "./cleanup.mjs";
 import { runPrFlowChecks } from "./pr-flow.mjs";
 import { runPrTemplateChecks } from "./pr-template.mjs";
+import { runBodyDocsChecks } from "./body-docs.mjs";
 import { runTidyChecks } from "./tidy.mjs";
 import { runDecisionChecks } from "./decision.mjs";
 import { runRemoteUrlChecks } from "./remote-url.mjs";
@@ -47,6 +48,7 @@ import { runIntegrationEnforcementChecks } from "./integration-enforcement.mjs";
 import { runIntegrationBasePrChecks } from "./integration-base-pr.mjs";
 import { runIntegrationResumeChecks } from "./integration-resume.mjs";
 import { runResumeObserveChecks } from "./resume-observe.mjs";
+import { runBodyPlacementJudgeChecks } from "./body-placement-judge.mjs";
 import { runHookLoggerChecks } from "./hook-logger.mjs";
 import { runStopObserveChecks } from "./stop-observe.mjs";
 import { runTtyObserveChecks } from "./tty-observe.mjs";
@@ -610,6 +612,7 @@ await runBranchGateChecks(eq);
 await runCarryChecks(eq);
 await runTidyChecks(eq);
 await runPrTemplateChecks(eq);
+await runBodyDocsChecks(eq);
 await runCleanupChecks(eq);
 await runPrFlowChecks(eq);
 await runGithubWriteChecks(eq);
@@ -694,6 +697,7 @@ await runIntegrationResumeChecks(eq);
 
 // ---- 続きの再開の実機観測の判定部分（brw-pr-handoff 9.6 の後半。実機は呼ばない） ----
 runResumeObserveChecks(eq);
+runBodyPlacementJudgeChecks(eq);
 
 // ---- 実環境検証用フックロガーの秘匿（brw-enforcement 8.4） ----
 await runHookLoggerChecks(eq);

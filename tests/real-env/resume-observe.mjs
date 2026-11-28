@@ -279,7 +279,7 @@ function setupSandbox(stage) {
   g(wt, "add", "obs.txt");
   g(wt, "commit", "-q", "-m", "観測用の変更");
   // 本文（brw pr-template が作る場所に、記入済みの本文を置く）
-  const bodyDir = join(main, ".claude", "worktrees", ".brw");
+  const bodyDir = join(main, ".worktree", ".brw");
   mkdirSync(bodyDir, { recursive: true });
   writeFileSync(join(bodyDir, `${ALIAS}.md`), BODY);
   // フック（settings.json。hooks/hooks.json と同じ登録に、観測用の記録を前置する）

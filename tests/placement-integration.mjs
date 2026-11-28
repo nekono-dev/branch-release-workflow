@@ -57,27 +57,9 @@ const addedPlacementLines = (prev, next) => placementLineCount(next) - placement
 
 // 旧置き場を表す形: `claude` と `worktrees` の間に、英数字以外の区切りが 1 文字以上ある（長い改行・インデントを挟む分割も、長さの上限なしで検出する）
 const LEGACY_RE = /claude\W+worktrees/g;
-// 一致の直後が `.brw` の置き場（`.claude/worktrees/.brw/…` や `join(main, ".claude", "worktrees", ".brw", …)`）だけは許す。
-// `.brw` の後ろはパス要素の終端（英数字・`-`・`_`・`.` 以外）でなければならず、`.brw-old`・`.brwx` は違反にする
-const BRW_AFTER_RE = /^\W+\.brw(?![A-Za-z0-9_.-])/;
-// 本文置き場（`.brw`）の形を許す行の組: 実行物の相対パスごとに、行の内容（前後の空白を除いた文字列）を並べる。
-// 行番号では照合しない。許可した行の内容が変わると違反になり、見直しを要する。
-// 許すのは本文置き場の本文パス生成・ルート取得・その説明とエラーメッセージの行だけ（`.brw` の置き場自体は移さない）。
-const BRW_ALLOWED_LINES = {
-  "scripts/pr-template.mjs": new Set([
-    "/** 本文ファイルの場所: <本体>/.claude/worktrees/.brw/<alias>.md（作業ツリーの外） */",
-    'export const bodyPathOf = (mainPath, branch) => join(mainPath, ".claude", "worktrees", ".brw", `${aliasOf(branch)}.md`);',
-  ]),
-  "scripts/agent-hooks.mjs": new Set([
-    "// 絶対パスは、本体の worktree 置き場（.claude/worktrees/.brw/）の配下だけ。相対パスは作業ディレクトリの配下",
-    'root = realpathSync(join(main, ".claude", "worktrees", ".brw"));',
-  ]),
-  "scripts/publish-cli.mjs": new Set([
-    "*   - 本体の worktree 置き場（<本体>/.claude/worktrees/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）",
-    'const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.claude/worktrees/.brw/）の配下の絶対パスで指定してください。" };',
-    'root = realpathSync(join(main, ".claude", "worktrees", ".brw"));',
-  ]),
-};
+// 本文置き場は配置先（<本体>/.worktree/.brw/）に移したので、scripts/ に旧置き場の文字列を残す行は無い。
+// 許可の行は持たない（旧置き場の文字列が 1 つでもあれば違反になる）。残る旧置き場は placement.mjs の判定と案内だけ。
+const BRW_ALLOWED_LINES = {};
 
 // 実行物（scripts/ の配下のすべての .mjs）に、旧置き場の文字列の違反を集める。
 // 許すのは scripts/placement.mjs の中と、BRW_ALLOWED_LINES に載った行の中で一致の直後が `.brw` の置き場だけ。判定は行ではなく一致した箇所ごとに行う。
@@ -427,10 +409,10 @@ export const runPlacementIntegrationChecks = async (eq) => {
     const sameLineBrw = countHitsOf({ "b.mjs": 'const x = ".claude/worktrees/dev-old"; // .brw\n' });
     const unlistedBrw = countHitsOf({ "c.mjs": 'const p = join(main, ".claude", "worktrees", ".brw", name);\n' });
     const unlistedSlash = countHitsOf({ "d.mjs": 'const p = ".claude/worktrees/.brw/" + name;\n' });
-    // 許可する相対パスと行の内容の組（3 ファイルの実際の行と同じ内容。前後の空白は除いて照合する）
-    const allowedPr = countHitsOf({ "pr-template.mjs": 'export const bodyPathOf = (mainPath, branch) => join(mainPath, ".claude", "worktrees", ".brw", `${aliasOf(branch)}.md`);\n' });
-    const allowedHook = countHitsOf({ "agent-hooks.mjs": '      root = realpathSync(join(main, ".claude", "worktrees", ".brw"));\n' });
-    const allowedPublish = countHitsOf({ "publish-cli.mjs": '  root = realpathSync(join(main, ".claude", "worktrees", ".brw"));\n' });
+    // 新しい置き場の実際の行（3 ファイルの配置先の行と同じ内容）は、旧置き場の文字列を含まないので見つけない
+    const allowedPr = countHitsOf({ "pr-template.mjs": 'export const bodyPathOf = (mainPath, branch) => join(bodyDirOf(mainPath), `${aliasOf(branch)}.md`);\n' });
+    const allowedHook = countHitsOf({ "agent-hooks.mjs": '      root = realpathSync(bodyDirOf(main));\n' });
+    const allowedPublish = countHitsOf({ "publish-cli.mjs": '  root = realpathSync(bodyDirOf(main));\n' });
     const otherBrwInAllowed = countHitsOf({ "agent-hooks.mjs": 'const q = join(main, ".claude", "worktrees", ".brw", "dev-x");\n' });
     const addedInAllowed = countHitsOf({ "publish-cli.mjs": '  root = realpathSync(join(main, ".claude", "worktrees", ".brw")); const q = ".claude/worktrees/dev-x";\n' });
     const splitInAllowed = countHitsOf({ "pr-template.mjs": 'const p = join(main, ".claude", "worktrees", "dev-old");\n' });
@@ -439,7 +421,7 @@ export const runPlacementIntegrationChecks = async (eq) => {
     eq("brw-branch-gate/7.3 検査の自己検証: 分割された形（join の引数に分けた旧置き場）を 1 件として見つける", split.length, 1);
     eq("brw-branch-gate/7.3 検査の自己検証: 行に .brw があっても、旧置き場の直後が .brw でなければ見つける", sameLineBrw.length, 1);
     eq("brw-branch-gate/7.3 検査の自己検証: 許可されていないファイルの置き場の形（.claude/worktrees/.brw/…）は見つける", [unlistedBrw.length, unlistedSlash.length], [1, 1]);
-    eq("brw-branch-gate/7.3 検査の自己検証: 許可する相対パスと行の内容の組（実際の 3 ファイルの行）は見つけない", [allowedPr.length, allowedHook.length, allowedPublish.length], [0, 0, 0]);
+    eq("brw-branch-gate/7.3 検査の自己検証: 新しい置き場の実際の 3 ファイルの行（旧置き場の文字列を含まない）は見つけない", [allowedPr.length, allowedHook.length, allowedPublish.length], [0, 0, 0]);
     eq("brw-branch-gate/7.3 検査の自己検証: 許可するファイルでも、許可しない行の置き場の形は見つける", otherBrwInAllowed.length, 1);
     eq("brw-branch-gate/7.3 検査の自己検証: 許可する行に旧置き場の追記があれば見つける（同一行への別の旧置き場を許さない）", addedInAllowed.length, 1);
     eq("brw-branch-gate/7.3 検査の自己検証: 許可するファイルでも、分割された形（join の引数に分けた旧置き場）は見つける", splitInAllowed.length, 1);

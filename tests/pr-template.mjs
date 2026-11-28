@@ -64,7 +64,7 @@ export const runPrTemplateChecks = async (eq) => {
   // 本文ファイルの置き場所と、上書きしない動作
   const main = d;
   const path = bodyPathOf(main, "dev/foo");
-  eq("brw-pr-handoff/3.9 本文ファイルは本体の worktree 置き場の配下（作業ツリーの外）に置く", [path, path.startsWith(join(main, ".claude", "worktrees", ".brw") + "/")], [join(main, ".claude", "worktrees", ".brw", "dev-foo.md"), true]);
+  eq("brw-pr-handoff/3.9 本文ファイルは本体の配置先（.worktree/）の下の .brw に置く（作業ツリーの外）", [path, path.startsWith(join(main, ".worktree", ".brw") + "/")], [join(main, ".worktree", ".brw", "dev-foo.md"), true]);
   const first = prepareBody(path, { worktree: d, language: "ja", planned: ["q.txt"] });
   eq("brw-pr-handoff/3.1 本文ファイルが作られ、未記入の印を持つ", [first.written, first.filled, existsSync(path), readFileSync(path, "utf8").startsWith(UNFILLED_MARK)], [true, false, true, true]);
   const draft = `${UNFILLED_MARK} -->\n## 概要\n\n書きかけの文章\n`;

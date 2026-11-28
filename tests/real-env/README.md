@@ -489,3 +489,34 @@ BRW_REAL_ENV=1 node tests/real-env/placement-e2e.mjs --keep   # 一時ディレ�
 - Claude の応答は確率的なので、(2) の移動はモデルが案内どおりに動いたときだけ一致する。(2) の判定（`placement-judge.mjs`）は、name=bar の EnterWorktree・`brw create`・`cd` の順の記録と、cd のあとの作業場所（または cd と pwd の結果）が worktree であることを見る。任意の Bash の結果が worktree のパスと一致するだけでは成功にしない。
 - (3) は、worktree を消したあとの実機の入力を見る。消えた作業場所の次の Bash の入力は、復帰したシェルの場所で記録される場合（試行で確認）と、消えた worktree のパスのまま記録される場合（実行 2 で確認）がある。どちらでも `CLAUDE_PROJECT_DIR` は worktree のまま渡る。導出の結果そのものは未確認のまま残る。
 - 判定の自己検証（実機を使わない）: `node tests/real-env/placement-judge-selftest.mjs`。壊した記録で NG になることを確かめる。`BRW_REAL_ENV` は要らない。
+
+## 本文置き場の実機の通し確認（brw-pr-handoff 10.3）
+
+`tests/real-env/body-placement-e2e.mjs` は、`brw pr-template` の指示に従って本文を `<本体>/.worktree/.brw/<別名>.md` に Write し、`brw pr --body-file` が PR を作り、片付けで本文が消えることを、実際の `claude -p` で通しで確かめる。あわせて、旧置き場（`<本体>/.claude/worktrees/.brw/`）の本文を `--body-file` に渡すと拒否され、`mv` の案内が出ることを `brw.mjs` の CLI で確かめる。`BRW_REAL_ENV=1` を付けたときだけ動く。
+
+```sh
+BRW_REAL_ENV=1 node tests/real-env/body-placement-e2e.mjs   # 本番（claude -p を最大 3 回。全項目が一致した時点で止める）
+```
+
+- 一時の環境（一時リポジトリ・bare remote・偽の gh・偽の ssh・`brw` と `gh` の PATH の shim）だけを使う。GitHub には接続も書き込みもしない。利用者の `~/.claude` は読み書きしない（`--setting-sources project`）。権限モードの迂回はしない（`--permission-mode acceptEdits`、`--allowedTools Bash,Write`）。
+- 手順: 本体で開始し、`cd <作業場所> && brw pr-template` を Bash で実行する → 出力の記入指示に従い、出力された本文のパスへ Write で書く → `cd <作業場所> && brw pr --title … --completion … --verification … --body-file <そのパス>` を Bash で実行する。
+- 判定は `tests/real-env/body-placement-judge.mjs` の純粋な関数（実機を使わない）。単体試験は `tests/body-placement-judge.mjs`（selftest に登録）。壊した記録（パスの違い・旧置き場への書き込み・作成されなかった PR・未記入の本文・片付けの残り）で NG になることを確かめる。
+- 判定は引数として解析する（`tests/real-env/body-placement-judge.mjs` の `shellSegments`）。(0) は `cd <作業場所>` の後ろの単純なコマンドが `brw pr-template` であること（`echo <作業場所>; brw pr-template` は通さない）。(2a) は `--body-file` の値（引用符を外した値）が本文のパスに一致すること（`echo <パス>; brw pr` は通さない）。(2c) は Write した本文の行（見出し・未記入の印・HTML コメントを除く）がすべて偽の GitHub の PR 本文に含まれること。判定の項目: (0) 作業場所へ移って pr-template を実行、(1a) pr-template の出力が本文置き場の絶対パスを示す、(1b) そのパスへ Write が成功、(1c) 旧置き場へ書いていない、(2a) `brw pr` が「PR を作成しました」を出した、(2b) 偽の GitHub が受けた PR 作成は 1 件で、本文は記入済み（未記入の印なし・見出しあり）、(3a) 片付けで本文ファイルが消えた、(3b) 作業場所が消えた。旧置き場は (4a)〜(4e)（終了コード 1・旧置き場の案内・`mv` の案内・自動で移していない・PR を作っていない）。
+- 2a の注意: 片付けで作業場所が消えた直後の Bash は、ツールの表示が `Exit code 1`（isError）になることがある。出力そのものは「PR を作成しました」「片付けました」で成功を示すため、2a の成否は出力の文言で見て、表示の `Exit code 1` は detail に残す（隠さない）。
+
+### 結果（brw-pr-handoff 10.3、実行日 2026-11-28）
+
+Claude Code 2.1.329（`claude --version`）、モデルは Haiku（`--model haiku`）。
+
+| 回 | 結果 | 内容 |
+|---|---|---|
+| 1 回目（実行 1） | 不一致（判定の基準が厳しすぎた） | (0)〜(3b) のうち 2a だけ NG。`brw pr` は PR を作り片付けたが、ツールの表示が `Exit code 1` で成功の文言を見ず NG と判定した。claude を 3 回（すべて同じ）。旧置き場 (4a)〜(4e) は一致 |
+| 2 回目（実行 2） | 不一致（同上） | 1 回目と同じ。claude を 3 回。出力の先頭が `Exit code 1` で「PR を作成しました」「片付けました」が続くことを確かめた |
+| 3 回目（実行 3・判定を直した後） | **一致**（1 回目の試行で全項目が一致） | 0・1a・1b・1c・2a（表示は Exit code 1・出力は成功）・2b・3a・3b、旧置き場 4a〜4e がすべて一致。claude は 6 回のツール呼び出し |
+| 4 回目（実行 4・引数の解析と本文照合 2c を加えた現行の判定） | **一致**（1 回目の試行で全項目が一致） | 0・1a・1b・1c・2a・2b・2c・3a・3b、旧置き場 4a〜4e がすべて OK。終了コード 0。Claude Code 2.1.329。記録は `body-103-run4.log`。親も同じ判定で再実行し全項目 OK（終了コード 0） |
+
+- 実行 1・2 の 2a の NG は、実機の挙動（片付けで作業場所が消えた直後の表示）を正しく扱えていなかった判定の不備。実機の記録を見て、成否の判定を出力の文言に直した（表示の `Exit code 1` は detail に残す）。判定を直したあとに実行 3 を行った。
+- 実行 1・2 の 2b（PR の本文）は、いずれも記入済みの本文が PR に入ったことを示した。
+- 観測された事実: 本文は `<本体>/.worktree/.brw/dev-body.md` に Write でき、`brw pr --body-file` がそれを受け付けて PR を作成し、片付けで本文ファイルと作業場所が消えた。旧置き場の本文は `brw pr --body-file` で拒否され、移し方（`mkdir -p` と `mv`）が案内され、自動では移されず、PR は作られなかった。
+- 限界: 本文の書き込みは作業場所（worktree）で開始したセッションでは確かめていない（PoC `poc/design_01.md` で拒否されることは確認済み）。Codex での本文の書き込みは未観測（認証なし）。
+- 実行の記録（標準出力）は `/home/ubuntu/.cache/cc-sdd-bootstrap-scratch/body-103-run1.log`・`body-103-run2.log`・`body-103-run3.log`・`body-103-run4.log`（現行の判定）。

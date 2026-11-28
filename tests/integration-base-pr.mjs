@@ -159,14 +159,14 @@ export const runIntegrationBasePrChecks = async (eq) => {
   /**
    * 分岐元（develop）の一時リポジトリを作る。main と develop を origin（bare）へ push 済みにし、
    * develop をチェックアウトした状態で返す。withDiff=false なら develop は main と同じ commit（差なし）。
-   * `.git/info/exclude` に .claude/ を足し、本文置き場（.claude/worktrees/.brw/）を未コミットの件数に含めない。
+   * `.git/info/exclude` に .worktree/ を足し、本文置き場（.worktree/.brw/）を未コミットの件数に含めない。
    */
   const newBase = ({ config = CONFIG, withDiff = true } = {}) => {
     const fx = mkRepoWithRemote({ branch: "main", config });
     const r = { dir: fx.dir, remote: fx.remote, cleanup: fx.cleanup, sshLog: join(sandbox, `ssh-${++seq}.log`), ghLog: join(sandbox, `gh-log-${seq}.log`), gh: null };
     repos.push(r);
     mkdirSync(join(r.dir, ".git", "info"), { recursive: true });
-    writeFileSync(join(r.dir, ".git", "info", "exclude"), ".claude/\n", { flag: "a" });
+    writeFileSync(join(r.dir, ".git", "info", "exclude"), ".worktree/\n", { flag: "a" });
     gitOut(r.dir, "checkout", "-q", "-b", "develop");
     if (withDiff) {
       writeFileSync(join(r.dir, "d1.txt"), "分岐元の差\n");
@@ -185,7 +185,7 @@ export const runIntegrationBasePrChecks = async (eq) => {
   const prepareBody = (r) => {
     const t = brw(r, ["pr-template"]);
     if (t.status !== 0) throw new Error(`brw pr-template が失敗: ${t.stderr}`);
-    writeFileSync(join(r.dir, ".claude", "worktrees", ".brw", "develop.md"), BODY);
+    writeFileSync(join(r.dir, ".worktree", ".brw", "develop.md"), BODY);
   };
   /** 作成の要求の本文（POST の body）のうち、適用された分だけ。 */
   const appliedBodiesOf = (r) => appliedPostsOf(r).map((e) => e.body);
