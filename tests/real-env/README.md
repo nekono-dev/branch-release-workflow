@@ -443,3 +443,33 @@ gh 2.45.0、Claude Code 2.1.329（Haiku）、実 GitHub（使い捨てブラン�
 - ラッパーの記録は、BRW が案内を返したことを示す。モデルが受け取ったことは、答えの文言でしか確かめられず、この観測では示されなかった。
 - ターン 2 の問い（「あり」か「なし」）は、モデルが答えない回があった。答えの形式を固定する指示は、今回の規則の判定の対象外（問いの答えの形式は、再試行の判定に影響する）。
 - BRW の実装の不具合は直していない（報告）: 作業場所の中で開始したセッションで、削除後に案内が返ることは、設計「削除後にフックが動かないため案内できない」と異なる。設計の見直しの要否は、報告にとどめる。
+
+## Codex の再開案内の実機観測（9.9）
+
+```sh
+BRW_REAL_ENV=1 node tests/real-env/resume-observe.mjs --stage codex
+```
+
+- 実行には `codex` CLI と読み取り可能な `~/.codex/auth.json` が必要。認証ファイルが無い場合は Codex を起動せず、5 項目を「未観測」として記録する。認証切れなどで実行が失敗した場合も、結果は成功にせず観測記録に残す。
+- 1 回の観測で `codex exec` と `codex exec resume <thread_id>` を各 1 回呼ぶ。Codex API の利用料金は選択中のモデルと実際の入出力に依存するため固定額は示せない。既定の試行回数は 1 回（Claude の既定 3 回とは別）で、コード上の reasoning effort は low。
+- `~/.codex/auth.json` は一時の `CODEX_HOME/auth.json` へコピーし、コピーを mode 0600、一時ホームを mode 0700 にする。利用者の認証ファイルや設定は変更しない。一時ホームは観測後に削除する。認証値を表示・記録しない。
+- 一時 repo の `.codex/hooks.json` に観測ラッパー経由で BRW の Codex フックを登録する。ラッパーは UserPromptSubmit の返答、各 hook の session ID・tool_use_id・cwd、および Pre/PostToolUse ごとの worktree 状態を一時ログへ記録し、BRW の応答を Codex に返す。Codex の初回・再開の両 `thread.started` ID、両 UserPromptSubmit、PreToolUse を個別に照合する。プロジェクト信頼とフック信頼の設定は一時環境だけに適用する。
+- 一時 repo はローカル bare remote を使う。`gh` は偽物、SSH は bare remote に向けた shim であり、GitHub へ接続・書き込みしない。Codex は workspace-write sandbox で動かし、Git 共通ディレクトリだけを `--add-dir` で一時 repo 内の書き込み先に加える。
+- (c) の再開成功は、単独の `brw resume` tool call に対して同じ `tool_use_id` の PreToolUse/PostToolUse があり、Pre時点で対象 worktree が無く、Post時点で作成済み、かつ Codex の `exit_code=0`（Claude は `is_error=false`）を確認できた場合だけ一致とする。複合コマンド、前後状態の欠落、tool ID の不一致など証拠が揃わない場合は「未観測」とする。
+- 観測結果は `/tmp/brw-real-env/observe-96b-codex.json` に保存され、認証情報を含まない。一時 repo・bare remote・認証コピーは終了時に削除する。
+
+### 9.9 の実行結果（2026-11-28、Codex CLI 0.172.0）
+
+1 attempt（`codex exec` と同一 thread の `codex exec resume`、完了ターン 2）を実行した。記録は `/tmp/brw-real-env/observe-96b-codex.json`。
+
+| 項目 | 判定 | 観測 |
+|---|---|---|
+| (a) 片付け後の記録に sessionId | 未観測 | `brw pr` が tidy で停止し、再開記録を作らなかった。Codex の PreToolUse に `session_id` と `cwd` があり、`session_id` は `thread.started` の ID および UserPromptSubmit と一致した。PreToolUse の cwd は実行対象 worktree と一致した（UserPromptSubmit の cwd は main）。 |
+| (b) ターン 2 の案内 | 不一致 | UserPromptSubmit は同じ session_id で2ターンとも動いたが、BRW の追加文脈は返らなかった。モデルの答えは「なし」。記録が無いため案内の条件を満たさなかった。 |
+| (c) `brw resume` による再作成 | 不一致 | ターン 2 に `brw resume` のコマンドは無く、作業場所を作り直さなかった。 |
+| (d) 新しい作業ブランチを作らない | 一致 | 新しいブランチは作られなかった。 |
+| (e) PreToolUse の session/thread ID と cwd | 一致 | session ID は Codex thread ID と UserPromptSubmit の ID に一致し、cwd は対象 worktree と一致した（UserPromptSubmit の cwd は main）。 |
+
+`brw pr` は一時 worktree で状態確認を行う `git` の子プロセス起動が `EPERM` となり、`tidy` 段階で終了コード 1 になった。シェルから直接行った `git status` は成功した。Codex は workspace-write sandbox で実行し、既存の実機検証の制約に合わせて一時リポジトリの Git 共通ディレクトリを `--add-dir` に追加したが、この環境では Node.js からの `spawnSync("git", …)` は許可されなかった。これは再開機能の成功確認ではなく、実行環境の制限を記録した結果である。`.git` への書き込みだけでなく、Codex が起動した Node.js から Git を実行できる sandbox 条件が必要。
+
+偽 `gh` の PR 作成は 0 件、偽 SSH の receive-pack は 0 件。GitHub への接続・書き込みは無かった。Codex の一時 CODEX_HOME と一時 repo は観測後に削除された。認証情報の値は出力・変更していない。

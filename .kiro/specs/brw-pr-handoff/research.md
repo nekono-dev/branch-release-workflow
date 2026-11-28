@@ -155,3 +155,10 @@
 
 - GitHub REST API の記述（`github/rest-api-description`、`api.github.com.json`、`info.version` 1.1.4。取得 2026-11-26）: `POST /repos/{owner}/{repo}/pulls` は 201・403・422 を返す。
 - 実 GitHub の読み取り（2026-11-26）: `gh api repos/nekono-dev/branch-release-workflow/pulls/12` が `base.ref=main`・`head.ref=dev/sync-base-branch`・`merged=true` を返し、BRW 経由の開発ブランチ→保護ブランチの PR が実在する。同じ API の `compare/main...main` は `status=identical`・`ahead_by=0`。
+
+
+## 要件 7.2・7.6 の再確認（2026-11-28）
+
+利用者は、再開用の最終記録の書き込み失敗時に警告して片付けを完了することと、同じ作業場所の複数セッションの競合による例外的な誤案内を受け入れた。読み取り専用の Codex 調査で、前者は `scripts/pr-flow.mjs` と `tests/pr-flow.mjs`、後者は `tests/resume-record.mjs` に対応する実装と試験があることを確認した。実行前の一時メモの失敗は最終記録の失敗とは別で、フックを止めない。Claude Code でのフック出力の観測は `tests/real-env/README.md` の 9.8、Codex の通し確認とモデルへの到達は未観測のまま。設計の旧方式の説明を履歴と明示し、観測を超える「必ず届く」の表現を修正した。
+
+- 設計レビュー（Codex、読み取り専用、2026-11-28）は NO-GO。要件 7.4 の「フックが動かない」という断定は Claude Code の 9.8 の実観測と矛盾するため、「動かないことがあり案内は保証しない」に改めた。Codex の通し確認は一時リポジトリで再試行したが `git` 起動時の `EPERM` で未観測。`tests/real-env/README.md` の 9.9 に環境と結果を記録する。設計とタスク計画は未通過のままとする。
