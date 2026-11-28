@@ -17,6 +17,7 @@ BRW（branch-release-workflow。作業ブランチ運用を強制するフック
 ## Scope
 - **In**:
   - create / resume の前に BRW の最新化を確認し、最新化できないときは worktree を作らず中止する仕組み。
+  - 最新化の確認を、BRW 以外の製品でも使える汎用の仕組み（共通のアーキテクチャ）として作ること。汎用の仕組みは利用者となる製品を知らず、BRW も他の製品を知らない。
   - worktree と PR 本文置き場（`.brw/`）の置き場を `<本体>/.worktree/` に変更（旧置き場は認識しない）。`.gitignore` に `.worktree/` を追加。
   - `CLAUDE.md` の追跡外し、独自の取り決め（作業の区切りの commit・push）の `.kiro/steering/` への移動。
 - **Out**:

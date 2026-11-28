@@ -1,12 +1,12 @@
 {
   "feature_name": "brw-fresh-start",
   "created_at": "2026-11-28T05:00:44Z",
-  "updated_at": "2026-11-28T05:00:44Z",
+  "updated_at": "2026-11-28T05:07:51Z",
   "language": "ja",
-  "phase": "initialized",
+  "phase": "requirements-generated",
   "approvals": {
     "requirements": {
-      "generated": false,
+      "generated": true,
       "approved": false
     },
     "design": {
@@ -20,5 +20,3 @@
   },
   "ready_for_implementation": false
 }
-
-
