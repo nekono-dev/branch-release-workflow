@@ -591,8 +591,8 @@ const RESUME_LIST_LIMIT = 20;
 
 // 再開できる作業ブランチの一覧。取得済みの遠隔の追跡ブランチと再開の記録から作る（ネットワークは使わない）。
 // 対象: 宣言の開発ブランチで、作業場所（worktree）が無いもの。公開の記録があるものを先頭（記録の新しい順）、続けて名前順。
-function resumeList(main, others, config) {
-  console.log("使い方: brw resume <ブランチ>");
+function resumeList(main, others, config, all = false) {
+  console.log("使い方: brw resume <ブランチ>（一覧: brw resume、全件: brw resume --all）");
   // 引数ありの resume は origin からだけ取得するため、一覧の候補も origin の追跡ブランチだけにする
   if (!(git(main.path, "remote") ?? "").split("\n").includes("origin")) {
     console.log("origin が無いので一覧を出せません。ブランチ名を指定して brw resume <ブランチ> で再開してください。");
@@ -614,11 +614,12 @@ function resumeList(main, others, config) {
   if (list.length === 0) console.log("再開できる作業ブランチはありません。新しい作業は brw create <名前> で始めてください。");
   else {
     console.log("再開できる作業ブランチ（公開の記録があるものを先頭に、新しい順）:");
-    for (const b of list.slice(0, RESUME_LIST_LIMIT)) {
+    // 既定は上限 RESUME_LIST_LIMIT 件まで。--all のときは全件を出す（要件 7.3）
+    for (const b of all ? list : list.slice(0, RESUME_LIST_LIMIT)) {
       const rec = records.get(b);
       console.log(`  - ${visible(b)}${rec ? `（PR: ${visible(rec.prUrl ?? "なし")}、公開: ${visible(rec.at)}）` : ""}`);
     }
-    if (list.length > RESUME_LIST_LIMIT) console.log(`ほか ${list.length - RESUME_LIST_LIMIT} 件`);
+    if (!all && list.length > RESUME_LIST_LIMIT) console.log(`ほか ${list.length - RESUME_LIST_LIMIT} 件（brw resume --all で全件を表示できます）`);
   }
   console.log("注意: この一覧は取得済みの追跡ブランチに基づきます。最新でなければ git fetch を実行してから、もう一度確かめてください。");
 }
@@ -630,8 +631,11 @@ function resume(args) {
   repoRoot(cwd) ?? fail("git リポジトリ内で実行してください。", 2);
   const [main, ...others] = worktrees(cwd);
   const config = need(main.path);
-  if (args.length === 0) {
-    resumeList(main, others, config);
+  // --all は引数なしの一覧だけに使える（ブランチ名と同時に指定すると使い方の誤り）
+  const all = args.includes("--all");
+  if (all && args.some((a) => a !== "--all" && !a.startsWith("--"))) fail("--all は引数なしの一覧にだけ使えます（ブランチ名と同時には指定できません）。", 2);
+  if (args.length === 0 || (all && args.length === 1)) {
+    resumeList(main, others, config, all);
     return;
   }
   const branch = args.find((a) => !a.startsWith("--")) ?? fail("使い方: resume <ブランチ>", 2);

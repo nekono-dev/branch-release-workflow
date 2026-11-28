@@ -85,6 +85,28 @@ export const runResumeListChecks = (eq) => {
     t.cleanup();
   }
 
+  // ---- 9.3（要件 7.3）: --all で全件。既定は 20 件まで。--all とブランチ名の同時指定は使い方の誤り（2） ----
+  {
+    const names = Array.from({ length: 21 }, (_, i) => `dev/a${String(i + 1).padStart(2, "0")}`);
+    const t = fixture({ names });
+    const dflt = brw(t.dir, "resume");
+    eq("brw-pr-handoff/7.3 既定の一覧の「ほか」の行は、brw resume --all で全件を表示できる旨を添える", [dflt.out.includes("ほか 1 件"), dflt.out.includes("brw resume --all")], [true, true]);
+    const all = brw(t.dir, "resume", "--all");
+    eq("brw-pr-handoff/7.3 brw resume --all は上限を外して全件を出し、終了コード 0 にする", [all.code, itemsOf(all.out).length, all.out.includes("ほか")], [0, 21, false]);
+    const both = brw(t.dir, "resume", "--all", "dev/a01");
+    eq("brw-pr-handoff/7.3 --all とブランチ名の同時指定は使い方の誤り（終了コード 2）", both.code, 2);
+    const unknown = brw(t.dir, "resume", "--bogus");
+    eq("brw-pr-handoff/7.3 不明なオプションだけのときは、従来どおり使い方の誤り（終了コード 2）", unknown.code, 2);
+    // 超過件数の行（「ほか N 件」）と同じ行に --all の案内がある（使い方の行では通らない）
+    const overLine = dflt.out.split("\n").find((l) => l.startsWith("ほか "));
+    eq("brw-pr-handoff/7.3 「ほか N 件」の行そのものに brw resume --all の案内がある（行単位）", [overLine !== undefined, (overLine ?? "").includes("brw resume --all")], [true, true]);
+    // --all の位置を入れ替えても、ブランチ名と同時なら 2・--all と不明なオプションの組み合わせは従来の不明なオプションの扱い（2）
+    eq("brw-pr-handoff/7.3 --all を先頭に置き、不明なオプションを続けても、従来の不明なオプションの扱い（終了コード 2）", brw(t.dir, "resume", "--all", "--bogus").code, 2);
+    eq("brw-pr-handoff/7.3 不明なオプションを先頭に置き、--all を続けても、従来の不明なオプションの扱い（終了コード 2）", brw(t.dir, "resume", "--bogus", "--all").code, 2);
+    eq("brw-pr-handoff/7.3 --all とブランチ名を入れ替えても同時指定は使い方の誤り（終了コード 2）", brw(t.dir, "resume", "dev/a01", "--all").code, 2);
+    t.cleanup();
+  }
+
   // ---- 表示の無害化: 書式制御文字は \uXXXX として示し、生の文字は出さない ----
   {
     const raw = "dev/x\u202Ey";
