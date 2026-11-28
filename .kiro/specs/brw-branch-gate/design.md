@@ -278,7 +278,7 @@ function planGate(input: GateInput): GateResult;
 - 対象リポジトリが BRW 導入済みでなければ通過（5.3）。
 - `name` 指定: 拒否。案内は、`brw create <名前>` を実行した後に `EnterWorktree` を `path`（作成される worktree の絶対パス）指定で呼ぶ 2 手。名前が `namePattern` に合わないときは、合う名前の付け方（小文字・数字・`-`）も案内する。
 - `path` 指定: `git worktree list` に載り、そのブランチが開発ブランチ（`classifyBranch` が `development`）で、配置先（`isUnderPlacement`: `<本体>/.worktree/` の配下）にあるときだけ通過。それ以外は拒否し、`brw resume` を案内する。**旧置き場の worktree を指すとき（`isLegacyPlacement`）は専用の拒否（`gate-enter-legacy`、要件 2.6）**で、旧パス・新しい配置先・移動の手順（`legacyMoveGuidance`）を案内する。
-- **承認の注意（2026-11-28、`poc/design_01.md`）**: `name` 指定の 2 手の案内と、`path` の拒否の案内の理由の行に、「Claude Code は `.claude/worktrees/` の外の `path` への EnterWorktree で利用者の承認を求める（BRW のフックの許可では省けない）。承認できない環境では、`brw create` が移した作業場所（Bash の `cd`）で作業する」を加える。BRW は `path` が配置先の開発ブランチの worktree のときに通過（応答なし）にするが、その後の承認は Claude Code が求める。
+- **承認と代替の案内（2026-11-28、`poc/design_01.md`）**: `brw create` は worktree を作ってパスを表示する CLI で、呼び出し元の作業場所は移さない（移すのは、フックの置き換えコマンドの `cd`）。そのため、`name` 指定の拒否の案内は、要件 2.1 の 2 手（1) `brw create <名前>`、2) `EnterWorktree` を `path` 指定で呼ぶ）に、**明示的な代替**「2') Bash で `cd <作成された worktree の絶対パス>`」を併記し、理由の行に次を書く（要件の文言は変えない）: (a) Claude Code は `.claude/worktrees/` の外の `path` への EnterWorktree で利用者の承認を求める（BRW のフックの許可では省けない。非対話では `bypassPermissions` が要る）。(b) EnterWorktree で worktree に入ったセッションからは、`.worktree/` の下の別の worktree へ EnterWorktree で移れない。(c) 承認できない・移れない環境では、`cd` で作業場所を移す。`path` の拒否の案内（`gate-enter-path`・`gate-enter-legacy`）の理由の行にも同じ (a)〜(c) を含める。BRW は `path` が配置先の開発ブランチの worktree のときに通過（応答なし）にするが、その後の承認は Claude Code が求める。
 - `name` も `path` も無い（ランダム名の作成）、両方ある、型が不正: 拒否。
 - 例外が出たら拒否（安全側）。
 
@@ -303,7 +303,7 @@ function judgeEnterWorktree(input: EnterWorktreeInput, cwd: string | null): Ente
 - 配置先は `<本体>/.worktree/<別名>`（別名は `aliasOf`）。旧置き場は `<本体>/.claude/worktrees/` の配下。`.brw/` の置き場は扱わない（`brw-pr-handoff` が持つ）。
 - 本体は、呼び出し側が `git worktree list` の先頭から得た値を渡す（連携 worktree の中からでも本体になる。`poc/design_02.md` の 4。要件 7.3）。
 - 配下の判定は実体のパス（realpath）で行い、配置先ディレクトリがシンボリックリンクで本体の外を指すときは配下と認めない（現行の `placementSound` の規則を引き継ぐ）。存在しないパスは文字列で比べる。
-- 副作用を持たない（`ignoreStatus` が git を読む以外は、ファイルを書かない・git を変えない）。導入先の `.gitignore`・`info/exclude` は書かない（要件 7.9）。
+- 副作用を持たない（`ignoreStatus` が git を読む以外は、ファイルを書かない・git を変えない）。導入先の `.gitignore`・`info/exclude` は、配置先の変更のために書かない（要件 7.9）。既存の Codex 用の `.codex/` の有効化（`hook-install.mjs` の `activateWorktree`）が共通の `info/exclude` に `.codex/` を追記する副作用は、配置先の変更とは別の既存の挙動で、この要件の対象外（試験は、`.worktree/` の行が増えないことを確かめる）。
 
 **契約**: Service
 
@@ -322,23 +322,23 @@ function isUnderPlacement(main: string, target: string): boolean;
 function isLegacyPlacement(main: string, target: string): boolean;
 /** 旧置き場の worktree を移す手順の案内（旧パス・新しい配置先・手順） */
 function legacyMoveGuidance(main: string, branch: string, oldPath: string): { reason: string; next: string[] };
-/** 配置先が無視されているか。`git check-ignore -q -- .worktree/<別名>` の終了コード（0 無視、1 無視されない、その他は不明） */
-function ignoreStatus(main: string, alias: string): IgnoreStatus;
+/** 配置先のディレクトリ全体が無視されているか。存在しない固定の子 `.worktree/.brw-probe` への `git check-ignore -q` の終了コード（0 無視、1 無視されない、その他は不明）。別名ごとの個別の設定だけでは `not-ignored` になる（`poc/design_02.md` の 6） */
+function ignoreStatus(main: string): IgnoreStatus;
 /** `ignoreStatus` が `not-ignored` のときの警告文（複数行） */
 function ignoreWarning(): string[];
 ```
 - 事前条件: `main` は本体の作業ツリーの絶対パス。
-- 事後条件: `placementOf` の結果は常に `placementRoot(main)` の配下。`isUnderPlacement(main, placementOf(main, b))` は真。`isLegacyPlacement` と `isUnderPlacement` は同時に真にならない。
+- 事後条件: `placementOf` の結果は文字列として常に `placementRoot(main)` の配下。`isUnderPlacement(main, placementOf(main, b))` は、配置先ディレクトリが本体の外を指すシンボリックリンクでないかぎり真（シンボリックリンクのときは偽になり、判定は拒否側に倒れる）。`isLegacyPlacement` と `isUnderPlacement` は同時に真にならない。
 - 不変条件: 旧置き場のパスの文字列は、このモジュールだけが持つ（`scripts/` の他のファイルに `.claude/worktrees` は残らない。`.brw/` の定数を除く）。
 
 **案内の文面**
-- `legacyMoveGuidance`: 「作業ブランチ <ブランチ> の worktree は旧置き場 <旧パス> にあり、BRW の配置先（<新パス>）ではないため扱えません。次の手順で移してから、もう一度実行してください。1) ロックされていれば `git worktree unlock <旧パス>`。2) `git worktree move <旧パス> <新パス>`（未コミットの変更・未追跡のファイルはそのまま移る）。3) `brw resume <ブランチ>`」。BRW は自動で移さない（要件 6.5）。`poc/design_02.md` の 5。
+- `legacyMoveGuidance`: 「作業ブランチ <ブランチ> の worktree は旧置き場 <旧パス> にあり、BRW の配置先（<新パス>）ではないため扱えません。次の手順で移してから、もう一度実行してください。1) ロックされていれば `git worktree unlock <旧パス>`。2) `git worktree move <旧パス> <新パス>`（未コミットの変更・未追跡のファイルはそのまま移る）。3) `brw resume <ブランチ>`」。BRW は自動で移さない（要件 6.5）。`poc/design_02.md` の 5。**移せないとき**（サブモジュールを持つ worktree: git のマニュアルで移動不可と明記。`poc/design_02.md` の 8）の代替として、案内に次を加える: 「`git worktree move` が失敗するときは、未コミットの変更を commit か退避してから `git worktree remove <旧パス>`（変更が残っていると拒否される。サブモジュールがあるときは `--force` が要るため、変更を失わないことを確かめてから）で片付け、`brw resume <ブランチ>` で新しい配置先に作り直す」。BRW はどちらの場合も worktree・ブランチ・変更に触れない。
 - `ignoreWarning`: 「`.worktree/` が導入先で無視されていません。本体の作業ツリーで `git add -A` などを実行すると、worktree が埋め込みリポジトリとして誤って追加されます。`.worktree/` を無視する設定（`.gitignore` への `/.worktree/` の追記など）を導入先に追加してください。BRW はこの設定を書き換えません。」`poc/design_02.md` の 2。
 
 **利用箇所の振る舞い**
-- `brw create`: 配置先 `placementOf` に worktree を作る。作成に成功した後に `ignoreStatus` が `not-ignored` なら `ignoreWarning` を標準出力に出す（作成は続いている）。`--branch-only` では出さない。
-- `brw resume`: 既存 worktree がブランチ名で見つかり、それが旧置き場なら、worktree を作らず `legacyMoveGuidance` で拒否する（終了コード 1）。旧置き場以外の既存 worktree の再利用は従来どおり。ローカル・リモートから再作成する経路は `placementOf` に作り、成功後に `create` と同じ警告を出す。他のブランチの `resume` は旧置き場の worktree の存在に影響されない（要件 7.7）。
-- `brw finish`: `finishBlocker` が、対象ブランチの worktree が旧置き場のとき「worktree は旧置き場にあるため BRW は片付けません。移すか、`git worktree remove` で手動で片付けてください（ブランチも消しません）」を返す。`finish --merged` は「残します: <ブランチ> — <理由>」の行になる。
+- `brw create`: 配置先 `placementOf` に worktree を作る。**`create` 全体が最終的に成功した後**（`--carry` の適用・宣言ファイルの移動・フックの有効化まで済み、巻き戻しが起きない時点）に、`ignoreStatus(main)` が `not-ignored` なら `ignoreWarning` を標準出力に 1 回だけ出す。途中で失敗して巻き戻した場合は出さない。`--branch-only` では出さない。
+- `brw resume`: 既存 worktree がブランチ名で見つかり、それが旧置き場なら、worktree を作らず `legacyMoveGuidance` で拒否する（終了コード 1）。旧置き場以外の既存 worktree の再利用は従来どおり。ローカル・リモートから再作成する経路は `placementOf` に作り、`resume` 全体の成功後に `create` と同じ警告を 1 回だけ出す（既存 worktree の再利用では出さない）。他のブランチの `resume` は旧置き場の worktree の存在に影響されない（要件 7.7）。
+- `brw finish`: `finishBlocker` が、対象ブランチの worktree が旧置き場のとき、「worktree は旧置き場 <旧パス> にあるため BRW は片付けません（ブランチも消しません）。次のどちらかで進めてください。1) `legacyMoveGuidance` の手順で新しい配置先へ移してから、もう一度 `brw finish <ブランチ>`。2) 未コミットの変更が無いことを確かめて `git worktree remove <旧パス>` で手動で片付け、取り込み済みなら `git branch -d <ブランチ>`」を返す。`finish --merged` は「残します: <ブランチ> — <理由>」の行になる。
 - `carry.mjs`: 未追跡の一覧から `placementPrefix()` で始まるパスを除く。
 - `agent-hooks.mjs` の `mainOfStart`: `CLAUDE_PROJECT_DIR` が `<本体>/.worktree/<別名>` の形のときに本体を導く（`poc/design_01.md` の 2）。
 
@@ -459,7 +459,8 @@ BRW 案内: 置き換え | 拒否
 - 置き換えの `git switch -c`（本体）が `.worktree/<別名>` に作る書き換えコマンドになり、旧置き場を指す `git worktree add` は配置先外として拒否されること（1.5）。
 - EnterWorktree: `.worktree/` の下の開発ブランチの worktree への `path` は通過、旧置き場を指す `path` は `gate-enter-legacy` の拒否（旧パス・新パス・手順つき）、それ以外は従来の拒否（2.2、2.3、2.6）。案内の理由に承認の注意が含まれること（D3）。
 - `--carry` と置き換えの案内の未追跡の件数に、`.worktree/` の配下が含まれないこと（7.8）。
-- 無視の警告: 無視されていない本体で `create`・`resume`（作成・再作成）が成功後に警告を出して作成は続き、`.gitignore` の `/.worktree/`・`info/exclude` の `.worktree/` で無視されているときは出さないこと。`--branch-only`・既存 worktree の再利用では出さないこと。導入先の `.gitignore`・`info/exclude` が書き換わらないこと（7.9、7.10）。
+- 無視の警告: 無視されていない本体で `create`・`resume`（作成・再作成）が最終的に成功した後に警告を 1 回だけ出して作成は続き、`.gitignore` の `/.worktree/`・`info/exclude` の `.worktree/` で無視されているときは出さないこと。**子の名前だけを無視する設定（`/.worktree/<別名>`）のときは警告を出す**こと。`--carry` の失敗などで巻き戻した場合・`--branch-only`・既存 worktree の再利用・判定不能（git の外など）では出さないこと。導入先の `.gitignore`・`info/exclude` に `.worktree/` の行が増えないこと（7.9、7.10）。
+- 旧置き場の worktree が 1 つあるリポジトリで、4 経路（`brw resume`・`brw finish`・置き換えの再開先・EnterWorktree の `path`）が同じ旧パスを判定し、それぞれ拒否または対象外にして、案内に同じ旧パスと新しい配置先を含むこと（7.4〜7.6、2.6）。サブモジュールを持つ旧置き場の worktree でも、移せないときの手順が案内に含まれること。
 - `scripts/` に旧置き場の文字列 `.claude/worktrees` が `placement.mjs` と `.brw/` の定数以外に残っていないことの機械的な検査。
 - `mainOfStart` が `CLAUDE_PROJECT_DIR` の `<本体>/.worktree/<別名>` の形で本体を導き、旧置き場の形では導かないこと。
 

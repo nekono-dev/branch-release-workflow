@@ -9,6 +9,9 @@
 - G: `git worktree add .worktree/dev-x -b dev/x`（`.worktree/` が存在しない状態）と、その連携 worktree の中での `git worktree list --porcelain` の先頭の行。
 - H・I・J: 旧置き場 `.claude/worktrees/<別名>` の worktree を `git worktree move` で `.worktree/<別名>` へ移す。未コミットの変更・未追跡ファイルがある場合と、ロックされている場合。
 - 別の確認（同日、同じ環境）: `.worktree/` を無視していないリポジトリで、本体の `git status` と `git add -A` が worktree をどう扱うか。
+- K・L: 配置先そのものを調べる方法として、存在しない子のパス `.worktree/.brw-probe` に `git check-ignore` を使い、子の名前だけを無視する設定（`/.worktree/dev-x`）とディレクトリ全体の無視（`/.worktree/`）を見分けられるか。
+- M・N: `.worktree/<別名>` の worktree に対する `git worktree remove`（クリーン・変更あり・`--force`）と、`--carry` と同じ手順（本体で `git stash create`、worktree で `git stash apply`、本体で `git restore --staged --worktree --source=HEAD`）。
+- O: git 2.43 のマニュアル（`git help -m worktree`）で、サブモジュールを持つ worktree の移動・削除の規則。
 
 ## 実施日
 2026-11-28
@@ -23,7 +26,11 @@ git 2.43.0、Linux（Ubuntu）。
 4. **本体の特定（要件 7.3）**: 連携 worktree の中で `git worktree list --porcelain` の先頭の `worktree` 行は、本体の作業ツリーだった。→ 現行どおり、一覧の先頭を本体とすれば、worktree の中からでも入れ子の配置先を作らない。
 5. **旧置き場からの移動手順（要件 7.5・7.6）**: `git worktree move <旧> <新>` で、未コミットの変更・未追跡ファイルがある worktree も、そのまま新しい場所へ移せた（移動後の `status` に変更と未追跡が残る）。**ロックされた worktree は `fatal: cannot move a locked working tree; use 'move -f -f' to override or unlock first` で拒否された。** → 案内は、`git worktree move <旧パス> <新パス>` と、ロックされているときは先に `git worktree unlock <旧パス>`。
 
+6. **配置先そのものの検出（K・L）**: 子の名前だけを無視する設定では、`.worktree/dev-x` は終了コード 0 だが、存在しない子 `.worktree/.brw-probe` は **1**（無視されない）。ディレクトリ全体を無視する設定（`/.worktree/`）では、どちらも **0**。→ 無視の検出は、作成先の別名ではなく **`.worktree/.brw-probe`**（常に存在しない固定の子のパス）で行う。配置先のディレクトリ全体が無視されているときだけ 0 になり、別名の個別の設定だけでは警告になる（要件 7.10）。
+7. **新配置先での削除と `--carry`（M・N）**: クリーンな worktree は `git worktree remove` で消せ、変更・未追跡がある worktree は `contains modified or untracked files, use --force to delete it` で拒否された（`--force` で削除できた）。`--carry` と同じ手順（`git stash create` → worktree で `git stash apply` → 本体で `git restore --staged --worktree --source=HEAD`）は、`.worktree/<別名>` でも従来どおり動き、本体の変更が戻った。→ `finish`・`--carry` は置き場所に依存しない（既存の試験の期待値の置き換えだけ）。
+8. **サブモジュールの制約（O、git 2.43 のマニュアル）**: 「the main worktree or linked worktrees containing submodules cannot be moved with this command」。削除は「Unclean worktrees or ones with submodules can be removed with --force」。→ サブモジュールを持つ旧置き場の worktree は `git worktree move` で移せない。案内に、移せないときの手順（変更を保持して止まる。未コミットの変更を commit か退避してから `git worktree remove <旧パス>` の後に `brw resume <ブランチ>`）を含める。
+
 ## 確かめられなかったこと
-- サブモジュールを持つ worktree の移動（`git worktree move` はサブモジュールを持つ worktree を移せないことがある）。
+- サブモジュールを持つ worktree を実際に移そうとしたときの出力（マニュアルの記述のみ）。
 - Windows でのパスの扱い。
 - グローバルの除外設定（`core.excludesFile`）の検出（同じ `check-ignore` が参照するが、今回は一時リポジトリのローカル設定だけを試した）。
