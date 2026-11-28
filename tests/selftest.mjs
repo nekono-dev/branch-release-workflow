@@ -38,6 +38,8 @@ import { runAgentHookSessionChecks } from "./agent-hooks-session.mjs";
 import { runHookInstallChecks } from "./hook-install.mjs";
 import { runHookDiagnoseChecks } from "./hook-diagnose.mjs";
 import { runBranchOpsChecks } from "./branch-ops.mjs";
+import { runPlacementChecks } from "./placement.mjs";
+import { runPlacementIntegrationChecks } from "./placement-integration.mjs";
 import { runPublishCliChecks } from "./publish-cli.mjs";
 import { runSetupCliChecks } from "./setup-cli.mjs";
 import { runIntegrationPublishChecks } from "./integration-publish.mjs";
@@ -664,6 +666,10 @@ await runHookDiagnoseChecks(eq);
 
 // ---- CLI のブランチ操作と共通判定、開発間のローカル取り込み、片付け条件（brw-enforcement 7.1） ----
 await runBranchOpsChecks(eq);
+
+// ---- 配置先の部品と、配置先・旧置き場の統合（brw-branch-gate 6.1・6.2・7.3） ----
+await runPlacementChecks(eq);
+await runPlacementIntegrationChecks(eq);
 
 // ---- 完了公開の CLI（brw-enforcement 7.2） ----
 await runPublishCliChecks(eq);
