@@ -46,4 +46,4 @@ BRW（branch-release-workflow。作業ブランチ運用を強制するフック
 - [x] discovery-notes-removal -- 作る決まりのない `.kiro/discovery-notes/` を削除し、取り決めと参照から外す（実装・設計に作る仕組みは無く、取り消す実装は不要）。
 
 ## Specs (dependency order)
-- [ ] brw-fresh-start -- create / resume の前に BRW の最新化を確認し、失敗時は中止する。Dependencies: brw-branch-gate
+- [ ] brw-fresh-start -- create / resume の前に BRW の最新化を確認し、失敗時は中止する。最新化の確認は、他の製品でも使える汎用の仕組みとして作る。Dependencies: brw-branch-gate
