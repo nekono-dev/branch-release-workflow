@@ -87,6 +87,17 @@ export const runCarryChecks = async (eq) => {
   // ---- 呼び出し側が別に扱ったファイルは、移さなかった一覧から除く ----
   eq("brw-branch-gate/1.13 exclude に挙げたパスは、移さなかった一覧に含めない", carryChanges({ source: clean.src, worktree: clean.wt, startOid: clean.head, branch: "dev/carry", exclude: ["untracked.txt"] }).skipped, []);
 
+  // ---- 未追跡の一覧から除くのは配置先（.worktree/）の配下だけ。旧置き場（.claude/worktrees/）の配下は除かない ----
+  const place = setup();
+  dirty(place);
+  mkdirSync(join(place.src, ".worktree", "keep"), { recursive: true });
+  writeFileSync(join(place.src, ".worktree", "keep", "x.txt"), "x\n");
+  mkdirSync(join(place.src, ".claude", "worktrees", "legacy"), { recursive: true });
+  writeFileSync(join(place.src, ".claude", "worktrees", "legacy", "y.txt"), "y\n");
+  const pr = carryChanges({ source: place.src, worktree: place.wt, startOid: place.head, branch: "dev/carry" });
+  eq("brw-branch-gate/7.8 配置先（.worktree/）の配下の未追跡のファイルは、移さなかった一覧と件数に含まれない", [pr.kind, pr.skipped.filter((p) => p.startsWith(".worktree/"))], ["carried", []]);
+  eq("brw-branch-gate/7.8 旧置き場（.claude/worktrees/）の配下の未追跡のファイルは、除外の対象でなく一覧に含まれる", [...pr.skipped].sort(), [".claude/worktrees/legacy/y.txt", "untracked.txt"]);
+
   // ---- 失敗: 開始点が元の HEAD と異なる → 元を変えない ----
   const off = setup();
   dirty(off);
@@ -167,7 +178,7 @@ export const runCarryChecks = async (eq) => {
   const r1 = brw(c1, "create", "foo", "--carry");
   const wt1 = join(c1, ".claude", "worktrees", "dev-foo");
   eq("brw-branch-gate/1.10 brw create --carry は変更を新しい worktree へ移し、元から取り除く", [r1.status, readFileSync(join(wt1, "a.txt"), "utf8"), git(c1, "status", "--porcelain").includes("a.txt")], [0, "a2\n", false]);
-  eq("brw-branch-gate/1.13 --carry は移さなかった未追跡のファイルを表示し、worktree の置き場は含めない", [r1.stdout.includes("u.txt"), r1.stdout.includes("- .claude/worktrees/"), r1.stdout.includes("git stash apply refs/brw/carry/dev/foo")], [true, false, true]);
+  eq("brw-branch-gate/1.13 --carry は移さなかった未追跡のファイルを表示し、配置先（.worktree/）の配下は含めない", [r1.stdout.includes("u.txt"), r1.stdout.includes("- .worktree/"), r1.stdout.includes("git stash apply refs/brw/carry/dev/foo")], [true, false, true]);
   // 連携 worktree から実行しても、配置先は本体の .claude/worktrees/（入れ子にしない）
   writeFileSync(join(wt1, "a.txt"), "a3\n");
   const r2 = brw(wt1, "create", "bar", "--carry");

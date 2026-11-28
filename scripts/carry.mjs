@@ -9,6 +9,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { placementPrefix } from "./placement.mjs";
 
 const CARRY_REF_PREFIX = "refs/brw/carry/";
 const ZERO = /^0+$/;
@@ -52,8 +53,8 @@ export function carryChanges({ source, worktree, startOid, branch, exclude = [],
   if (wtHead !== start) return fail("新しい worktree の HEAD が開始点と異なるため、移しません。");
   if (run(source, ["ls-files", "-u"]).out.trim() !== "") return fail("解決していない競合があるため、変更を移せません。");
 
-  // 移さない未追跡のファイル（無視されるファイルと、BRW の worktree の置き場は対象外）
-  const skipped = nulList(run(source, ["ls-files", "-z", "--others", "--exclude-standard"]).out).filter((p) => !exclude.includes(p) && !p.startsWith(".claude/worktrees/"));
+  // 移さない未追跡のファイル（無視されるファイルと、配置先（.worktree/）の配下は対象外。旧置き場の配下は対象に含める）
+  const skipped = nulList(run(source, ["ls-files", "-z", "--others", "--exclude-standard"]).out).filter((p) => !exclude.includes(p) && !p.startsWith(placementPrefix()));
 
   // ① 変更を表すコミット S（退避の置き場には記録されない）。出力が空なら移す変更は無い
   const created = run(source, ["stash", "create"]);
