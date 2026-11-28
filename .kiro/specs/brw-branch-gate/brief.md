@@ -43,7 +43,7 @@
 
 ## Out of Boundary
 - cc-sdd-bootstrap 側の「ブランチ作成を強制する」指示の実装。
-- brw create の中身（命名規則の検証・worktree の配置先）の変更。
+- brw create の命名規則の検証の変更（配置先は、2026-11-28 の更新で範囲内にした。下の「更新」を参照）。
 - GitHub 側の保護設定。
 
 ## Upstream / Downstream
@@ -67,3 +67,18 @@
 - EnterWorktree の入力（名前・分岐元）の読み取りと、置き換え・拒否のどちらにするか。
 - 機械可読な案内の形式（フック応答の理由欄の書式など）。
 - 既存ブランチへの切り替え（再開）を、`brw resume` へ置き換えるか拒否にするか。
+
+## 更新（2026-11-28）: 配置先を `<本体>/.worktree/` に変える
+
+### 背景
+- Codex など Claude 以外のエージェントからも使える中立の場所にするため、worktree の置き場を `<本体>/.claude/worktrees/` から `<本体>/.worktree/`（単数形）に変える（利用者の決定）。旧置き場は認識しない（完全に切り替える。旧置き場の既存の worktree は、利用者が手で移す）。
+- 配置先を具体的なパスで定めているのは、この仕様の要件（1.5）と EnterWorktree の判定（3.x）だけで、`brw create`・`brw resume` が実際に作る場所は、どの仕様の要件にも書かれていない。そのため、配置先の決まりをこの仕様が持つ。
+
+### 範囲の変更
+- **In（追加）**: `brw create`・`brw resume` が worktree を作る場所を `<本体>/.worktree/<alias>` と定めること。置き換え・拒否・EnterWorktree の `path` の判定で使う「配置先」を `.worktree/` の配下に改めること。旧置き場の worktree を、配置先として認めないこと。
+- **Out（変更なし・別の仕様）**: PR 本文の置き場 `.brw/` の移動（`brw-pr-handoff`。実装の後、続けて移す）。導入先の `.gitignore` への追記と、導入・更新の流れ（`brw-install-flow`）。BRW 自身が導入先の `.gitignore` や `info/exclude` を書き換えること（しない。案内は `brw-install-flow`）。
+
+### 制約
+- 置き場の名前は `.worktree`（単数形）に固定する。
+- 配置先の変更は、移行期に PR 本文だけが旧置き場 `.claude/worktrees/.brw/` に残ることを許す（`brw-pr-handoff` の更新まで）。
+
