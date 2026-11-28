@@ -8,7 +8,7 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 
 ## Boundary Context
 
-- **In scope**: ブランチ・worktree の作成と作業場所の変更を試みる入口の判定、命名規則に合う素の git コマンドの `brw create` への置き換え、置き換えられない場合の拒否と案内、未コミットの変更を移す `brw create --carry`、EnterWorktree の拒否と 2 手の案内、既存ブランチへの切り替えの扱い、利用者向けの資料と検査、作業場所の配置先を `<本体>/.worktree/` にすること（`brw create`・`brw resume` が作る場所、旧置き場の worktree の扱い）。
+- **In scope**: ブランチ・worktree の作成と作業場所の変更を試みる入口の判定、命名規則に合う素の git コマンドの `brw create` への置き換え、置き換えられない場合の拒否と案内、未コミットの変更を移す `brw create --carry`、EnterWorktree の拒否と 2 手の案内、既存ブランチへの切り替えの扱い、利用者向けの資料と検査、作業場所の配置先を `<本体>/.worktree/` にすること（`brw create`・`brw resume` が作る場所、旧置き場の worktree の扱い、配置先が無視されていないときの警告）。
 - **Out of scope**: cc-sdd-bootstrap と kiro 系スキルの変更、`brw create` の命名規則・分岐元の変更（`--carry` の追加と、2026-11-28 の更新による配置先の変更を除く）、未追跡のファイルの移動、保護規則・Ruleset の変更、PR 作成・片付けの流れ（brw-pr-handoff）、宣言のないリポジトリの挙動の変更、PR 本文の置き場 `.brw/` の移動（brw-pr-handoff の更新で続けて行う。それまで PR 本文だけが旧置き場 `.claude/worktrees/.brw/` に残る）、導入先の `.gitignore`・共通の除外設定への `.worktree/` の追記と、その案内（brw-install-flow）。
 - **Adjacent expectations**: 作業ブランチの作成・再開は、既存の `brw create` と `brw resume`（brw-enforcement）が行う。呼び出し側は素の git で試みるだけで、BRW を呼ぶ手順を知る必要はない。Codex では入力の書き換えを前提とせず、拒否と案内で扱う。 導入先で `.worktree/` を無視する設定は、導入・更新の流れ（brw-install-flow）が案内する。この仕様の BRW は、導入先の無視の設定を書き換えない。
 
@@ -94,7 +94,7 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 2. If 入口のいずれかが判定の対象になっていないとき, then the BRW shall 対象外の入口と、有効にする手順を表示する。
 3. The BRW shall 利用者向けの資料に、置き換えと拒否のそれぞれの挙動、作業場所の移動の条件、Codex との違いを記載する。
 4. The BRW shall 呼び出し側の指示（通常のブランチ作成）と、BRW が返す案内の対応を資料に例示する。
-5. The BRW shall 利用者向けの資料に、配置先が `<本体>/.worktree/` であること、旧置き場の worktree を利用者が手で移す手順（BRW は自動で移さない）、導入先で `.worktree/` を無視する設定が必要なことを記載する。
+5. The BRW shall 利用者向けの資料に、配置先が `<本体>/.worktree/` であること、旧置き場の worktree を利用者が手で移す手順（BRW は自動で移さない）、導入先で `.worktree/` を無視する設定が必要なこと、無視されていないときに出る警告の内容を記載する。
 
 ### Requirement 7: 作業場所の配置先を、特定のエージェントに依存しない 1 か所にする
 
@@ -110,4 +110,5 @@ BRW 導入リポジトリで、エージェントが通常の方法（素の git
 7. While 旧置き場に worktree が残っている, the BRW shall 他のブランチに対する `brw create`・`brw resume` を妨げない。
 8. When `--carry` や置き換えの案内で未追跡のファイルの一覧と件数を示すとき, the BRW shall 配置先の配下を含めない。
 9. The BRW shall 導入先の `.gitignore` と共通の除外設定を、配置先の変更のために書き換えない。
+10. When `brw create` または `brw resume` が worktree を作るとき、かつ配置先 `.worktree/` が導入先のリポジトリで無視されていないとき, the BRW shall 警告を表示し、worktree の作成は続ける。警告には、本体で `git add -A` などを実行すると worktree が埋め込みリポジトリとして誤って追加されること、`.worktree/` を無視する設定を導入先に追加する必要があることを含める。この警告のために導入先の設定を書き換えない。
 
