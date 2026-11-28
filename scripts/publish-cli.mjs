@@ -9,6 +9,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { branchBase, classifyBranch, currentBranch, git, loadConfig, repoRoot } from "./lib.mjs";
+import { bodyRootOf } from "./placement.mjs";
+import { isUnderLegacyBody, legacyBodyMessage } from "./pr-template.mjs";
 import { createGitHubSession } from "./github-client.mjs";
 import * as publish from "./publish.mjs";
 import { unknownDestinationText } from "./remote-url.mjs";
@@ -272,17 +274,21 @@ async function cmdPlan(args, d) {
 /**
  * 本文ファイルを読む。次のどちらかの通常ファイルに限る（フックの信頼判定と同じ基準: 実体パスで配下を確認し、`..`・配下の外へのリンクは拒否）。
  *   - 作業ディレクトリ配下の相対パス
- *   - 本体の worktree 置き場（<本体>/.claude/worktrees/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）
+ *   - 本体の配置先の本文置き場（<本体>/.worktree/.brw/）の配下の絶対パス（brw pr-template が作る本文ファイル）。旧い置き場の絶対パスは案内つきで拒否する
  */
 export function readBody(cwd, file) {
-  const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.claude/worktrees/.brw/）の配下の絶対パスで指定してください。" };
+  const bad = { error: "本文ファイルは作業ディレクトリ配下の相対パスか、brw pr-template が作る本文置き場（.worktree/.brw/）の配下の絶対パスで指定してください。" };
   if (file === "" || file.includes("\0") || file.split(/[\\/]/).includes("..")) return bad;
   try {
     let root;
     if (isAbsolute(file)) {
       const main = publish.worktreeMainOf(cwd);
       if (!main) return bad;
-      root = realpathSync(join(main, ".claude", "worktrees", ".brw"));
+      // 旧い置き場の絶対パスは受け付けず、移し方を示して拒否する（自動では移さない）
+      if (isUnderLegacyBody(main, file)) return { error: legacyBodyMessage(main, file) };
+      // 本文置き場が想定の場所（実体）でないとき（リンクで旧置き場などを指す）は読まない
+      root = bodyRootOf(main);
+      if (root === null) return bad;
     } else {
       root = realpathSync(cwd);
     }

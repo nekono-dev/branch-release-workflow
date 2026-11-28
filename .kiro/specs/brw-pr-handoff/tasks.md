@@ -222,7 +222,7 @@
   - _Depends: 9.7_
   - _Requirements: 4.9, 7.4_
 - [ ] 10. 本文置き場を `.worktree/.brw/` に移す（brw-branch-gate の配置先の変更に合わせる）
-- [ ] 10.1 本文置き場の定数と読み取りを新しい置き場に切り替える
+- [x] 10.1 本文置き場の定数と読み取りを新しい置き場に切り替える
   - `scripts/pr-template.mjs` の `bodyPathOf` を `<本体>/.worktree/.brw/<alias>.md` にし、`publish-cli.mjs` の `readBody`・`agent-hooks.mjs` の本文パスの許可の判定を新しい置き場の配下に変える（実体パスの確認・`..`・リンクの拒否は従来どおり）。旧置き場の配下の絶対パスは、`brw-branch-gate` の `legacyMoveGuidance` の移し方を示して拒否する（自動では移さない）。`cleanup.mjs` は新しい置き場の本文だけを消す。
   - 完了の状態: `brw pr-template` が示す本文の場所と `brw pr` が受け付ける場所が `.worktree/.brw/` で、旧置き場の本文は拒否される。`tests/placement-integration.mjs` の `.brw` の許可リストを新しい置き場に合わせ、`scripts/` に旧置き場の文字列が `placement.mjs`（配置先の旧置き場の判定と案内）以外に残らない。
   - _Boundary: 本文置き場、フックの本文パス判定_

@@ -163,4 +163,14 @@ export const runCleanupChecks = async (eq) => {
   const syInfo = sy.info();
   const swhy = finishBlocker(syInfo.main, syInfo.others, CONFIG, "dev/foo", "develop");
   eq("brw-branch-gate/5.1 配置先がシンボリックリンクのときは所属を判定できないとして片付けず、理由を返す（worktree もブランチも消さない）", [typeof swhy === "string" && swhy.includes("判定できない"), swhy?.includes(".claude/worktrees") ?? true, exists(sy).wt, exists(sy).branch], [true, false, true, true]);
+
+  // 本文置き場（.worktree/.brw）がリンクで旧置き場（.claude/worktrees/.brw）を指すとき、旧置き場の本文は消さない（要件 3.12）。片付け自体は行う
+  const lk = setup();
+  const legacyBodyDir = join(lk.main, ".claude", "worktrees", ".brw");
+  mkdirSync(legacyBodyDir, { recursive: true });
+  writeFileSync(join(legacyBodyDir, "dev-foo.md"), "旧置き場の本文\n");
+  rmSync(join(lk.main, ".worktree", ".brw"), { recursive: true, force: true });
+  symlinkSync(legacyBodyDir, join(lk.main, ".worktree", ".brw"));
+  const lkRes = run(lk);
+  eq("brw-pr-handoff/3.12 本文置き場がリンクで旧置き場を指すとき、旧置き場の本文を消さず、片付けは行う", [lkRes.kind, existsSync(join(legacyBodyDir, "dev-foo.md"))], ["cleaned", true]);
 };
