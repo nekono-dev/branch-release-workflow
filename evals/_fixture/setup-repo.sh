@@ -42,7 +42,7 @@ cat > README.md <<'MD'
 
 ローカルでは `index.html` をブラウザで開いて確認でます。
 MD
-echo ".claude/worktrees/" > .gitignore
+echo ".worktree/" > .gitignore
 if [ "$variant" != no-config ]; then
   mkdir -p .claude
   cat > .claude/branch-release-workflow.json <<'JSON'
@@ -73,13 +73,13 @@ case "$variant" in
   dirty-main)
     sed -i 's#<footer><p>&copy; Sample Shop</p></footer>#<footer><p>\&copy; Sample Shop</p><p>営業時間: 10:00-18:00</p></footer>#' index.html ;;
   unpushed-work)
-    git worktree add -q --no-track -b dev/contact-link .claude/worktrees/dev-contact-link origin/develop
-    ( cd .claude/worktrees/dev-contact-link
+    git worktree add -q --no-track -b dev/contact-link .worktree/dev-contact-link origin/develop
+    ( cd .worktree/dev-contact-link
       sed -i 's#<footer><p>&copy; Sample Shop</p></footer>#<footer><p>\&copy; Sample Shop</p><p><a href="/contact">お問い合わせ</a></p></footer>#' index.html
       git commit -q -am "フッターにお問い合わせへのリンクを追加" ) ;;
   pushed-remote)
-    git worktree add -q --no-track -b dev/login-form .claude/worktrees/dev-login-form origin/develop
-    ( cd .claude/worktrees/dev-login-form
+    git worktree add -q --no-track -b dev/login-form .worktree/dev-login-form origin/develop
+    ( cd .worktree/dev-login-form
       cat > login.html <<'HTML'
 <!doctype html>
 <html lang="ja">
@@ -95,16 +95,16 @@ case "$variant" in
 HTML
       git add login.html && git commit -q -m "ログインフォームを追加"
       git push -q origin dev/login-form )
-    git worktree remove .claude/worktrees/dev-login-form
+    git worktree remove .worktree/dev-login-form
     git branch -q -D dev/login-form ;;
   merged-work)
-    git worktree add -q --no-track -b dev/contact-link .claude/worktrees/dev-contact-link origin/develop
-    ( cd .claude/worktrees/dev-contact-link
+    git worktree add -q --no-track -b dev/contact-link .worktree/dev-contact-link origin/develop
+    ( cd .worktree/dev-contact-link
       sed -i 's#<footer><p>&copy; Sample Shop</p></footer>#<footer><p>\&copy; Sample Shop</p><p><a href="/contact">お問い合わせ</a></p></footer>#' index.html
       git commit -q -am "フッターにお問い合わせへのリンクを追加"
       git push -q origin dev/contact-link )
-    git worktree add -q --no-track -b dev/wip-banner .claude/worktrees/dev-wip-banner origin/develop
-    ( cd .claude/worktrees/dev-wip-banner
+    git worktree add -q --no-track -b dev/wip-banner .worktree/dev-wip-banner origin/develop
+    ( cd .worktree/dev-wip-banner
       sed -i 's#<main>#<div class="banner">セール準備中</div>\n  <main>#' index.html
       git commit -q -am "バナーを追加（作業中）"
       git push -q origin dev/wip-banner )
@@ -115,8 +115,8 @@ HTML
     rm -rf "$tmp"
     git fetch -q origin ;;
   design-note-uncommitted)
-    git worktree add -q --no-track -b dev/design-note .claude/worktrees/dev-design-note origin/develop
-    ( cd .claude/worktrees/dev-design-note
+    git worktree add -q --no-track -b dev/design-note .worktree/dev-design-note origin/develop
+    ( cd .worktree/dev-design-note
       mkdir -p docs
       cat > docs/design-note.md <<'MD'
 # 設計メモ
@@ -134,8 +134,8 @@ MD
     git push -q origin develop ;;
   published-cleaned)
     # PR を作って片付けた後の状態: dev/login-form は push 済みで、worktree とローカルのブランチは無い。再開の記録が残っている
-    git worktree add -q --no-track -b dev/login-form .claude/worktrees/dev-login-form origin/develop
-    ( cd .claude/worktrees/dev-login-form
+    git worktree add -q --no-track -b dev/login-form .worktree/dev-login-form origin/develop
+    ( cd .worktree/dev-login-form
       cat > login.html <<'HTML'
 <!doctype html>
 <html lang="ja">
@@ -151,7 +151,7 @@ MD
 HTML
       git add login.html && git commit -q -m "ログインフォームを追加"
       git push -q origin dev/login-form )
-    git worktree remove .claude/worktrees/dev-login-form
+    git worktree remove .worktree/dev-login-form
     git branch -q -D dev/login-form
     mkdir -p "$(git rev-parse --git-common-dir)/brw"
     printf '{"version":1,"entries":[{"branch":"dev/login-form","prUrl":"https://github.com/acme/app/pull/12","repository":"acme/app","sessionId":null,"at":"%s"}]}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$(git rev-parse --git-common-dir)/brw/resume.json"

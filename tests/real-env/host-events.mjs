@@ -354,10 +354,10 @@ const SCENARIOS = {
         git(team, "config", "user.name", "brw-verify"); git(team, "config", "user.email", "brw-verify@example.invalid");
         git(team, "remote", "set-url", "origin", ORIGIN); git(team, "config", "core.sshCommand", join(FAKEBIN, "fakessh"));
         git(team, "branch", VERIFY_BRANCH, "main");
-        appendFileSync(join(team, ".git/info/exclude"), ".claude/\n.codex/\n");
+        appendFileSync(join(team, ".git/info/exclude"), ".claude/\n.codex/\n.worktree/\n");
         installCodexHooks({ repoDir: team, launcherPath: real });
       }
-      const wa = join(team, ".claude/worktrees/dev-x6a"); const wb = join(EV, "ws-codex", "wt-unregistered");
+      const wa = join(team, ".worktree/dev-x6a"); const wb = join(EV, "ws-codex", "wt-unregistered");
       mkdirSync(join(EV, "codex-home-empty"), { recursive: true });
       let created = "";
       if (!existsSync(wa)) { const r = sh(team, "node", [BRW_CLI, "create", "x6a"], { GIT_SSH_COMMAND: join(FAKEBIN, "fakessh"), CODEX_HOME: join(EV, "codex-home-empty") }); created = r.out + r.err; if (r.code !== 0) return { ok: false, notes: [`brw create に失敗: ${created.slice(0, 300)}`] }; }

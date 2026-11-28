@@ -129,7 +129,7 @@ node tests/real-env/stop-observe.mjs --host claude        # Claude を 1 回呼�
 node tests/real-env/stop-observe.mjs --host codex         # Codex を 1 回呼び出して判定
 ```
 
-- 作業場所は `/tmp/brw-real-env/stop-observe/<ホスト>-*/`（本体と worktree は一時リポジトリ。作業の記録・状態ファイルは作らない）。登録ファイル（`.claude/`・`.codex/`）は本体の `.git/info/exclude` で未追跡の表示から外す。worktree は本体の `.claude/worktrees/wt` に作る（`poc/claude-stop-cwd.sh` で Stop の作業ディレクトリが worktree に追従した配置と同じ。本体の外に置くと、シェルの `cd` が引き継がれず本体で Stop が起きて観測できなかった）。
+- 作業場所は `/tmp/brw-real-env/stop-observe/<ホスト>-*/`（本体と worktree は一時リポジトリ。作業の記録・状態ファイルは作らない）。登録ファイル（`.claude/`・`.codex/`）は本体の `.git/info/exclude` で未追跡の表示から外す。worktree は本体の `.worktree/wt` に作る（`poc/claude-stop-cwd.sh` で Stop の作業ディレクトリが worktree に追従した配置と同じ。本体の外に置くと、シェルの `cd` が引き継がれず本体で Stop が起きて観測できなかった）。
 - 判定は 2 項目: (a) 1 回目の Stop が未コミットの変更で block され、`stop_hook_active:true` の再入は block されずに通る、(b) すべての Stop の作業ディレクトリが worktree と一致する。
 - 結果は標準出力に、ホスト・版・日時つきの Markdown として出る。「観測結果の要約」へ追記する。記録が無い・想定と違う結果は「未観測」「不一致」と書き、成功として扱わない。
 - 呼び出し回数は host-events.mjs と同じ共有のカウンタ（`events/calls.json`、上限は Claude 12・Codex 14）で数える。Codex だけ `--dangerously-bypass-hook-trust` を 1 回の呼び出しに付ける。利用者の `~/.claude`・`~/.codex` の設定は書き換えない。
