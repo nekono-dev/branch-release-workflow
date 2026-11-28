@@ -15,15 +15,15 @@
 
 ## 設計の確認
 
-- 判定: 未通過
+- 判定: 通過
 
-確認日 2026-11-28。**根拠の無い前提: あり（下の 3）**。
+確認日 2026-11-28。根拠の無い前提: なし（Codex の前提 3 は `poc/design_03.md` で確認した）。
 
 | # | 前提 | 根拠 |
 |---|---|---|
 | 1 | EnterWorktree の `path` が `.worktree/<別名>` で、承認を与えれば入れる。BRW のフックの許可では承認を省けない | **一次資料** https://code.claude.com/docs/en/tools-reference「EnterWorktree tool behavior」・https://code.claude.com/docs/en/worktrees（2026-11-28 取得。「a `path` outside `.claude/worktrees/` prompts for your approval before entering」「An `EnterWorktree` permission rule or choosing "don't ask again" doesn't suppress this prompt; only `bypassPermissions` mode skips it.」）。**PoC** `poc/design_01.md` の 1（フックが `allow` を返しても確認で止まる。`.claude/worktrees/` は確認なし）。承認を与えた場合に入れることは、文書の記述のみ（実機では未実施）。**設計への反映**: 案内に承認の注意を書き、移動は `cd` を実用の手段とする |
 | 2 | フックが `.worktree/<別名>` で開始したセッション・EnterWorktree で入ったセッションの両方に届く。`CLAUDE_PROJECT_DIR` の値で本体を導ける | **PoC** `poc/design_01.md` の 2・3（開始時は `cwd`・`CLAUDE_PROJECT_DIR` が worktree 自身、EnterWorktree 後は `cwd` が worktree・`CLAUDE_PROJECT_DIR` が本体）。**一次資料** https://code.claude.com/docs/en/hooks「Reference scripts by path」、https://code.claude.com/docs/en/worktrees「What worktrees share with the main checkout」（「plugins installed at project scope from the main checkout also load in worktrees of the same repository.」。`settings.local.json` は本体のルートを使う）、https://code.claude.com/docs/en/settings（2026-11-28 取得）。本体側だけにある project スコープのプラグインの導入が worktree で読まれることは、この一次資料による（実機では、worktree 自身にコミットされた設定で確認）。**設計への反映**: `mainOfStart` の形を `.worktree/<別名>` にする |
-| 3 | **Codex が `.worktree/<別名>` の linked worktree でも、本体の `.codex/hooks.json` を読んでフックを届ける** | **未確認**。一次資料 https://learn.chatgpt.com/docs/hooks（2026-11-28 取得）は「In a linked Git worktree, a project layer can read hooks from the corresponding directory in the main checkout.」とだけ書き、worktree の置き場所による違いと、worktree 側の `.codex/` の要否は記載なし。旧置き場では Codex 0.167 で確認済み（`references/setup.md`）だが、新しい置き場の実機は未実施（認証の一時コピーが要るため、利用者の判断を待つ） |
+| 3 | Codex が `.worktree/<別名>` の linked worktree でも（worktree に空の `.codex/` があれば）、本体の `.codex/hooks.json` を読み込む | **PoC** `poc/design_03.md`（Codex 0.172.0、`hooks/list`: `.worktree/dev-x` で本体の `hooks.json` が読まれ、`.codex/` の無い worktree では読まれず、旧置き場の比較と同じ結果）。**一次資料** https://learn.chatgpt.com/docs/hooks（2026-11-28 取得）「In a linked Git worktree, a project layer can read hooks from the corresponding directory in the main checkout.」（置き場所による違いは記載なし）。発火（実際のセッションでのフックの実行）は旧置き場で Codex 0.167 で確認済みで、読み込みの規則は同じため、新配置先での発火の実機確認は不要と判断した（`poc/design_03.md` の「確かめられなかったこと」に記載） |
 | 4 | git が本体の直下の `.worktree/<別名>` に worktree を作り、一覧・本体の特定・移動・削除・`--carry` の手順が従来どおり動く | **PoC** `poc/design_02.md` の 3・4・5・7 |
 | 5 | 配置先のディレクトリ全体が無視されているかを `git check-ignore`（存在しない固定の子 `.worktree/.brw-probe`）で検出できる | **PoC** `poc/design_02.md` の 1・6（0 無視・1 無視されない・128 判定不能。`.gitignore`・`info/exclude`・先頭の `/` なしのパターンで 0。別名だけを無視する設定は 1） |
 | 6 | 無視されていない本体で `git add -A` をすると worktree が gitlink として誤って追加される（警告の動機） | **PoC** `poc/design_02.md` の 2 |

@@ -189,7 +189,7 @@
 ### Codex: フックと linked worktree
 - **出典**: https://learn.chatgpt.com/docs/hooks（旧 https://developers.openai.com/codex/hooks からの転送。2026-11-28 取得。版・日付の表示は無い）。
 - **事実**: 「In a linked Git worktree, a project layer can read hooks from the corresponding directory in the main checkout.」。worktree 側に `.codex/` が要るか、worktree の置き場所（`.worktree/` や本体の外）による規則の違いは**記載なし**。フックの信頼は、フックの定義のハッシュで記録される（本体と worktree で共有するかは記載なし）。
-- **影響**: Codex が `.worktree/<別名>` の linked worktree でも、本体の `.codex/hooks.json` を読むことは、**一次資料では確認できず、実機でも未確認**（旧置き場では Codex 0.167 で確認済み）。`feasibility.md` の前提 3 を「未確認」のまま残す。
+- **影響**: 一次資料だけでは置き場所による違いが分からなかったため、実機（`hooks/list`）で確認した（`poc/design_03.md`）。`.worktree/<別名>` の linked worktree でも、空の `.codex/` があれば本体の `hooks.json` が読まれる。`feasibility.md` の前提 3 は確認済み。
 
 ### git: 配置先の挙動
 - **実機**: `poc/design_02.md`。無視の検出、`git add -A` の影響、旧置き場からの移動、ロックされた worktree。
@@ -217,7 +217,7 @@
 
 ## リスク
 - **EnterWorktree の承認**: 配置先の変更により、Claude Code の EnterWorktree は常に承認を求める。非対話（`-p`・CI）では `bypassPermissions` でないと通らない。BRW の置き換え（`cd`）は影響を受けない。
-- **Codex**: 上記のとおり未確認。確認できるまで、設計の実現性の判定は未通過。
+- **Codex**: 実機で読み込みを確認済み（`poc/design_03.md`）。実セッションでの発火は旧置き場で確認済みの規則と同じと判断し、実装後の実機検証で再確認する。
 - **無視設定が無い導入先**: 警告（7.10）が安全策。`brw-install-flow` の案内が入るまでの間、利用者が設定を足すまで gitlink の誤ステージの危険が残る。
 - **取りこぼし**: 17 か所の置き換えを、配置先モジュールの導入と試験（旧置き場の文字列が `scripts/` に残っていないことの検査）で防ぐ。
 

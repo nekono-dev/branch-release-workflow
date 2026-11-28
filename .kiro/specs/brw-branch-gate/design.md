@@ -470,13 +470,13 @@ BRW 案内: 置き換え | 拒否
 
 ### 実機（`claude -p`、`tests/real-env/` の方式）
 - 使い捨てリポジトリで、`git switch -c` の置き換え後に次の Bash 呼び出しの `pwd` が `<本体>/.worktree/<別名>` であること。EnterWorktree の `name` が拒否され、案内に従って `brw create` で作った worktree へ、Bash の `cd` で移れること（PoC #5・#9 の再現。2026-11-28 の更新で、`.worktree/` への EnterWorktree の承認は人の確認が要るため、`cd` で確かめる）。
-- `.worktree/<別名>` で開始したセッションでフックが届き、`mainOfStart` が `CLAUDE_PROJECT_DIR` から本体を導くこと（`poc/design_01.md` の 2）。Codex の linked worktree（`.worktree/<別名>`）でフックが届くこと（未確認の前提。`feasibility.md`）。
+- `.worktree/<別名>` で開始したセッションでフックが届き、`mainOfStart` が `CLAUDE_PROJECT_DIR` から本体を導くこと（`poc/design_01.md` の 2）。Codex の linked worktree（`.worktree/<別名>`）でフックが届くこと（読み込みは `poc/design_03.md` で確認済み。実セッションでの発火を `brw create` の実機で再確認する）。
 
 ## 運用上のリスク（2026-11-28 の更新）
 
 - **EnterWorktree の承認**: `.worktree/` への EnterWorktree は、Claude Code が承認を求める（BRW のフックの許可では省けず、非対話では `bypassPermissions` が要る）。worktree に入ったセッションからは、`.worktree/` の下の別の worktree へ EnterWorktree で移れない。Claude Code での作業場所の移動は、BRW の置き換えが使う Bash の `cd` が実用的。案内に注意を書く（D3）。
 - **無視設定が無い導入先**: 本体で `git add -A` をすると worktree が gitlink として誤ってステージされる。警告（7.10）が安全策で、`.worktree/` を無視する設定の追記の案内は `brw-install-flow`。
-- **Codex**: linked worktree の `.worktree/<別名>` でフックが届くかは、一次資料に記載がなく、実機でも未確認。
+- **Codex**: linked worktree の `.worktree/<別名>` で、worktree に空の `.codex/` があれば本体の `.codex/hooks.json` が読まれることを実機で確認した（`poc/design_03.md`）。`.codex/` が無い worktree では届かない（既存の規則どおり。BRW の `activateWorktree` が作る）。
 - **旧置き場の worktree**: BRW は自動で移さない。`brw-pr-handoff` の更新までの間、PR 本文だけが旧置き場 `.claude/worktrees/.brw/` に残る。
 
 ## セキュリティ
