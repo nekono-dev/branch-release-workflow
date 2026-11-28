@@ -108,10 +108,15 @@ flowchart TD
   C -- 欠け --> X1[中止 invalid-profile]
   C -- 良 --> D[戦略を選ぶ 配布の形]
   D -- 該当なし --> X2[中止 unknown-form]
-  D -- 該当 --> E[check 現在と最新を期限つきで比較]
+  D -- 該当 --> M{要確認の印が上限時間内か}
+  M -- はい --> X7[中止 update-failed 上限時間が過ぎてから再実行]
+  M -- いいえ --> E[check 現在と最新を期限つきで比較]
   E -- 判定できない --> X3[中止 unknown-current / unknown-latest]
-  E -- 最新 --> F[元の処理を続行 追加の操作なし]
-  E -- 古い --> G{起動し直し後か}
+  E -- 最新 --> MC[印があれば排他の中で消す]
+  MC --> F[元の処理を続行 追加の操作なし]
+  E -- 古い --> MD{要確認の印が残っているか}
+  MD -- はい --> X8[中止 update-failed 手動の復旧]
+  MD -- いいえ --> G{起動し直し後か}
   G -- はい --> X4[中止 update-not-effective]
   G -- いいえ --> H[update 更新]
   H -- 失敗 --> X5[中止 update-failed / update-not-effective]
@@ -120,7 +125,7 @@ flowchart TD
   I -- はい --> J[更新後のスクリプトを同じ引数で起動し直す]
   J --> K[子の終了コードで終了]
 ```
-- 確認と更新は、作業場所・記録・PR 本文など BRW が管理するものを作る前に行う（要件 2.5・3.4）。更新は導入先ごとの排他（`lock.mjs`）の中で行い、排他を取れない間は期限まで待ち、取れなければ `update-failed`（別の更新が実行中）で中止する。排他を取った直後に `check` をやり直し、他の実行がすでに更新していれば更新せずに続ける。前回の更新が期限切れで終わった印があるときの扱いは `lock.mjs` の節のとおり（上限時間が過ぎるまで中止、過ぎた後は再チェックして最新なら再開、古ければ手動の復旧）。配布 clone の `origin` の追跡参照が更新されるのは、BRW 自身の配布物であり、利用者の作業リポジトリではない。
+- 確認と更新は、作業場所・記録・PR 本文など BRW が管理するものを作る前に行う（要件 2.5・3.4）。更新は導入先ごとの排他（`lock.mjs`）の中で行い、排他を取れない間は期限まで待ち、取れなければ `update-failed`（別の更新が実行中）で中止する。排他を取った直後に `check` をやり直し、他の実行がすでに更新していれば更新せずに続ける。要確認の印（前回の更新が期限切れで終わった印）の扱いは、`check` より前に確認する（上限時間内なら中止）。`check` が最新なら、印を排他の中で消して続行し、古ければ印があるかぎり自動の更新はせず手動の復旧を案内する（`lock.mjs` の節）。期限は 3 種類で、`checkMs`（`check` の 1 回ごと。最初の確認と再チェックそれぞれ）、`lockWaitMs`（排他を取るまで）、`updateMs`（排他を取った後の更新全体と、印の上限時間）。配布 clone の `origin` の追跡参照が更新されるのは、BRW 自身の配布物であり、利用者の作業リポジトリではない。
 - 起動し直した子は、同じ確認を最初から行う（省かない）。子が「まだ古い」と判定したときは、更新を繰り返さず中止する。起動し直しの印は環境変数 `FRESH_START_RESTARTED` で、親だけが付け、確認を飛ばす効果はない（要件 1.7 に反しない）。
 
 ## Requirements Traceability
@@ -193,6 +198,7 @@ type CheckResult = {
   fresh: boolean;
   current: Revision;
   latest: Revision;
+  plan: unknown;   // 戦略が update に引き渡す固有の確認結果（git: 既定ブランチ名と確かめた SHA。プラグイン: 選んだ導入・マーケットプレイス・取得先）。core は中身を読まない
 };
 
 type UpdateResult =
@@ -203,7 +209,7 @@ interface Strategy {
   id: string;                                 // "git" | "claude-plugin" など。案内の語
   matches(root: string): boolean;             // この導入の形か
   check(ctx: { root: string; deadline: number }): Promise<Probe<CheckResult>>;
-  update(ctx: { root: string; latest: Revision; deadline: number }): Promise<UpdateResult>;
+  update(ctx: { root: string; latest: Revision; plan: unknown; deadline: number }): Promise<UpdateResult>; // 更新前の状態の記録（snapshot）と、失敗時の state の決定は、各戦略が下記の規則で内部に持つ
 }
 
 interface Profile {
@@ -213,7 +219,8 @@ interface Profile {
   manualUpdate: (strategyId: string) => string[]; // 手動で更新する手順（必須）
   strategies?: Strategy[];                    // 省略時は組み込みの 2 つ
   checkMs?: number;                           // 既定 10000
-  updateMs?: number;                          // 既定 180000
+  updateMs?: number;                          // 既定 180000。排他を取った後の更新全体の上限。要確認の印の「上限時間」にも使う
+  lockWaitMs?: number;                        // 既定 30000。排他を取るまでの待ち時間の上限（更新の上限とは別）
 }
 
 type AbortCode =
@@ -231,7 +238,7 @@ function ensureFresh(profile: Profile, argv: string[]): Promise<Outcome>;
 function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 ```
 - Preconditions: `profile.name`・`root`・`entry`・`manualUpdate` が揃っている（欠けたら確認を行わず `invalid-profile` で中止し、欠けた項目名を `reason` に示す）。
-- Postconditions: `fresh` のとき、何も出力せず何も変更しない。`abort` のとき、ブランチ・worktree・記録を作らない（呼び出し側が最初の副作用の前に呼ぶ）。`restarted` のとき、子の終了コードをそのまま返す。
+- Postconditions: `fresh` のとき、何も出力せず、利用者の作業ツリー・導入物を変更しない（許される副作用は、`check` が行う取得だけ。git の戦略では、BRW の clone の `refs/remotes/origin/<既定ブランチ>` の更新。要確認の印があるときは、印の削除が加わる）。`abort` のとき、ブランチ・worktree・記録を作らない（呼び出し側が最初の副作用の前に呼ぶ）。`restarted` のとき、子の終了コードをそのまま返す。
 - Invariants: `deadline` は絶対時刻で、複数の呼び出しの合計が上限を超えない。起動し直しは 1 回まで（`FRESH_START_RESTARTED` がある子が「古い」と判定したら `update-not-effective`）。
 
 **中止の出力形式（標準エラー、終了コード 1）**
@@ -246,10 +253,17 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 **失敗時の状態の契約**: 戦略は `update` に入る前に、更新前の状態（スナップショット）を記録する。`update` が失敗または期限切れで終わったら、導入の記録・ファイルを**読み直して**、次の 4 つのどれかを `state` に返す。推測では決めない。
 | state | 条件 | 案内の言い方 |
 |-------|------|--------------|
-| `unchanged` | 読み直した状態がスナップショットと完全に一致する。git: ブランチ・HEAD・`git status --porcelain` の出力が同じで、`MERGE_HEAD` と index のロックが無い。プラグイン: 導入の記録の `installPath`・`version`・`gitCommitSha` が同じで、導入先ディレクトリの**指紋**（ファイルの相対パス・サイズ・更新時刻を並べたものの SHA-256）が同じで、起動スクリプトが存在する。指紋を計算できないときは `unknown` | 「更新前のまま変わっていません」 |
-| `changed-usable` | スナップショットと異なるが、導入の記録に残り、起動スクリプトが存在する（部分的に書き換わっていないこと・起動できることまでは確認していない） | 「更新前から変わっています。導入は残っていますが、起動できることは確認していません」 |
-| `unusable` | 導入の記録に無い、または起動スクリプトが無い | 「導入が失われています」＋復旧コマンド |
+| `unchanged` | 戦略が更新前に記録したスナップショットと、読み直した値が**完全に一致する**。比べる値は戦略ごとに下の「戦略ごとの状態の規則」で定める。比べられない・計算できないときは `unknown` | 「確認した範囲（<比べた項目>）では、更新前のまま変わっていません」 |
+| `changed-usable` | スナップショットと異なるが、その戦略が定める「導入が残り起動できる手がかり」が揃う（起動できることまでは確認していない） | 「更新前から変わっています。導入は残っていますが、起動できることは確認していません」 |
+| `unusable` | 「導入が残り起動できる手がかり」が欠ける | 「導入が失われています」＋復旧コマンド |
 | `unknown` | 読み直せない、または**期限切れ・強制終了で終わった**（子孫が動き続けている可能性を排除できないため、状態を確定しない） | 「状態を確認できません」＋確認・復旧コマンド |
+**戦略ごとの状態の規則**（スナップショットは `update` に入る前に記録する）:
+| 戦略 | スナップショットとして比べる値（`unchanged` の条件） | 導入が残り起動できる手がかり（`changed-usable`・`unusable` の分かれ目） |
+|------|--------------------------------------------------------|----------------------------------------------------------------------|
+| git | 現在のブランチ名・HEAD の SHA・`git status --porcelain=v1 -z` の出力・`git diff HEAD` の出力の SHA-256（追跡ファイルの内容）。さらに `MERGE_HEAD` と index のロックが無いこと。未追跡ファイルは名前だけを比べる（更新は未追跡のファイルを上書きせず、git が拒否するため） | HEAD が解決でき、`MERGE_HEAD`・index のロックが無く、`entry` のファイルが作業ツリーにある |
+| プラグイン | 導入の記録の `installPath`・`version`・`gitCommitSha`、導入先ディレクトリの**内容の指紋**（相対パスの並びと、各ファイルの内容の SHA-256 から作る SHA-256）、起動スクリプトの存在 | 導入の記録に選んだ導入が残り、その `installPath` に起動スクリプトがある |
+案内は、実際に比べた項目の範囲に限って「更新前のまま」と言う。
+
 `core.mjs` は `state` をそのまま案内の理由に含め、`changed-usable`・`unusable`・`unknown` のときの `next` に、確認と復旧に使う実行コマンド（`scope`・実行場所つき）を含める。要件 3.3 のとおり、更新前の版が使えるかどうかを、`unchanged` だけが「更新前のまま」と言える。
 
 **成功時の出力**: 更新して起動し直すときだけ 1 行（`<name> を更新しました（<旧> → <新>）。更新後の版で続けます。`）を標準エラーに出す。Claude プラグインの形では、さらに「フック・スキルの定義の反映には Claude の再起動が必要」の 1 行を出す。
@@ -275,7 +289,7 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 - 排他は `update` の前後だけ保持し、通常は `finally` で解放する。**期限切れ・強制終了で終わった `update` の後は、排他を解放せず「要確認の印」に変える**（時刻 `timedOutAt` を書く。子孫が更新を続けている可能性を排除できないため）。
 - 印があるときの規則（利用者の決定: 更新の上限時間を設け、時間が過ぎたら再チェックして、更新されていれば再開、されていなければ手動の復旧）:
   1. `timedOutAt` から `updateMs`（更新の上限時間）が過ぎるまでは、`check` の結果にかかわらず更新を行わず、`update-failed`（直前の更新が期限切れで終わりました。上限時間が過ぎてから再実行してください）で中止する。
-  2. 上限時間が過ぎた後は、`check` で実際の状態を確かめる。**最新だった**（子孫の更新が終わっていた）なら、印を消して元の操作を続ける。**古いままだった**なら、自動の更新はせず `update-failed`（手動の復旧が必要）で中止し、`next` に手動の更新手順（`profile.manualUpdate`）と、印の場所を示す。印は、のちの `check` が最新を返したときに自動で消える（手動の復旧の後に、もう一度実行すれば進む）。
+  2. 上限時間が過ぎた後は、`check` で実際の状態を確かめる。**最新だった**（子孫の更新が終わっていた）なら、印を消して元の操作を続ける。**古いままだった**なら、自動の更新はせず `update-failed`（手動の復旧が必要）で中止し、`next` に手動の更新手順（`profile.manualUpdate`）と、印の場所を示す。印は、のちの `check` が最新を返したときに、排他を取って消される（手動の復旧の後に、もう一度実行すれば進む）。再チェックは通常の `check` と同じで、git の戦略では追跡参照の取得を伴う（作業ツリー・HEAD には触れない）。
 - 残る限界: 上限時間を超えて動き続ける子孫が、最新と判定された後に更新を書き換える可能性は排除できない（利用者が受け入れた限界。`check` は導入の記録と起動スクリプトの存在まで確かめる）。
 
 #### `strategy-git.mjs`
@@ -290,7 +304,7 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
   - (a) HEAD が `refs/heads/b` なら `git merge --ff-only L`。
   - (b) detached HEAD（固定）なら、ローカルの `b` があるときは `b` が `L` の祖先であることを確かめてから `git switch b` → `git merge --ff-only L`。無いときは `git switch -c b L` の後に `git branch --set-upstream-to=origin/b b`。
   - (c) 他のブランチ上（開発ブランチ）でも、HEAD が `L` の祖先（開発ブランチに独自の commit が無く、単に遅れている）なら `git merge --ff-only L` で fast-forward する。独自の commit があり `L` を含まない（分岐）ときは、更新せず `failed` とし、`next` に `git merge origin/b`（利用者が行う取り込み）を示す。マージ・リベースは自動で行わない。
-  - (d) git が拒否した場合（未コミットの変更の衝突、`switch` の拒否）は、ブランチと HEAD を読み直してスナップショットと比べる。一致すれば `failed`・`state: unchanged`。途中で `switch` が成功した後に `merge` が失敗するなど異なる場合は `state: changed-usable`（作業ツリーに `MERGE_HEAD` や index のロックが無いことを確かめられないときは `unknown`）とし、現在のブランチと HEAD、元のブランチ名と元の HEAD を `detail` と `next` に示す。`git` の出力を `detail` に、`next` に「変更を commit か退避してから再実行」を示す。期限切れで終わったときは `unknown`。
+  - (d) git が拒否した場合（未コミットの変更の衝突、`switch` の拒否）は、上の「戦略ごとの状態の規則」（git の行）で読み直して `state` を決める（全項目が一致なら `unchanged`、異なるが手がかりが揃えば `changed-usable`、手がかりが欠けるか読み直せなければ `unusable`・`unknown`）。異なる場合は、現在のブランチと HEAD、元のブランチ名と元の HEAD を `detail` と `next` に示す。`git` の出力を `detail` に、`next` に「変更を commit か退避してから再実行」を示す。期限切れで終わったときは `unknown`。
 - `restartRoot` は `root` 自身。
 
 #### `strategy-claude-plugin.mjs`
@@ -301,7 +315,7 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 
 - `matches(root)`: `root` の実体が `<設定>/plugins/cache/<マーケットプレイス>/<プラグイン>/<版>` の形で、`<設定>/plugins/installed_plugins.json` がある。`<設定>` は `root` から上へたどって求める（`CLAUDE_CONFIG_DIR` に依存しない）。
 - `check`: (1) `installed_plugins.json`（`version: 2`）から、`installPath` の実体が `root` に一致する導入（候補）を集める（複数のプロジェクトが同じ版のキャッシュを共有するため複数になりうる）。(2) **実行元の導入を 1 件に決める規則**: 実行時のカレントディレクトリのリポジトリの作業ツリーの最上位（`git rev-parse --show-toplevel`）、その本体の作業ツリー（`git worktree list` の先頭）の順に、候補の `projectPath`（scope が `project`）と一致するものを選ぶ。どれにも一致しなければ、候補のうち scope が `user` のものを選ぶ。それでも 1 件に決まらない、または候補が 0 件なら `invalid`（`unknown-current` で中止。理由に「導入先を一意に決められない」と候補の `scope`・`projectPath` を示す）。選んだ導入の `scope` が `user`・`project` 以外（`local`・`managed`）なら `unsupported`（自動更新の対象外。実機で確かめていないため）。`gitCommitSha` が無い・形式が違うときも `invalid`。(3) `known_marketplaces.json[<マーケットプレイス>].source` から取得先を決める（`source: "github"` で `ref` が無いものは `https://github.com/<repo>.git`、`source: "git"` で `ref` が無いものは `url`。`ref`・`path` など他のキーがあるもの、その他の種類は `unsupported`。ブランチは指定せず `HEAD`）。(4) `git ls-remote <取得先> HEAD` の先頭の SHA を最新とし、選んだ導入の `gitCommitSha` と比べる。
-- `update`（`cwd` は `scope` が `project` なら選んだ導入の `projectPath`、`user` なら導入の記録のあるディレクトリ。別のディレクトリで実行しない。`poc/design_01.md` の 7）: (1) `claude plugin marketplace update <マーケットプレイス>`。(2) `claude plugin update <プラグイン>@<マーケットプレイス> --scope <scope> --json`。(3) 記録を読み直し、同じ `scope`・`projectPath` の導入の `gitCommitSha` が最新と一致すれば成功。一致しない（版が同じで `up_to_date` と答えた）ときは、(4) 同じ `cwd`・`scope` で `claude plugin uninstall` → `claude plugin install` を実行し、記録を読み直す（`poc/design_01.md` の 3・6・7）。(5) それでも一致しなければ `not-effective`。各段階の失敗の直後に、導入の記録とファイルを読み直し、失敗契約の `state` を決める（(1)(2) で失敗し、記録がスナップショットと同じで起動スクリプトがあれば `unchanged`。(4) の `uninstall` が始まった後に失敗した場合は `unchanged` にせず、導入の記録に残り起動スクリプトがあれば `changed-usable`、記録に無ければ `unusable`）。期限切れで終わったときは常に `unknown`。`unusable`・`unknown` のときの `next` に、`claude plugin install <プラグイン>@<マーケットプレイス> --scope <scope>`（実行場所つき）を示す。
+- `update`（`cwd` は `scope` が `project` なら選んだ導入の `projectPath`、`user` なら導入の記録のあるディレクトリ。別のディレクトリで実行しない。`poc/design_01.md` の 7）: (1) `claude plugin marketplace update <マーケットプレイス>`。(2) `claude plugin update <プラグイン>@<マーケットプレイス> --scope <scope> --json`。(3) 記録を読み直し、同じ `scope`・`projectPath` の導入の `gitCommitSha` が最新と一致すれば成功。一致しない（版が同じで `up_to_date` と答えた）ときは、(4) 同じ `cwd`・`scope` で `claude plugin uninstall` → `claude plugin install` を実行し、記録を読み直す（`poc/design_01.md` の 3・6・7）。(5) それでも一致しなければ `not-effective`。各段階の失敗の直後に、上の「戦略ごとの状態の規則」（プラグインの行）で読み直して `state` を決める（導入の記録・指紋が全項目一致なら `unchanged`）。ただし (4) の `uninstall` が始まった後の失敗は、一致していても `unchanged` にせず、手がかりが揃えば `changed-usable`、欠ければ `unusable` とする（入れ直しは導入先を作り直すため）。期限切れで終わったときは常に `unknown`。`unusable`・`unknown` のときの `next` に、`claude plugin install <プラグイン>@<マーケットプレイス> --scope <scope>`（実行場所つき）を示す。
 - 共有キャッシュの扱い: 同じ版のキャッシュ（`installPath`）を複数の導入が共有しているとき、入れ直し (4) は同じ版のキャッシュを上書きするため、他の導入への影響を確かめていない。そこで、**入れ直し (4) は、記録の中でその `installPath` を使う導入が選んだ 1 件だけのときに限って行う**。他の導入も共有しているときは入れ直さず `not-effective` で中止し、`next` に手動の手順（共有している導入の一覧つき）を示す。版を上げた更新 (2) は新しい版のキャッシュを作り、古い版のキャッシュを残すため、この制限の対象外。同時に更新しないよう `lock.mjs` の排他を取る。
 - `restartRoot` は読み直した記録の、選んだ導入の `installPath`。
 - `claude` が無い・コマンドが失敗・期限切れのときは `failed`（失敗の理由と、読み直した `state` を `detail` と `next` に示す。要件 3.3）。
@@ -309,7 +323,7 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 ### BRW
 
 #### `brw-fresh.mjs`（BRW 固有の差）
-- 提供: `freshStart(argv: string[]): void`。`Profile` を組み立てて `runFreshStart` を呼ぶだけ。
+- 提供: `freshStart(argv: string[]): Promise<void>`（`runFreshStart` を待つ）。`Profile` を組み立てて `runFreshStart` を呼ぶだけ。
 - 与える差: `name: "BRW"`、`root`（`import.meta.url` の実体から `scripts/` の親）、`entry: "scripts/brw.mjs"`、`manualUpdate`（Claude プラグインは `claude plugin update branch-release-workflow@nekono-dev`、git の clone は `git -C <root> pull --ff-only` 相当を示す）。
 - 他の製品の存在を前提にした記述を持たない（要件 4.7）。
 
@@ -342,7 +356,7 @@ function runFreshStart(profile: Profile, argv: string[]): Promise<void>;
 - 3 つの結果と案内の形が、戦略によらず同じ（4.3）。中止の出力に固定の見出し・理由・次の手順がある。
 - 閉じていること: `scripts/fresh-start/` の import がディレクトリ内と `node:` に限られ（4.1）、`branch-release-workflow`・`BRW`・`brw`・`cc-sdd` などの製品名を含まない（4.5）。
 - 確認を飛ばす経路が無いこと: `FRESH_START_RESTARTED` を外から付けて起動しても、古ければ更新せず中止し、最新なら続行する（1.7）。
-- 期限と後始末: 応答しない外部コマンドが期限で打ち切られ、孫プロセスも残らない（3.5）。排他が取れない間は期限まで待って `update-failed` になり、古い排他だけが取り直される（3.3）。更新が失敗・期限切れで終わったときの `state` が、スナップショットと読み直した事実から `unchanged`・`changed-usable`・`unusable`・`unknown` を返し、期限切れは常に `unknown` になること、期限切れの後は要確認の印が残り、上限時間が過ぎるまで他の実行が `update-failed` になること、上限時間が過ぎた後は再チェックで最新なら印が消えて続行し、古ければ自動更新せず手動の復旧を案内すること（3.3）。`unchanged` がファイルの指紋（プラグイン）・`git status` の出力（git）の一致まで確かめること（3.3）。
+- 期限と後始末: 応答しない外部コマンドが期限で打ち切られ、孫プロセスも残らない（3.5）。排他が取れない間は期限まで待って `update-failed` になり、古い排他だけが取り直される（3.3）。更新が失敗・期限切れで終わったときの `state` が、スナップショットと読み直した事実から `unchanged`・`changed-usable`・`unusable`・`unknown` を返し、期限切れは常に `unknown` になること、期限切れの後は要確認の印が残り、上限時間が過ぎるまで他の実行が `update-failed` になること、上限時間が過ぎた後は再チェックで最新なら印が消えて続行し、古ければ自動更新せず手動の復旧を案内すること（3.3）。印の確認が `check` より前に行われ、最新と判定されたときも印が排他の中で消されること、印があるかぎり更新が起きないこと、`lockWaitMs`・`checkMs`・`updateMs` がそれぞれ別に効くこと（1.5・2.5・3.3・3.5）。`unchanged` がファイルの指紋（プラグイン）・`git status` の出力（git）の一致まで確かめること（3.3）。
 
 ### Integration Tests（`tests/fresh-start-strategies.mjs`）
 - git: 実測の 9 状態（`poc/design_02.md`）を一時リポジトリで再現し、最新・遅れ・未コミットの変更の保護・固定・開発ブランチの分岐・オフラインの結果を確かめる（1.8・1.9・2.6・2.7・3.1）。加えて、独自の commit が無い遅れた開発ブランチが fast-forward で更新されること、判定の後で配布元が進んでも確かめた SHA だけに更新されること、固定された clone で `switch` が拒否されたとき HEAD が動かないこと、`merge` が失敗したとき現在のブランチと HEAD が案内に示されること（2.1・2.6・2.7・3.3）。
